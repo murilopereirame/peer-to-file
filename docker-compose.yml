@@ -11,6 +11,11 @@ services:
       P2F_HOST: 10.0.0.1 # <-- change to your VPN IP
       P2F_PORT: "8000"
       P2F_TRACKER_PORT: "8001"
+      # Behind a reverse proxy (nginx)? Bind to localhost so only the proxy
+      # reaches the app, and advertise the public origin instead — see
+      # docs/nginx.example.conf:
+      # P2F_HOST: 127.0.0.1
+      # P2F_PUBLIC_URL: https://files.example.com
     volumes:
       - /srv/files:/data:ro # <-- change to the directory you want to share
     restart: unless-stopped

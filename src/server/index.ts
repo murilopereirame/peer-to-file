@@ -1,6 +1,7 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { WebSocketServer } from 'ws'
 import TrackerServer from 'bittorrent-tracker/server'
 import { loadConfig, type Config } from './config.ts'
 import { createTorrentStore } from './torrents.ts'
@@ -48,6 +49,27 @@ export async function startServer (
   const store = createTorrentStore()
   const app = createApp({ config, store, seeder, version })
   const server = http.createServer(app)
+
+  // Serve the tracker WebSocket on the main HTTP port too (at /tracker), so
+  // a reverse proxy only needs a single upstream. Same swarm state as the
+  // standalone tracker port.
+  const trackerWss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: false,
+    clientTracking: false
+  })
+  server.on('upgrade', (req, socket, head) => {
+    if (req.url?.split('?')[0] === '/tracker') {
+      trackerWss.handleUpgrade(req, socket, head, ws => {
+        // bittorrent-tracker reads the request off the socket (ws >= 3
+        // removed upgradeReq); mirror what its own ws server does.
+        ;(ws as unknown as { upgradeReq: unknown }).upgradeReq = req
+        tracker.onWebSocketConnection(ws)
+      })
+    } else {
+      socket.destroy()
+    }
+  })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
     server.listen(config.port, config.host, () => {

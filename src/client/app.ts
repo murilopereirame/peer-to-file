@@ -69,7 +69,12 @@ function setStatus (msg: string, kind: '' | 'ok' | 'error' = ''): void {
 
 function normalizeServer (input: string): string {
   let addr = input.trim().replace(/\/+$/, '')
-  if (!/^https?:\/\//.test(addr)) addr = `http://${addr}`
+  if (!/^https?:\/\//.test(addr)) {
+    // Default to the page's own scheme: on an https page (e.g. behind an
+    // nginx TLS proxy) a http:// API call would be blocked as mixed content.
+    const scheme = location.protocol === 'https:' ? 'https' : 'http'
+    addr = `${scheme}://${addr}`
+  }
   return addr
 }
 

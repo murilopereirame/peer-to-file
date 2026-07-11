@@ -64,7 +64,8 @@ const config = () => ({
   host: '127.0.0.1',
   port: PORT,
   trackerPort: TRACKER_PORT,
-  publicHost: null
+  publicHost: null,
+  publicUrl: null
 })
 
 let running: RunningServer = await startServer(config(), consoleLogger)
@@ -89,12 +90,14 @@ try {
   const dirText = await page.textContent('#listing li.dir')
   if (!dirText?.includes('movies')) fail(`expected movies dir in listing, got: ${dirText}`)
   await page.click('#listing li.dir')
+  // navigation is done once the breadcrumb shows the folder we clicked
+  await page.waitForFunction(
+    () => document.querySelector('#breadcrumb')?.textContent?.includes('movies') ?? false,
+    undefined,
+    { timeout: 10_000 }
+  )
   await page.waitForSelector('#listing li.file')
-  console.log('✓ folder navigation works')
-
-  // breadcrumb shows root + current folder
-  const crumb = await page.textContent('#breadcrumb')
-  if (!crumb?.includes('movies')) fail('breadcrumb missing current folder')
+  console.log('✓ folder navigation works (breadcrumb shows current folder)')
 
   // 3. start the download
   const downloadPromise = page.waitForEvent('download', { timeout: 300_000 })

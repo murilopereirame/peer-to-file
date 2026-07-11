@@ -66,6 +66,7 @@ declare module 'bittorrent-tracker/server' {
     http: HttpServer | null
     listen (port: number, hostname?: string, onlistening?: () => void): void
     close (callback?: () => void): void
+    onWebSocketConnection (socket: unknown, opts?: { trustProxy?: boolean }): void
   }
 }
 
