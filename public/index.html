@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>peer-to-file</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128230;</text></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script type="module">
+    // The WebTorrent browser bundle is ESM; expose it as a global for app.js.
+    // Deferred scripts run in document order, so app.js sees it.
+    import WebTorrent from './vendor/webtorrent.min.js'
+    window.WebTorrent = WebTorrent
+  </script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>peer-to-file</h1>
+    <form id="connect-form">
+      <input id="server-input" type="text" placeholder="server ip:port (e.g. 10.0.0.1:8000)"
+             autocomplete="off" spellcheck="false" required>
+      <button type="submit">Connect</button>
+    </form>
+    <div id="conn-status" class="status"></div>
+  </header>
+
+  <main>
+    <section id="browser" hidden>
+      <nav id="breadcrumb" aria-label="path"></nav>
+      <ul id="listing"></ul>
+    </section>
+
+    <section id="downloads-panel" hidden>
+      <h2>Downloads</h2>
+      <ul id="downloads"></ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a>
+       — no auth, VPN is the trust boundary</p>
+  </footer>
+</body>
+</html>

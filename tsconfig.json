@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true
+  },
+  // scripts/ is excluded: e2e-browser.ts depends on the optional, unsaved
+  // playwright-core package and evaluates code in a browser context.
+  "include": [
+    "src/server/**/*.ts",
+    "src/types/**/*.d.ts",
+    "test/**/*.ts"
+  ]
+}

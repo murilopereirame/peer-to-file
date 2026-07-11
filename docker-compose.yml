@@ -1,0 +1,27 @@
+services:
+  peer-to-file:
+    build: .
+    # Host networking is the recommended mode on Linux: the server binds the
+    # VPN interface directly and WebRTC traffic avoids Docker's NAT.
+    network_mode: host
+    environment:
+      P2F_ROOT: /data
+      # SECURITY: there is no authentication — bind to your WireGuard/VPN IP,
+      # never to a publicly reachable address. See README.
+      P2F_HOST: 10.0.0.1 # <-- change to your VPN IP
+      P2F_PORT: "8000"
+      P2F_TRACKER_PORT: "8001"
+    volumes:
+      - /srv/files:/data:ro # <-- change to the directory you want to share
+    restart: unless-stopped
+
+    # Alternative without host networking: delete network_mode above, set
+    # P2F_HOST to 0.0.0.0 and publish the ports on the VPN IP only:
+    #
+    # ports:
+    #   - "10.0.0.1:8000:8000"
+    #   - "10.0.0.1:8001:8001"
+    #
+    # WebRTC then flows through Docker's NAT (usually fine for the
+    # container -> browser direction); the HTTP webseed fallback keeps
+    # downloads working either way.

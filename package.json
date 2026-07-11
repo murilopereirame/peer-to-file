@@ -1,0 +1,30 @@
+{
+  "name": "peer-to-file",
+  "version": "0.1.0",
+  "description": "Minimal self-hosted P2P file browser: browse a server's file tree over HTTP and download files via WebTorrent (chunked, resumable) over a trusted VPN link.",
+  "type": "module",
+  "main": "src/server/index.ts",
+  "scripts": {
+    "start": "node src/server/index.ts",
+    "build": "tsc -p tsconfig.client.json",
+    "check": "tsc -p tsconfig.json && tsc -p tsconfig.client.json --noEmit",
+    "test": "node --test test/*.test.ts",
+    "e2e": "npm run build && node scripts/e2e-browser.ts"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "bittorrent-tracker": "^11.2.2",
+    "create-torrent": "^6.1.2",
+    "express": "^4.21.2",
+    "parse-torrent": "^11.0.21",
+    "webtorrent": "^3.0.16"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+}
