@@ -53,8 +53,11 @@ export class AuthDb {
 
   constructor (path: string) {
     this.db = new DatabaseSync(path)
+    // Default (rollback) journal mode, not WAL: this is a single-process,
+    // low-concurrency local database, so WAL's extra -shm/-wal side files
+    // and locking buy nothing here and are one more thing that can misbehave
+    // under a sandboxed CI filesystem.
     this.db.exec(`
-      PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY,
         username TEXT NOT NULL UNIQUE,
