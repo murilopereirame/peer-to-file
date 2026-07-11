@@ -47,11 +47,23 @@ export function createTorrentStore (): TorrentStore {
   return { getMeta }
 }
 
-function buildMeta (absPath: string): Promise<ParsedTorrent> {
+// Aim for ~1024 pieces, clamped to [256 KiB, 8 MiB]. create-torrent's default
+// (16 KiB minimum) produces tens of thousands of pieces for big files, which
+// drags transfers down: every piece is a request round-trip, a hash check and
+// a browser storage write. Fewer, larger pieces keep the pipe full.
+export function pieceLengthFor (size: number): number {
+  const target = Math.ceil(size / 1024)
+  let pieceLength = 256 * 1024
+  while (pieceLength < target && pieceLength < 8 * 1024 * 1024) pieceLength *= 2
+  return pieceLength
+}
+
+async function buildMeta (absPath: string): Promise<ParsedTorrent> {
+  const { size } = await fs.stat(absPath)
   return new Promise((resolve, reject) => {
     // `private` keeps conforming clients off DHT/PEX; announce/urlList live
     // outside the info dict and get filled in per request.
-    createTorrent(absPath, { private: true }, (err, buf) => {
+    createTorrent(absPath, { private: true, pieceLength: pieceLengthFor(size) }, (err, buf) => {
       if (err) return reject(err)
       parseTorrent(buf).then(resolve, reject)
     })
