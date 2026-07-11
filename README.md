@@ -93,6 +93,28 @@ the backend.
 | `P2F_PORT`         | `8000`      | HTTP port: API, webseed and the web client                      |
 | `P2F_TRACKER_PORT` | `8001`      | Embedded WebSocket tracker port                                 |
 | `P2F_PUBLIC_HOST`  | *(unset)*   | Host override for tracker/webseed URLs handed to clients (only needed behind port remapping; normally derived from each request's `Host` header) |
+| `P2F_PUBLIC_URL`   | *(unset)*   | Public origin when behind a reverse proxy, e.g. `https://files.example.com` — see below |
+
+## Behind a reverse proxy (nginx)
+
+Set `P2F_PUBLIC_URL` to the public origin and bind the app to localhost:
+
+```sh
+P2F_HOST=127.0.0.1 P2F_PUBLIC_URL=https://files.example.com
+```
+
+In this mode the tracker WebSocket is served **on the main HTTP port at `/tracker`**, and
+all URLs handed to clients (announce, webseed, magnet) use the public origin with the
+right schemes (`https`/`wss` — plain `http`/`ws` would be blocked as mixed content on an
+HTTPS page). nginx therefore needs exactly one upstream and two location blocks: a
+WebSocket-upgrade one for `/tracker` and a plain one for everything else. A complete,
+commented example lives in [`docs/nginx.example.conf`](docs/nginx.example.conf).
+
+The same security rule applies one layer up: TLS is not authentication. Bind the nginx
+listener to the VPN IP, or add auth (basic auth, client certs) at the proxy.
+
+The separate tracker port (`P2F_TRACKER_PORT`) keeps running for direct/VPN access but
+does not need to be exposed through the proxy.
 
 ## Development
 

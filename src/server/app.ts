@@ -73,12 +73,21 @@ export function createApp ({ config, store, seeder, version }: AppDeps): Express
     const meta = await store.getMeta(abs)
     const rel = path.relative(config.root, abs)
 
-    const hostHeader = req.headers.host ?? `${bracketHost(config.host)}:${config.port}`
-    const host = config.publicHost ? bracketHost(config.publicHost) : hostWithoutPort(hostHeader)
-    const httpHostPort = config.publicHost ? `${host}:${config.port}` : hostHeader
+    let announce: string[]
+    let webseed: string
+    if (config.publicUrl) {
+      // Reverse-proxy mode: everything goes through the public origin, with
+      // the tracker WebSocket on the same port at /tracker (wss when https).
+      announce = [`${config.publicUrl.replace(/^http/, 'ws')}/tracker`]
+      webseed = `${config.publicUrl}/api/raw?path=${encodeURIComponent(rel)}`
+    } else {
+      const hostHeader = req.headers.host ?? `${bracketHost(config.host)}:${config.port}`
+      const host = config.publicHost ? bracketHost(config.publicHost) : hostWithoutPort(hostHeader)
+      const httpHostPort = config.publicHost ? `${host}:${config.port}` : hostHeader
 
-    const announce = [`ws://${host}:${config.trackerPort}`]
-    const webseed = `http://${httpHostPort}/api/raw?path=${encodeURIComponent(rel)}`
+      announce = [`ws://${host}:${config.trackerPort}`]
+      webseed = `http://${httpHostPort}/api/raw?path=${encodeURIComponent(rel)}`
+    }
 
     seeder.ensureSeeding(abs, meta)
 
