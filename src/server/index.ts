@@ -11,6 +11,35 @@ import { createAuthService } from './auth.ts'
 import { AuthDb } from './db.ts'
 import { consoleLogger, type Logger } from './log.ts'
 
+/**
+ * Bounds a shutdown step so one misbehaving subsystem can't hang the whole
+ * process forever — log and move on instead. A close()/shutdown path should
+ * always have a predictable worst-case duration (docker stop, k8s SIGTERM,
+ * a CI teardown hook all expect that).
+ */
+function withTimeout (promise: Promise<void>, ms: number, label: string, log: Logger): Promise<void> {
+  return new Promise<void>(resolve => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      log.warn(`${label} did not finish within ${ms}ms — continuing shutdown`)
+      resolve()
+    }, ms)
+    timer.unref?.()
+    promise.then(
+      () => { if (!settled) { settled = true; clearTimeout(timer); resolve() } },
+      (err: unknown) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        log.warn(`${label} failed: ${err instanceof Error ? err.message : String(err)}`)
+        resolve()
+      }
+    )
+  })
+}
+
 export interface RunningServer {
   config: Config
   server: http.Server
@@ -132,11 +161,17 @@ export async function startServer (
   }
 
   async function close (): Promise<void> {
-    await new Promise<void>(resolve => tracker.close(() => resolve()))
-    await seeder.destroy()
+    await withTimeout(
+      new Promise<void>(resolve => tracker.close(() => resolve())),
+      3000, 'tracker.close()', log
+    )
+    await withTimeout(seeder.destroy(), 3000, 'seeder.destroy()', log)
     for (const socket of trackerSockets) socket.destroy()
     trackerSockets.clear()
-    await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() })
+    await withTimeout(
+      new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() }),
+      3000, 'server.close()', log
+    )
     db?.close()
   }
 
@@ -149,7 +184,10 @@ if (isMain) {
   const shutdown = () => {
     consoleLogger.info('shutting down')
     running.close().then(() => process.exit(0))
-    setTimeout(() => process.exit(1), 3000).unref()
+    // close() itself now bounds each step to 3s (worst case ~9s across the
+    // three steps), so give it enough room to actually finish gracefully
+    // before this hard fallback kicks in.
+    setTimeout(() => process.exit(1), 10_000).unref()
   }
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
