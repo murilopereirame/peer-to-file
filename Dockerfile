@@ -12,10 +12,19 @@ RUN npm run check && npm run build
 FROM node:22-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
+
+# gosu: drop from root to the `node` user after the entrypoint fixes
+# ownership of a bind-mounted /config (see docker-entrypoint.sh). The same
+# well-established pattern the official postgres/mysql images use.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
 COPY --from=build /app/public ./public
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # /config holds the SQLite auth database (users, sessions, API tokens)
 RUN mkdir /config && chown node:node /config
@@ -29,6 +38,8 @@ ENV P2F_ROOT=/data \
     P2F_DB=/config/p2f.db
 
 EXPOSE 8000 8001
-USER node
 VOLUME /config
+# Stays root here: the entrypoint fixes /config ownership, then execs the
+# actual server as `node` — the app process itself never runs as root.
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "src/server/index.ts"]

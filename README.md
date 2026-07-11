@@ -203,6 +203,12 @@ build.
   The database stores only scrypt password hashes and SHA-256 token/session hashes, so
   at-rest encryption of the DB adds little; if you need it, put `P2F_DB` on an encrypted
   volume (sqlcipher would require a native build of a different driver).
+- **Root entrypoint that drops to `node`** — the container starts as root only long
+  enough to fix ownership of a bind-mounted `/config` (Docker auto-creates a missing
+  bind-mount host directory as root, which the app's non-root user then can't write
+  into), then `exec`s the actual server as `node` via `gosu`. Named volumes don't need
+  this (Docker seeds them from the image, already owned by `node`), but bind mounts —
+  `./config:/config`, the common case — do.
 
 ## Limitations
 
