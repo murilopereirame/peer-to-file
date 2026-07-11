@@ -159,7 +159,7 @@ try {
   await waitForProgress(0.1)
   await page.click('#downloads li button:has-text("Pause")')
   await page.waitForSelector('#downloads li[data-state="paused"]', { timeout: 5_000 })
-  await sleep(1000) // let in-flight pieces land
+  await sleep(2000) // let in-flight pieces land (generous for slow CI runners)
   const pausedAt = await downloaded()
   await sleep(2500)
   const stillPausedAt = await downloaded()

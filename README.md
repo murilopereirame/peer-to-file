@@ -1,5 +1,7 @@
 # peer-to-file
 
+[![CI](https://github.com/murilopereirame/peer-to-file/actions/workflows/ci.yml/badge.svg)](https://github.com/murilopereirame/peer-to-file/actions/workflows/ci.yml)
+
 A minimal self-hosted P2P file browser. A server runs next to your files; you open a web
 page, type the server's IP, browse the file tree and download files with **chunked,
 resumable** transfers powered by [WebTorrent](https://webtorrent.io). Built for two peers
@@ -169,10 +171,15 @@ does not need to be exposed through the proxy.
 ```sh
 npm ci
 npm run check   # typecheck server + client
-npm test        # API + path-safety tests (node:test)
-npm run e2e     # real-browser end-to-end incl. kill-server-mid-download resume check
-                # (needs: npm i --no-save playwright-core, and a Chromium binary)
+npm test        # API + auth + path-safety tests (node:test)
+npm run e2e     # real-browser end-to-end: login, pause/resume, server-restart
+                # resume, page-reload resume (OPFS), checksum
+                # (needs: npm i --no-save playwright, and a Chromium binary)
 ```
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs the same three layers on every pull
+request: typecheck + tests on Node 22 and 24, the browser end-to-end, and a Docker image
+build.
 
 ## Design decisions (v1)
 
