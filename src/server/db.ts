@@ -1,5 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import nodePath from 'node:path'
 
 /**
  * Persistence for authentication, built on Node's bundled SQLite
@@ -52,6 +54,13 @@ export class AuthDb {
   private readonly db: DatabaseSync
 
   constructor (path: string) {
+    // node:sqlite creates the database *file* on first open but not its
+    // parent directories (e.g. a fresh /config volume with nothing in it
+    // yet) — ensure the directory exists first, same as `mkdir -p`. Skip
+    // SQLite's special in-memory pseudo-paths, which aren't real files.
+    if (path !== ':memory:' && path !== '') {
+      fs.mkdirSync(nodePath.dirname(path), { recursive: true })
+    }
     this.db = new DatabaseSync(path)
     // Default (rollback) journal mode, not WAL: this is a single-process,
     // low-concurrency local database, so WAL's extra -shm/-wal side files
