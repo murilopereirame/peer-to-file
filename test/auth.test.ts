@@ -138,11 +138,14 @@ test('torrent metadata carries tokenized webseed + tracker URLs that work', asyn
 test('tracker upgrades without a valid token are rejected', async () => {
   for (const url of ['/tracker', '/tracker?t=123.fake']) {
     const ws = new WebSocket(`ws://127.0.0.1:${running.config.port}${url}`)
-    const failed = await new Promise<boolean>(resolve => {
-      ws.on('open', () => resolve(false))
-      ws.on('error', () => resolve(true))
+    const outcome = await new Promise<string>(resolve => {
+      const timer = setTimeout(() => resolve('timeout'), 5000)
+      ws.on('open', () => { clearTimeout(timer); resolve('open') })
+      ws.on('error', () => { clearTimeout(timer); resolve('rejected') })
+      ws.on('unexpected-response', () => { clearTimeout(timer); resolve('rejected') })
     })
-    assert.equal(failed, true, url)
+    ws.terminate()
+    assert.equal(outcome, 'rejected', url)
   }
 })
 
