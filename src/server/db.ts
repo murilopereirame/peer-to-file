@@ -105,6 +105,19 @@ export class AuthDb {
     return { id: Number(res.lastInsertRowid), username, created_at: now }
   }
 
+  /**
+   * Create the very first user (first-run web setup). Atomic against other
+   * requests in this process: node:sqlite is synchronous and there is no
+   * `await` between the count check and the insert, so nothing else in this
+   * single-process server can interleave. Throws if a user already exists.
+   */
+  setupFirstUser (username: string, password: string): User {
+    if (this.userCount() > 0) {
+      throw new Error('setup already completed')
+    }
+    return this.createUser(username, password)
+  }
+
   deleteUser (username: string): boolean {
     return this.db.prepare('DELETE FROM users WHERE username = ?').run(username).changes > 0
   }

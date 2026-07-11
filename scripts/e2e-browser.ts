@@ -1,15 +1,17 @@
 // End-to-end verification with a real browser:
 //
-//   1. serve a temp directory with a random payload file (auth ON)
-//   2. load the web client in headless Chromium — expect the login form,
-//      sign in with a user created via the CLI-backed database
-//   3. browse into a folder (navigate-then-load UI) and start a download
-//   4. pause the download and assert bandwidth actually stops, then resume
-//   5. kill the server mid-download, bring it back on the same ports —
+//   1. serve a temp directory with a random payload file (auth ON, no users)
+//   2. load the web client in headless Chromium — expect the first-run
+//      setup screen, create the admin account through it (this signs in)
+//   3. log out and back in through the normal login form, to also cover
+//      that path (including a wrong-password rejection)
+//   4. browse into a folder (navigate-then-load UI) and start a download
+//   5. pause the download and assert bandwidth actually stops, then resume
+//   6. kill the server mid-download, bring it back on the same ports —
 //      the transfer must resume, not restart
-//   6. pause again, RELOAD THE PAGE — the download list and verified pieces
+//   7. pause again, RELOAD THE PAGE — the download list and verified pieces
 //      (OPFS) must survive; resume and let it finish
-//   7. checksum the saved file against the source
+//   8. checksum the saved file against the source
 //
 // Requires a Chromium-driving package: npm i --no-save playwright-core
 // (plus a Chromium binary; set E2E_CHROMIUM to its path if playwright's
@@ -78,7 +80,7 @@ const config = () => ({
 })
 
 let running: RunningServer = await startServer(config(), consoleLogger)
-running.db!.createUser(USER, PASSWORD)
+// no users pre-created — the browser drives the first-run setup screen below
 
 const executablePath = await findChromium()
 const browser = await chromium.launch({ executablePath })
@@ -123,11 +125,27 @@ async function waitForProgress (target: number, timeoutMs = 120_000): Promise<vo
 }
 
 try {
-  // 1-2. load, expect login, sign in
+  // 1-2. load with no users yet, expect the first-run setup screen
   await page.goto(`http://127.0.0.1:${PORT}/`)
   await page.waitForSelector('#conn-status.ok', { timeout: 10_000 })
+  await page.waitForSelector('#setup:not([hidden])', { timeout: 5_000 })
+  console.log('✓ client connected, first-run setup required')
+
+  await page.fill('#setup-user', USER)
+  await page.fill('#setup-pass', PASSWORD)
+  await page.fill('#setup-pass2', 'does not match')
+  await page.click('#setup-form button')
+  await page.waitForSelector('#setup-status.error', { timeout: 5_000 })
+  console.log('✓ mismatched setup passwords rejected')
+
+  await page.fill('#setup-pass2', PASSWORD)
+  await page.click('#setup-form button')
+  await page.waitForSelector('#browser:not([hidden])', { timeout: 10_000 })
+  console.log('✓ admin account created via setup screen, signed in')
+
+  // 3. log out and back in through the normal login form
+  await page.click('#logout')
   await page.waitForSelector('#login:not([hidden])', { timeout: 5_000 })
-  console.log('✓ client connected, login required')
 
   await page.fill('#login-user', USER)
   await page.fill('#login-pass', 'wrong password')
@@ -140,7 +158,7 @@ try {
   await page.waitForSelector('#browser:not([hidden])', { timeout: 10_000 })
   console.log('✓ signed in')
 
-  // 3. browse: root listing shows the folder, click into it
+  // 4. browse: root listing shows the folder, click into it
   await page.waitForSelector('#listing li.dir')
   await page.click('#listing li.dir')
   await page.waitForFunction(
@@ -155,7 +173,7 @@ try {
   await page.waitForSelector('#downloads li[data-state="downloading"]', { timeout: 60_000 })
   console.log('✓ download started')
 
-  // 4. pause: bandwidth must actually stop
+  // 5. pause: bandwidth must actually stop
   await waitForProgress(0.1)
   await page.click('#downloads li button:has-text("Pause")')
   await page.waitForSelector('#downloads li[data-state="paused"]', { timeout: 5_000 })
@@ -172,7 +190,7 @@ try {
   await page.waitForSelector('#downloads li[data-state="downloading"]', { timeout: 15_000 })
   console.log('✓ resume works')
 
-  // 5. simulate a network drop: full server restart on the same ports
+  // 6. simulate a network drop: full server restart on the same ports
   await waitForProgress(0.25)
   const beforeDrop = await downloaded()
   await running.close()
@@ -184,7 +202,7 @@ try {
   if (await downloaded() < beforeDrop) fail('progress went backwards after the server restart')
   console.log('✓ download resumed after reconnect (no restart from zero)')
 
-  // 6. pause, reload the page — state must survive via localStorage + OPFS
+  // 7. pause, reload the page — state must survive via localStorage + OPFS
   await page.click('#downloads li button:has-text("Pause")')
   await page.waitForSelector('#downloads li[data-state="paused"]', { timeout: 5_000 })
   await sleep(800)
@@ -207,7 +225,7 @@ try {
   }
   console.log(`✓ verified pieces survived the reload (${(restored * 100).toFixed(0)}% restored from OPFS)`)
 
-  // 7. finish and checksum
+  // 8. finish and checksum
   const downloadPromise = page.waitForEvent('download', { timeout: 300_000 })
   await page.click('#downloads li button:has-text("Resume")')
   const download = await downloadPromise

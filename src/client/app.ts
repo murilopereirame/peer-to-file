@@ -139,6 +139,12 @@ const $ = <T extends HTMLElement>(sel: string): T => {
 const connectForm = $<HTMLFormElement>('#connect-form')
 const serverInput = $<HTMLInputElement>('#server-input')
 const connStatus = $('#conn-status')
+const setupSection = $('#setup')
+const setupForm = $<HTMLFormElement>('#setup-form')
+const setupUser = $<HTMLInputElement>('#setup-user')
+const setupPass = $<HTMLInputElement>('#setup-pass')
+const setupPass2 = $<HTMLInputElement>('#setup-pass2')
+const setupStatus = $('#setup-status')
 const loginSection = $('#login')
 const loginForm = $<HTMLFormElement>('#login-form')
 const loginUser = $<HTMLInputElement>('#login-user')
@@ -219,14 +225,16 @@ async function connect (address: string, quiet = false): Promise<void> {
     const info = await res.json() as {
       name?: string
       version?: string
-      auth?: { required: boolean, authenticated: boolean }
+      auth?: { required: boolean, needsSetup: boolean, authenticated: boolean }
     }
     if (info.name !== 'peer-to-file') throw new Error('not a peer-to-file server')
     apiBase = base
     localStorage.setItem('p2f-server', address.trim())
     setStatus(`connected to ${base} (v${info.version ?? '?'})`, 'ok')
 
-    if (info.auth?.required && !info.auth.authenticated) {
+    if (info.auth?.required && info.auth.needsSetup) {
+      showSetup()
+    } else if (info.auth?.required && !info.auth.authenticated) {
       showLogin()
     } else {
       await showBrowser(info.auth?.required ?? false)
@@ -237,7 +245,16 @@ async function connect (address: string, quiet = false): Promise<void> {
   }
 }
 
+function showSetup (): void {
+  setupSection.hidden = false
+  loginSection.hidden = true
+  browserSection.hidden = true
+  logoutBtn.hidden = true
+  setupUser.focus()
+}
+
 function showLogin (): void {
+  setupSection.hidden = true
   loginSection.hidden = false
   browserSection.hidden = true
   logoutBtn.hidden = true
@@ -245,6 +262,7 @@ function showLogin (): void {
 }
 
 async function showBrowser (authed: boolean): Promise<void> {
+  setupSection.hidden = true
   loginSection.hidden = true
   browserSection.hidden = false
   logoutBtn.hidden = !authed
@@ -254,6 +272,33 @@ async function showBrowser (authed: boolean): Promise<void> {
     restoreDownloads()
   }
 }
+
+setupForm.addEventListener('submit', event => {
+  event.preventDefault()
+  void (async () => {
+    if (setupPass.value !== setupPass2.value) {
+      setupStatus.textContent = 'passwords do not match'
+      setupStatus.className = 'status error'
+      return
+    }
+    setupStatus.textContent = 'creating account…'
+    setupStatus.className = 'status'
+    try {
+      await apiFetch('/api/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: setupUser.value, password: setupPass.value })
+      })
+      setupPass.value = ''
+      setupPass2.value = ''
+      setupStatus.textContent = ''
+      await showBrowser(true)
+    } catch (err) {
+      setupStatus.textContent = `could not create account: ${errMessage(err)}`
+      setupStatus.className = 'status error'
+    }
+  })()
+})
 
 loginForm.addEventListener('submit', event => {
   event.preventDefault()

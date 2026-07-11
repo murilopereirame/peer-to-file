@@ -31,8 +31,9 @@ a { color: var(--accent); }
 
 #connect-form, #login-form { display: flex; gap: .5rem; flex-wrap: wrap; }
 
-#login { margin-top: 1.5rem; }
-#login input {
+#login, #setup { margin-top: 1.5rem; }
+#setup .hint { color: var(--muted); font-size: .85rem; max-width: 40rem; }
+#login input, #setup input {
   flex: 1;
   min-width: 10rem;
   padding: .5rem .75rem;

@@ -31,6 +31,15 @@ transfer token. Defense in depth still applies:
 Users live in a SQLite database (Node's built-in `node:sqlite` — no native modules).
 Passwords are stored as scrypt hashes, tokens and session ids as SHA-256 hashes.
 
+**First run**: with no users in the database yet, opening the web client shows a
+one-time **setup screen** instead of a login form — pick a username and password there
+and that becomes the admin account. `POST /api/setup` is the endpoint behind it; it
+works exactly once (it 409s the moment any account exists, whether created through the
+screen or the CLI below), so there is no standing "create a user" endpoint left over
+for an attacker to hit.
+
+Additional accounts, or headless/scripted setup, go through the CLI:
+
 ```sh
 # bare metal                             # docker
 node src/server/cli.ts add-user alice   docker compose exec peer-to-file \
@@ -114,20 +123,19 @@ Open `http://<vpn-ip>:8000` from the client machine, and that's it — the page 
 the server it was loaded from automatically. You can also host the `public/` bundle
 anywhere else and point it at the server's `ip:port` (CORS is open).
 
-Create the first user, then sign in on the page:
-
-```sh
-docker compose exec peer-to-file node src/server/cli.ts add-user alice
-```
+The first visit shows a **setup screen** since no account exists yet — pick a username
+and password there to create the admin account (see "Setting up users and tokens" above
+for the CLI alternative).
 
 ### Bare Node (≥ 22.18)
 
 ```sh
 npm ci
 npm run build          # compiles the browser client (public/app.js)
-node src/server/cli.ts add-user alice
 P2F_ROOT=/srv/files P2F_HOST=10.0.0.1 npm start
 ```
+
+Then open the page and use the setup screen as above.
 
 The server runs TypeScript directly via Node's native type stripping — no build step for
 the backend.

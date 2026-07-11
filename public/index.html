@@ -29,6 +29,22 @@
   </header>
 
   <main>
+    <section id="setup" hidden>
+      <h2>Create the admin account</h2>
+      <p class="hint">No account exists yet. Choose a username and password to secure this server —
+         this is the only account this screen will ever create.</p>
+      <form id="setup-form">
+        <input id="setup-user" type="text" placeholder="username"
+               autocomplete="username" spellcheck="false" required>
+        <input id="setup-pass" type="password" placeholder="password (min. 8 characters)"
+               autocomplete="new-password" minlength="8" required>
+        <input id="setup-pass2" type="password" placeholder="confirm password"
+               autocomplete="new-password" minlength="8" required>
+        <button type="submit" class="primary">Create account</button>
+      </form>
+      <div id="setup-status" class="status"></div>
+    </section>
+
     <section id="login" hidden>
       <h2>Sign in</h2>
       <form id="login-form">

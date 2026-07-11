@@ -80,10 +80,31 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
       webrtcSeeding: seeder.enabled,
       auth: {
         required: auth.enabled,
+        needsSetup: auth.enabled && auth.needsSetup(),
         authenticated: auth.enabled ? auth.authenticate(req) !== null : true
       }
     })
   })
+
+  // First-run setup: creates the one and only admin account. Only reachable
+  // until that account exists — afterwards it behaves like a disabled route,
+  // so there is no standing "create a user" endpoint an attacker could hit.
+  app.post('/api/setup', wrap(async (req, res) => {
+    if (!auth.enabled) throw new BrowseError(400, 'authentication is disabled')
+    if (!auth.needsSetup()) throw new BrowseError(409, 'setup already completed')
+    const { username, password } = (req.body ?? {}) as { username?: unknown, password?: unknown }
+    if (typeof username !== 'string' || typeof password !== 'string') {
+      throw new BrowseError(400, 'username and password are required')
+    }
+    let result
+    try {
+      result = auth.setup(username, password)
+    } catch (err) {
+      throw new BrowseError(400, err instanceof Error ? err.message : 'setup failed')
+    }
+    res.append('Set-Cookie', sessionCookie(result.sessionId, SESSION_TTL_MS / 1000))
+    res.json({ username: result.user.username })
+  }))
 
   app.post('/api/login', wrap(async (req, res) => {
     const { username, password } = (req.body ?? {}) as { username?: unknown, password?: unknown }

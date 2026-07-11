@@ -55,7 +55,7 @@ test('/api/info stays public and reports auth state', async () => {
   const res = await fetch(`${base}/api/info`)
   assert.equal(res.status, 200)
   const body = await res.json() as any
-  assert.deepEqual(body.auth, { required: true, authenticated: false })
+  assert.deepEqual(body.auth, { required: true, needsSetup: false, authenticated: false })
 })
 
 test('login with wrong credentials fails', async () => {

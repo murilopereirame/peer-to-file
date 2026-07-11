@@ -19,6 +19,10 @@ export const TRANSFER_TOKEN_TTL_MS = 48 * 60 * 60 * 1000 // outlives long downlo
  */
 export interface AuthService {
   enabled: boolean
+  /** True until the first user is created (first-run web setup). */
+  needsSetup (): boolean
+  /** Create the first (admin) user and sign them in. Throws once a user exists. */
+  setup (username: string, password: string): { user: User, sessionId: string }
   /** Resolve the requesting user from a session cookie or Bearer token. */
   authenticate (req: IncomingMessage): User | null
   login (username: string, password: string): { user: User, sessionId: string } | null
@@ -62,6 +66,8 @@ function mintSignedToken (secret: Buffer, scope: string, ttlMs: number): string 
 
 const disabledAuth: AuthService = {
   enabled: false,
+  needsSetup: () => false,
+  setup: () => { throw new Error('authentication is disabled') },
   authenticate: () => null,
   login: () => null,
   logout: () => {},
@@ -77,6 +83,13 @@ export function createAuthService (db: AuthDb | null): AuthService {
 
   return {
     enabled: true,
+
+    needsSetup: () => db.userCount() === 0,
+
+    setup (username, password) {
+      const user = db.setupFirstUser(username, password)
+      return { user, sessionId: db.createSession(user.id, SESSION_TTL_MS) }
+    },
 
     authenticate (req) {
       const authz = req.headers.authorization
