@@ -18,7 +18,7 @@ export interface Seeder {
  * data source through the exact same chunked/verified/resumable machinery.
  */
 export async function createSeeder (
-  { announce, log }: { announce: string[], log: Logger }
+  { announce, log }: { announce: () => string[], log: Logger }
 ): Promise<Seeder> {
   let WebTorrent: typeof import('webtorrent').default
   try {
@@ -51,7 +51,7 @@ export async function createSeeder (
 
     // Re-use the exact metadata served to clients (same infohash) and point
     // the store at the existing file: WebTorrent verifies pieces, then seeds.
-    const torrentFile = toTorrentFile({ ...meta, announce })
+    const torrentFile = toTorrentFile({ ...meta, announce: announce() })
     const torrent = client.add(torrentFile, { path: path.dirname(absPath) })
     torrent.on('ready', () => {
       log.info(`seeding ${meta.name} (${meta.infoHash})`)

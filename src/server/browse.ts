@@ -26,6 +26,23 @@ function isInside (root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(root + path.sep)
 }
 
+async function mapLimit<T, R> (
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i] as T)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
 /**
  * Resolve a client-supplied relative path to an absolute path that is
  * guaranteed to live inside `root`. `root` must already be an absolute,
@@ -77,24 +94,30 @@ export async function listDir (root: string, relPath: unknown = ''): Promise<Lis
   }
 
   const dirents = await fs.readdir(abs, { withFileTypes: true })
-  const entries: DirEntry[] = []
-  for (const dirent of dirents) {
+
+  // Stat entries concurrently (bounded) — sequential stats made large
+  // directories noticeably slow to open, especially on network filesystems.
+  const results = await mapLimit(dirents, 64, async (dirent): Promise<DirEntry | null> => {
     const entryPath = path.join(abs, dirent.name)
     try {
       if (dirent.isSymbolicLink()) {
         const real = await fs.realpath(entryPath)
-        if (!isInside(root, real)) continue
+        if (!isInside(root, real)) return null
       }
       const st = await fs.stat(entryPath)
       if (st.isDirectory()) {
-        entries.push({ name: dirent.name, type: 'dir', size: null, mtime: st.mtimeMs })
-      } else if (st.isFile()) {
-        entries.push({ name: dirent.name, type: 'file', size: st.size, mtime: st.mtimeMs })
+        return { name: dirent.name, type: 'dir', size: null, mtime: st.mtimeMs }
       }
+      if (st.isFile()) {
+        return { name: dirent.name, type: 'file', size: st.size, mtime: st.mtimeMs }
+      }
+      return null
     } catch {
       // broken symlink or file vanished mid-listing — skip it
+      return null
     }
-  }
+  })
+  const entries = results.filter((e): e is DirEntry => e !== null)
 
   entries.sort((a, b) =>
     a.type === b.type ? a.name.localeCompare(b.name) : (a.type === 'dir' ? -1 : 1)

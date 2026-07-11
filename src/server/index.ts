@@ -7,12 +7,15 @@ import { loadConfig, type Config } from './config.ts'
 import { createTorrentStore } from './torrents.ts'
 import { createSeeder } from './seeder.ts'
 import { createApp, bracketHost } from './app.ts'
+import { createAuthService } from './auth.ts'
+import { AuthDb } from './db.ts'
 import { consoleLogger, type Logger } from './log.ts'
 
 export interface RunningServer {
   config: Config
   server: http.Server
   tracker: TrackerServer
+  db: AuthDb | null
   close (): Promise<void>
 }
 
@@ -24,30 +27,47 @@ export async function startServer (
   config: Config,
   log: Logger = consoleLogger
 ): Promise<RunningServer> {
+  const db = config.authEnabled ? new AuthDb(config.dbPath) : null
+  db?.pruneExpiredSessions()
+  const auth = createAuthService(db)
+
   // The Node seeder announces to its own tracker over loopback (or the bind
   // address when it isn't a wildcard). Peer matching only needs both sides to
-  // hit the same tracker instance — URLs don't have to be identical.
+  // hit the same tracker instance — URLs don't have to be identical. Lazy:
+  // with auth on it goes through /tracker on the main port, whose final
+  // number is only known after listen (tests use port 0).
   const internalHost = (config.host === '0.0.0.0' || config.host === '::')
     ? '127.0.0.1'
     : config.host
   const seeder = await createSeeder({
-    announce: [`ws://${bracketHost(internalHost)}:${config.trackerPort}`],
+    announce: () => auth.enabled
+      ? [`ws://${bracketHost(internalHost)}:${config.port}/tracker?t=${encodeURIComponent(auth.mintTrackerToken())}`]
+      : [`ws://${bracketHost(internalHost)}:${config.trackerPort}`],
     log
   })
 
-  const tracker = new TrackerServer({ udp: false, http: true, ws: true, stats: true })
+  // With auth on, the standalone tracker port would be unauthenticated, so
+  // the tracker is only exposed via /tracker on the main HTTP server.
+  const tracker = new TrackerServer({
+    udp: false,
+    http: !config.authEnabled,
+    ws: !config.authEnabled,
+    stats: false
+  })
   tracker.on('error', (err: Error) => log.error(`tracker: ${err.message}`))
   tracker.on('warning', (err: Error) => log.warn(`tracker: ${err.message}`))
-  await new Promise<void>(resolve => {
-    tracker.listen(config.trackerPort, config.host, resolve)
-  })
-  if (config.trackerPort === 0 && tracker.http) {
-    const addr = tracker.http.address()
-    if (addr && typeof addr === 'object') config.trackerPort = addr.port
+  if (!config.authEnabled) {
+    await new Promise<void>(resolve => {
+      tracker.listen(config.trackerPort, config.host, resolve)
+    })
+    if (config.trackerPort === 0 && tracker.http) {
+      const addr = tracker.http.address()
+      if (addr && typeof addr === 'object') config.trackerPort = addr.port
+    }
   }
 
   const store = createTorrentStore()
-  const app = createApp({ config, store, seeder, version })
+  const app = createApp({ config, store, seeder, auth, version })
   const server = http.createServer(app)
 
   // Serve the tracker WebSocket on the main HTTP port too (at /tracker), so
@@ -58,9 +78,23 @@ export async function startServer (
     perMessageDeflate: false,
     clientTracking: false
   })
+  // Upgraded sockets leave the http server's connection tracking, so
+  // closeAllConnections() won't reach them — track them for shutdown.
+  const trackerSockets = new Set<import('node:stream').Duplex>()
   server.on('upgrade', (req, socket, head) => {
-    if (req.url?.split('?')[0] === '/tracker') {
+    const [pathname, query] = (req.url ?? '').split('?') as [string, string?]
+    if (pathname === '/tracker') {
+      if (auth.enabled) {
+        const token = new URLSearchParams(query ?? '').get('t') ?? ''
+        if (!auth.verifyTrackerToken(token)) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
+      }
       trackerWss.handleUpgrade(req, socket, head, ws => {
+        trackerSockets.add(socket)
+        socket.on('close', () => trackerSockets.delete(socket))
         // bittorrent-tracker reads the request off the socket (ws >= 3
         // removed upgradeReq); mirror what its own ws server does.
         ;(ws as unknown as { upgradeReq: unknown }).upgradeReq = req
@@ -82,20 +116,31 @@ export async function startServer (
 
   log.info(`serving ${config.root}`)
   log.info(`web client + API on http://${bracketHost(config.host)}:${config.port}`)
-  log.info(`tracker on ws://${bracketHost(config.host)}:${config.trackerPort}`)
+  if (config.authEnabled) {
+    log.info(`tracker on ws://${bracketHost(config.host)}:${config.port}/tracker (token-gated)`)
+    log.info(`auth: enabled, database ${config.dbPath}`)
+    if (db && db.userCount() === 0) {
+      log.warn('no users exist yet — create one with: node src/server/cli.ts add-user <name>')
+    }
+  } else {
+    log.info(`tracker on ws://${bracketHost(config.host)}:${config.trackerPort}`)
+    log.warn('auth: DISABLED (P2F_AUTH=off) — anyone who can reach these ports has full access')
+  }
   log.info(`WebRTC seeding: ${seeder.enabled ? 'enabled' : 'DISABLED (webseed fallback only)'}`)
-  if (config.host === '0.0.0.0' || config.host === '::') {
-    log.warn('bound to a wildcard address — peer-to-file has NO authentication;')
-    log.warn('make sure only your VPN can reach these ports (see README)')
+  if (!config.authEnabled && (config.host === '0.0.0.0' || config.host === '::')) {
+    log.warn('bound to a wildcard address with auth off — make sure only your VPN can reach these ports')
   }
 
   async function close (): Promise<void> {
     await new Promise<void>(resolve => tracker.close(() => resolve()))
     await seeder.destroy()
+    for (const socket of trackerSockets) socket.destroy()
+    trackerSockets.clear()
     await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() })
+    db?.close()
   }
 
-  return { config, server, tracker, close }
+  return { config, server, tracker, db, close }
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])

@@ -8,16 +8,50 @@ trackers, no install on the client side.
 
 ## ⚠️ Security model — read this first
 
-**There is no authentication.** The VPN is the trust boundary: anyone who can reach the
-server's ports can browse and download everything under the shared root.
+**Authentication is on by default** (`P2F_AUTH=on`): every endpoint requires a login
+session, an API token, or — for the transfer URLs WebTorrent uses — a signed, expiring
+transfer token. Defense in depth still applies:
 
 - The server binds to `127.0.0.1` by default. Set `P2F_HOST` to your **VPN interface IP**
-  (e.g. your WireGuard address like `10.0.0.1`), never to a publicly routable address.
+  (e.g. your WireGuard address like `10.0.0.1`) rather than a publicly routable address.
 - With Docker, either use host networking and bind to the VPN IP (recommended, see
   `docker-compose.yml`), or publish the container ports on the VPN IP only
   (`"10.0.0.1:8000:8000"`).
 - Path traversal is blocked (`../`, absolute paths, symlinks pointing outside the root),
   and the shared volume should still be mounted read-only.
+- `P2F_AUTH=off` restores the original no-auth mode for pure-VPN setups — then the VPN is
+  the only trust boundary.
+- Traffic is plain HTTP unless you terminate TLS in front (see the nginx section); on a
+  WireGuard tunnel the transport is already encrypted.
+
+### Setting up users and tokens
+
+Users live in a SQLite database (Node's built-in `node:sqlite` — no native modules).
+Passwords are stored as scrypt hashes, tokens and session ids as SHA-256 hashes.
+
+```sh
+# bare metal                             # docker
+node src/server/cli.ts add-user alice   docker compose exec peer-to-file \
+                                          node src/server/cli.ts add-user alice
+```
+
+The CLI also manages API tokens for scripts / non-browser clients:
+
+```sh
+node src/server/cli.ts add-token alice backup-script   # prints the token once
+curl -H "Authorization: Bearer p2f_..." "http://10.0.0.1:8000/api/list?path="
+```
+
+`list-users`, `del-user`, `list-tokens`, `del-token` complete the set.
+
+### How the P2P transfer stays authenticated
+
+Cookies and headers don't reach WebTorrent's internal HTTP/WebSocket calls, so
+`/api/torrent` embeds short-lived HMAC-signed tokens directly in the URLs it hands out:
+the webseed URL carries a token bound to that one file path, and the tracker URL a token
+that only opens the signaling channel. Both expire after 48 h; a page refresh fetches
+fresh ones. With auth on, the standalone tracker port is not opened at all — the tracker
+is only reachable through the token-gated `/tracker` path on the main port.
 
 ## How it works
 
@@ -49,15 +83,20 @@ No DHT, no PEX, no public trackers: torrents are flagged `private` and both side
 announce to the embedded tracker. STUN/TURN are not used — on a VPN, host candidates are
 enough.
 
-### Resumability
+### Resumability, pause and cancel
 
 - **Network drop mid-download (tab stays open):** nothing restarts. The tracker
   connection re-announces with backoff, the WebRTC channel is re-established, and the
   client re-attaches the webseed if all sources died. Already-verified pieces are kept;
   only missing pieces are requested. This holds across a full server restart too, because
   torrent metadata is deterministic — the infohash for an unchanged file is stable.
-- **Closing the tab** loses in-progress state (v1 keeps pieces in memory; persisting to
-  IndexedDB is a stretch goal).
+- **Refreshing or closing the tab:** verified pieces are persisted in the browser's
+  origin-private file system (OPFS) and the download list in localStorage. On the next
+  visit the client re-adds the downloads, re-verifies the stored pieces locally and
+  continues from where it stopped — including the paused/running state.
+- **Pause** stops all transfer connections (zero bandwidth, not just "no new peers");
+  **Resume** re-attaches the sources. **Cancel** discards the download and its stored
+  pieces.
 
 ## Quick start
 
@@ -73,11 +112,18 @@ Open `http://<vpn-ip>:8000` from the client machine, and that's it — the page 
 the server it was loaded from automatically. You can also host the `public/` bundle
 anywhere else and point it at the server's `ip:port` (CORS is open).
 
+Create the first user, then sign in on the page:
+
+```sh
+docker compose exec peer-to-file node src/server/cli.ts add-user alice
+```
+
 ### Bare Node (≥ 22.18)
 
 ```sh
 npm ci
 npm run build          # compiles the browser client (public/app.js)
+node src/server/cli.ts add-user alice
 P2F_ROOT=/srv/files P2F_HOST=10.0.0.1 npm start
 ```
 
@@ -94,6 +140,8 @@ the backend.
 | `P2F_TRACKER_PORT` | `8001`      | Embedded WebSocket tracker port                                 |
 | `P2F_PUBLIC_HOST`  | *(unset)*   | Host override for tracker/webseed URLs handed to clients (only needed behind port remapping; normally derived from each request's `Host` header) |
 | `P2F_PUBLIC_URL`   | *(unset)*   | Public origin when behind a reverse proxy, e.g. `https://files.example.com` — see below |
+| `P2F_AUTH`         | `on`        | `on` requires login/tokens on every endpoint; `off` restores the VPN-only trust model |
+| `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens (`/config/p2f.db` in Docker) |
 
 ## Behind a reverse proxy (nginx)
 
@@ -136,13 +184,18 @@ npm run e2e     # real-browser end-to-end incl. kill-server-mid-download resume 
   verified-chunk machinery, and keeps downloads working even where the Node WebRTC
   native module (`node-datachannel`) can't be installed. If that module fails to load,
   the server logs a warning and runs webseed-only.
-- **No auth token** — out of scope for v1 (stretch goal: shared secret as cheap insurance
-  against VPN misconfiguration).
+- **Built-in `node:sqlite` over better-sqlite3/sqlcipher** — zero native dependencies.
+  The database stores only scrypt password hashes and SHA-256 token/session hashes, so
+  at-rest encryption of the DB adds little; if you need it, put `P2F_DB` on an encrypted
+  volume (sqlcipher would require a native build of a different driver).
 
-## Limitations (v1)
+## Limitations
 
-- Completed downloads are assembled in browser memory before saving — very large files
-  (multi-GB) are constrained by browser RAM.
+- Completed downloads are assembled into a Blob for the browser save dialog — very large
+  files (multi-GB) are constrained by browser memory at that final step (pieces
+  themselves are stored in OPFS, not RAM).
 - First download of a file waits for the server to hash it (~disk read speed); metadata
   is cached afterwards.
+- Transfer tokens expire after 48 h; a download paused longer than that resumes with
+  fresh tokens on the next page load (or after re-clicking Download).
 - Download-only (no uploads), no previews, no sync, no multi-peer swarming.

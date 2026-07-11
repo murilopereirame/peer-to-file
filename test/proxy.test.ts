@@ -26,7 +26,9 @@ before(async () => {
     port: 0,
     trackerPort: 0,
     publicHost: null,
-    publicUrl: 'https://files.example.com'
+    publicUrl: 'https://files.example.com',
+    authEnabled: false,
+    dbPath: ':memory:'
   }, silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
 })

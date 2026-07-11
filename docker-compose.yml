@@ -18,6 +18,7 @@ services:
       # P2F_PUBLIC_URL: https://files.example.com
     volumes:
       - /srv/files:/data:ro # <-- change to the directory you want to share
+      - p2f-config:/config # SQLite auth database (users, sessions, tokens)
     restart: unless-stopped
 
     # Alternative without host networking: delete network_mode above, set

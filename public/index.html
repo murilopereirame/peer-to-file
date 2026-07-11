@@ -16,7 +16,10 @@
 </head>
 <body>
   <header>
-    <h1>peer-to-file</h1>
+    <div class="title-row">
+      <h1>peer-to-file</h1>
+      <button id="logout" type="button" hidden>Log out</button>
+    </div>
     <form id="connect-form">
       <input id="server-input" type="text" placeholder="server ip:port (e.g. 10.0.0.1:8000)"
              autocomplete="off" spellcheck="false" required>
@@ -26,6 +29,18 @@
   </header>
 
   <main>
+    <section id="login" hidden>
+      <h2>Sign in</h2>
+      <form id="login-form">
+        <input id="login-user" type="text" placeholder="username"
+               autocomplete="username" spellcheck="false" required>
+        <input id="login-pass" type="password" placeholder="password"
+               autocomplete="current-password" required>
+        <button type="submit" class="primary">Sign in</button>
+      </form>
+      <div id="login-status" class="status"></div>
+    </section>
+
     <section id="browser" hidden>
       <nav id="breadcrumb" aria-label="path"></nav>
       <ul id="listing"></ul>
@@ -38,8 +53,7 @@
   </main>
 
   <footer>
-    <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a>
-       — no auth, VPN is the trust boundary</p>
+    <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a></p>
   </footer>
 </body>
 </html>
