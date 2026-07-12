@@ -10,8 +10,26 @@ export class OpfsChunkStore {
   length: number
   private readonly lastChunkIndex: number
   private readonly lastChunkLength: number
+  private readonly totalChunks: number
   private readonly key: string
   private readonly dirPromise: Promise<FileSystemDirectoryHandle>
+
+  // Instances keyed by infoHash, so code elsewhere (downloadManager.ts) can
+  // find the store WebTorrent created internally for a given torrent — it
+  // only ever hands us the *class*, not a reference to what it constructs.
+  static readonly instances = new Map<string, OpfsChunkStore>()
+
+  private readonly readIndices = new Set<number>()
+  /** True once every piece has been read back out at least once — check this before subscribing via onAllRead, in case it's already happened (a very small/fast file). */
+  readComplete = false
+  /**
+   * Fires once every piece has been read back out at least once — i.e. a
+   * consumer (the service worker streaming a completed download, or the
+   * File System Access API path) has pulled the whole file through. Used to
+   * detect *real* completion of a save that has no other completion signal,
+   * instead of guessing at a fixed timeout — see downloadManager.ts.
+   */
+  onAllRead: (() => void) | null = null
 
   constructor (
     chunkLength: number,
@@ -21,8 +39,10 @@ export class OpfsChunkStore {
     this.length = opts.length ?? 0
     this.lastChunkIndex = Math.max(0, Math.ceil(this.length / chunkLength) - 1)
     this.lastChunkLength = this.length - this.lastChunkIndex * chunkLength
+    this.totalChunks = this.lastChunkIndex + 1
     this.key = opts.torrent?.infoHash ?? opts.name ?? 'unknown'
     this.dirPromise = OpfsChunkStore.dirFor(this.key)
+    OpfsChunkStore.instances.set(this.key, this)
   }
 
   static async dirFor (key: string): Promise<FileSystemDirectoryHandle> {
@@ -89,12 +109,20 @@ export class OpfsChunkStore {
       const end = options.length !== undefined ? offset + options.length : file.size
       const buf = await file.slice(offset, end).arrayBuffer()
       return new Uint8Array(buf)
-    }).then(data => done(null, data), (err: Error) => done(err))
+    }).then(data => {
+      this.readIndices.add(index)
+      if (!this.readComplete && this.readIndices.size >= this.totalChunks) {
+        this.readComplete = true
+        this.onAllRead?.()
+      }
+      done(null, data)
+    }, (err: Error) => done(err))
   }
 
   close (cb: StoreCb): void { cb(null) }
 
   destroy (cb: StoreCb): void {
+    if (OpfsChunkStore.instances.get(this.key) === this) OpfsChunkStore.instances.delete(this.key)
     OpfsChunkStore.remove(this.key).then(() => cb(null), (err: Error) => cb(err))
   }
 }

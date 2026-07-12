@@ -273,6 +273,7 @@ try {
   await page.click('#downloads li button:has-text("Resume")')
   const download = await downloadPromise
   await page.waitForSelector('#downloads li[data-state="done"]', { timeout: 60_000 })
+  const finishedInfoHash = await page.getAttribute('#downloads li', 'data-infohash')
 
   const savedFile = path.join(root, 'downloaded-payload.bin')
   await download.saveAs(savedFile)
@@ -282,6 +283,32 @@ try {
   }
   if (savedSha !== payloadSha) fail(`checksum mismatch: ${savedSha} != ${payloadSha}`)
   console.log('✓ download completed; checksum matches the source')
+
+  // This save went through the service-worker-streamed tier (no
+  // showSaveFilePicker in this test), which has no JS-visible "save
+  // finished" signal — the OPFS piece store is reclaimed once every piece
+  // has been read back out at least once (real completion), not on a fixed
+  // timer. Regression check for the bug where a flat multi-minute timer
+  // destroyed the store while a large/slow save was still streaming: this
+  // must clear out well within the short post-read grace period, not stay
+  // around waiting for a long fallback timer.
+  const reapDeadline = Date.now() + 25_000
+  let stillPresent = true
+  while (Date.now() < reapDeadline) {
+    const keys: string[] = await page.evaluate(async () => {
+      const root = await navigator.storage.getDirectory()
+      const dir = await root.getDirectoryHandle('p2f-downloads', { create: true }).catch(() => null)
+      if (!dir) return []
+      const names: string[] = []
+      // @ts-expect-error async iteration on FileSystemDirectoryHandle
+      for await (const [name] of dir) names.push(name)
+      return names
+    })
+    if (finishedInfoHash && !keys.includes(finishedInfoHash)) { stillPresent = false; break }
+    await sleep(500)
+  }
+  if (stillPresent) fail('completed download\'s OPFS piece store was not reaped promptly after streaming finished')
+  console.log('✓ OPFS piece store reaped promptly once the streamed save actually finished')
 
   // 9. logs page — opened as its own tab, shares the session cookie
   const logsPage = await context.newPage()
