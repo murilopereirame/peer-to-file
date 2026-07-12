@@ -134,11 +134,11 @@ async function waitForProgress (target: number, timeoutMs = 120_000): Promise<vo
 }
 
 try {
-  // 1-2. load with no users yet, expect the first-run setup screen
+  // 1-2. load with no users yet, expect the first-run setup screen — the
+  // client auto-detects the server (same origin), no address to type in
   await page.goto(`http://127.0.0.1:${PORT}/`)
-  await page.waitForSelector('#conn-status.ok', { timeout: 10_000 })
-  await page.waitForSelector('#setup:not([hidden])', { timeout: 5_000 })
-  console.log('✓ client connected, first-run setup required')
+  await page.waitForSelector('#setup:not([hidden])', { timeout: 10_000 })
+  console.log('✓ client auto-connected, first-run setup required')
 
   await page.fill('#setup-user', USER)
   await page.fill('#setup-pass', PASSWORD)
@@ -177,6 +177,20 @@ try {
   )
   await page.waitForSelector('#listing li.file')
   console.log('✓ folder navigation works')
+
+  // fixed "../" row at the top of the listing navigates back up
+  await page.waitForSelector('#listing li.up')
+  await page.click('#listing li.up')
+  await page.waitForFunction(
+    () => document.querySelector('#breadcrumb')?.textContent?.trim() === '⌂ root',
+    undefined,
+    { timeout: 10_000 }
+  )
+  await page.waitForSelector('#listing li.up', { state: 'detached', timeout: 5_000 })
+  console.log('✓ "../" row navigates back up a folder')
+
+  await page.click('#listing li.dir')
+  await page.waitForSelector('#listing li.file')
 
   await page.click('#listing li.file button')
   await page.waitForSelector('#downloads li[data-state="downloading"]', { timeout: 60_000 })

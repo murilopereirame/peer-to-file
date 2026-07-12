@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/murilopereirame/peer-to-file/actions/workflows/ci.yml/badge.svg)](https://github.com/murilopereirame/peer-to-file/actions/workflows/ci.yml)
 
-A minimal self-hosted P2P file browser. A server runs next to your files; you open a web
-page, type the server's IP, browse the file tree and download files with **chunked,
-resumable** transfers powered by [WebTorrent](https://webtorrent.io). Built for two peers
+A minimal self-hosted P2P file browser. A server runs next to your files; you open the
+page it serves and immediately get a browsable file tree with **chunked, resumable**
+downloads and uploads powered by [WebTorrent](https://webtorrent.io). Built for two peers
 on a trusted network (e.g. a WireGuard tunnel) — no accounts, no discovery, no public
 trackers, no install on the client side.
 
@@ -194,9 +194,11 @@ Edit `docker-compose.yml` (VPN IP + directory to share), then:
 docker compose up -d --build
 ```
 
-Open `http://<vpn-ip>:8000` from the client machine, and that's it — the page connects to
-the server it was loaded from automatically. You can also host the `client/dist/` bundle
-anywhere else and point it at the server's `ip:port` (CORS is open).
+Open `http://<vpn-ip>:8000` from the client machine, and that's it — the page always talks
+to the origin it was loaded from, so there's nothing to type or configure client-side.
+(The API itself still carries permissive CORS headers, e.g. for scripting against it from
+elsewhere — see "Setting up users and tokens" above — but the bundled web client no longer
+offers a way to point at a different server.)
 
 The first visit shows a **setup screen** since no account exists yet — pick a username
 and password there to create the admin account (see "Setting up users and tokens" above
@@ -274,8 +276,9 @@ build.
   project with two HTML entry points (the browser and the logs page); it builds to
   `client/dist/`, which the server serves as static files exactly like the old vanilla-JS
   client did.
-- **Client served by the server process** — one container, one origin, zero setup; a
-  separate static host still works via CORS.
+- **Client served by the server process, same-origin only** — one container, one origin,
+  zero setup or configuration: the page always talks to the origin it was loaded from,
+  with no server address for a user to find or type in.
 - **Embedded `bittorrent-tracker` over custom WebRTC signaling** — boring, maintained,
   and it's what WebTorrent already speaks; not worth replacing for a fixed 2-peer setup.
 - **Webseed alongside WebRTC** — the `url-list` fallback costs nothing, uses the same

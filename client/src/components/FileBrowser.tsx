@@ -119,6 +119,12 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
       {dragging && <div className="drop-hint">drop files to upload to {path === '' ? 'root' : path}</div>}
 
       <ul id="listing">
+        {path !== '' && (
+          <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
+            <span className="entry-icon">⬆️</span>
+            <span className="entry-name">../</span>
+          </li>
+        )}
         {loading && <li className="empty loading">loading…</li>}
         {!loading && error && (
           <li className="empty error">

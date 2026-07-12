@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { normalizeServer } from '../lib/format'
 
 interface LogEntry {
   id: number
@@ -10,6 +9,8 @@ interface LogEntry {
 
 const MAX_ENTRIES = 500
 const POLL_INTERVAL_MS = 4000
+// Same origin as the main app — see App.tsx.
+const API_BASE = `${location.protocol}//${location.host}`
 
 export function LogsApp (): React.JSX.Element {
   const [status, setStatus] = useState<{ msg: string, kind: '' | 'ok' | 'error' }>({ msg: '', kind: '' })
@@ -17,7 +18,6 @@ export function LogsApp (): React.JSX.Element {
   const [kindFilter, setKindFilter] = useState('')
   const [autoRefresh, setAutoRefresh] = useState(true)
 
-  const apiBaseRef = useRef<string | null>(null)
   const sinceIdRef = useRef<number | undefined>(undefined)
   const entriesRef = useRef<LogEntry[]>([])
   entriesRef.current = entries
@@ -25,10 +25,8 @@ export function LogsApp (): React.JSX.Element {
   autoRefreshRef.current = autoRefresh
 
   const poll = async (): Promise<void> => {
-    const apiBase = apiBaseRef.current
-    if (!apiBase) return
     try {
-      const url = new URL('/api/logs', apiBase)
+      const url = new URL('/api/logs', API_BASE)
       url.searchParams.set('limit', '200')
       if (sinceIdRef.current !== undefined) url.searchParams.set('sinceId', String(sinceIdRef.current))
       const res = await fetch(url, { credentials: 'include' })
@@ -47,32 +45,19 @@ export function LogsApp (): React.JSX.Element {
         setEntries(merged)
         sinceIdRef.current = Math.max(sinceIdRef.current ?? 0, ...body.entries.map(e => e.id))
       }
-      setStatus({ msg: `connected to ${apiBase}`, kind: 'ok' })
+      setStatus({ msg: 'connected', kind: 'ok' })
     } catch (err) {
       setStatus({ msg: `connection failed: ${err instanceof Error ? err.message : String(err)}`, kind: 'error' })
     }
   }
 
   useEffect(() => {
-    const saved = localStorage.getItem('p2f-server')
-    let apiBase: string | null = null
-    if (saved) {
-      apiBase = normalizeServer(saved)
-    } else if (location.protocol.startsWith('http')) {
-      apiBase = normalizeServer(location.host)
-    }
-
-    if (apiBase) {
-      apiBaseRef.current = apiBase
-      setStatus({ msg: 'connecting…', kind: '' })
-      void poll()
-      const interval = setInterval(() => {
-        if (autoRefreshRef.current) void poll()
-      }, POLL_INTERVAL_MS)
-      return () => clearInterval(interval)
-    } else {
-      setStatus({ msg: 'no server known — open the main app first', kind: 'error' })
-    }
+    setStatus({ msg: 'connecting…', kind: '' })
+    void poll()
+    const interval = setInterval(() => {
+      if (autoRefreshRef.current) void poll()
+    }, POLL_INTERVAL_MS)
+    return () => clearInterval(interval)
     // runs once on mount
   }, [])
 
@@ -83,9 +68,9 @@ export function LogsApp (): React.JSX.Element {
       <header className="app-header">
         <div className="header-row logs-header">
           <div className="brand">
-            <span className="logo">📦</span>
+            <span className="logo">🧲</span>
             <div>
-              <h1>peer-to-file — logs</h1>
+              <h1>P2File — Logs</h1>
               <span className="tagline">server activity</span>
             </div>
           </div>

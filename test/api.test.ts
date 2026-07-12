@@ -240,7 +240,7 @@ test('POST /api/upload rejects an invalid name and an existing target', async ()
 test('serves the web client and the WebTorrent bundle', async () => {
   const page = await fetch(`${base}/`)
   assert.equal(page.status, 200)
-  assert.match(await page.text(), /peer-to-file/)
+  assert.match(await page.text(), /P2File/)
 
   const bundle = await fetch(`${base}/vendor/webtorrent.min.js`, { method: 'HEAD' })
   assert.equal(bundle.status, 200)

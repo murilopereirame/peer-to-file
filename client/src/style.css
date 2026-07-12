@@ -56,7 +56,7 @@ a:hover { text-decoration: underline; }
   width: 2.1rem;
   height: 2.1rem;
   border-radius: 9px;
-  font-size: 1.15rem;
+  font-size: 1.3rem;
   background: linear-gradient(150deg, var(--accent), var(--accent-2));
   box-shadow: var(--shadow);
 }
@@ -83,8 +83,6 @@ a:hover { text-decoration: underline; }
 .header-actions { display: flex; align-items: center; gap: .6rem; }
 .header-actions a { font-size: .83rem; color: var(--muted); }
 .header-actions a:hover { color: var(--accent); }
-
-#connect-form { display: flex; gap: .5rem; flex-wrap: wrap; }
 
 .card {
   background: var(--panel);
@@ -116,8 +114,6 @@ input[type="text"]:focus, input[type="password"]:focus {
   box-shadow: 0 0 0 3px rgba(77, 163, 255, .15);
 }
 
-#server-input { flex: 1; min-width: 12rem; padding: .55rem .8rem; }
-
 button {
   padding: .55rem 1.05rem;
   border: 1px solid var(--border);
@@ -140,9 +136,10 @@ button.primary {
 button.primary:hover { filter: brightness(1.08); }
 button.block { width: 100%; }
 
-.status { min-height: 1.3rem; margin-top: .5rem; font-size: .85rem; color: var(--muted); }
+.status { margin-top: .5rem; font-size: .85rem; color: var(--muted); }
 .status.error { color: var(--err); }
 .status.ok { color: var(--ok); }
+.status button { margin-left: .6rem; padding: .15rem .55rem; font-size: .78rem; }
 
 #breadcrumb {
   display: flex;
@@ -180,6 +177,9 @@ ul { list-style: none; margin: 0; padding: 0; }
 
 #listing li.dir { cursor: pointer; }
 #listing li.dir:hover { background: var(--panel-hover); border-color: var(--border); }
+#listing li.up { background: transparent; border-style: dashed; }
+#listing li.up .entry-name { color: var(--muted); font-style: italic; }
+#listing li.up .entry-icon { background: transparent; }
 
 .browser-toolbar {
   display: flex;
