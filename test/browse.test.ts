@@ -182,6 +182,32 @@ test('deleteEntry refuses to delete the shared root', async () => {
   }
 })
 
+test('deleteEntry removes a symlink itself, not the file it points to', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await fs.symlink(path.join(mroot, 'a.txt'), path.join(mroot, 'link.txt'))
+    const result = await deleteEntry(mroot, 'link.txt')
+    assert.equal(result.rel, 'link.txt')
+    await assert.rejects(fs.lstat(path.join(mroot, 'link.txt')))
+    // the symlink's target must survive untouched
+    assert.equal(await fs.readFile(path.join(mroot, 'a.txt'), 'utf8'), 'hello')
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('deleteEntry unlinks a symlink to a directory without touching its contents', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await fs.symlink(path.join(mroot, 'sub'), path.join(mroot, 'sub-link'))
+    await deleteEntry(mroot, 'sub-link')
+    await assert.rejects(fs.lstat(path.join(mroot, 'sub-link')))
+    assert.equal(await fs.readFile(path.join(mroot, 'sub', 'b.txt'), 'utf8'), 'world!')
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
 test('moveEntry renames a file in place', async () => {
   const mroot = await makeMutableRoot()
   try {
@@ -230,6 +256,22 @@ test('moveEntry refuses to move the shared root and rejects traversal', async ()
     await expectStatus(moveEntry(mroot, '', 'elsewhere'), 400)
     await expectStatus(moveEntry(mroot, 'a.txt', '../escape.txt'), 403)
     await expectStatus(moveEntry(mroot, '../escape.txt', 'a.txt'), 403)
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry renames a symlink itself, leaving its target where it was', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await fs.symlink(path.join(mroot, 'a.txt'), path.join(mroot, 'link.txt'))
+    const result = await moveEntry(mroot, 'link.txt', 'renamed-link.txt')
+    assert.equal(result.toRel, 'renamed-link.txt')
+    await assert.rejects(fs.lstat(path.join(mroot, 'link.txt')))
+    const st = await fs.lstat(path.join(mroot, 'renamed-link.txt'))
+    assert.ok(st.isSymbolicLink())
+    // the target file itself never moved
+    assert.equal(await fs.readFile(path.join(mroot, 'a.txt'), 'utf8'), 'hello')
   } finally {
     await fs.rm(mroot, { recursive: true, force: true })
   }

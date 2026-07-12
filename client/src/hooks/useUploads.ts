@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApi } from '../context/ApiContext'
 
 export type UploadStatus = 'uploading' | 'done' | 'error'
@@ -23,6 +23,15 @@ export function useUploads (onUploaded: () => void): {
 } {
   const { apiBase } = useApi()
   const [uploads, setUploads] = useState<UploadEntry[]>([])
+  const inFlight = useRef(new Map<string, XMLHttpRequest>())
+
+  // Abort any still-running uploads if the browser view unmounts (e.g. the
+  // user signs out mid-upload) instead of leaving them running to completion
+  // with nothing left to receive their progress/completion events.
+  useEffect(() => {
+    const xhrs = inFlight.current
+    return () => { for (const xhr of xhrs.values()) xhr.abort() }
+  }, [])
 
   const patch = useCallback((id: string, patch: Partial<UploadEntry>) => {
     setUploads(list => list.map(u => (u.id === id ? { ...u, ...patch } : u)))
@@ -35,6 +44,7 @@ export function useUploads (onUploaded: () => void): {
 
     const url = `${apiBase}/api/upload?path=${encodeURIComponent(destPath)}&name=${encodeURIComponent(file.name)}`
     const xhr = new XMLHttpRequest()
+    inFlight.current.set(id, xhr)
     xhr.open('POST', url)
     xhr.withCredentials = true
     xhr.upload.addEventListener('progress', e => {
@@ -54,6 +64,7 @@ export function useUploads (onUploaded: () => void): {
       }
     })
     xhr.addEventListener('error', () => patch(id, { status: 'error', message: 'network error' }))
+    xhr.addEventListener('loadend', () => { inFlight.current.delete(id) })
     xhr.send(file)
   }, [apiBase, patch, onUploaded])
 

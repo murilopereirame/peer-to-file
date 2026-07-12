@@ -198,6 +198,25 @@ test('POST /api/upload streams a file to disk', async () => {
   await fs.rm(path.join(root, 'uploaded.bin'))
 })
 
+test('POST /api/upload works for a .json file (not swallowed by the JSON body parser)', async () => {
+  // A browser sets the upload's Content-Type from the File's own type, which
+  // for a .json file is application/json — this must NOT be intercepted by
+  // the same express.json() used by /api/setup, /api/login, /api/delete and
+  // /api/move, or the raw body never reaches the upload handler.
+  const payload = Buffer.from(JSON.stringify({ hello: 'world', n: 42 }))
+  const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('data.json')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload,
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(res.status, 201)
+  const body = await res.json() as any
+  assert.equal(body.size, payload.length)
+  assert.deepEqual(await fs.readFile(path.join(root, 'data.json')), payload)
+  await fs.rm(path.join(root, 'data.json'))
+})
+
 test('POST /api/upload rejects an invalid name and an existing target', async () => {
   const badName = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('../escape.bin')}`, {
     method: 'POST',

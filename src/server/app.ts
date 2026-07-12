@@ -5,7 +5,8 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import express, { type Request, type Response, type NextFunction, type Express } from 'express'
 import {
-  BrowseError, deleteEntry, isValidEntryName, listDir, moveEntry, resolveInsideRoot
+  BrowseError, deleteEntry, listDir, moveEntry, resolveInsideRoot, resolveUploadTarget,
+  throwIfPermissionError
 } from './browse.ts'
 import { renderTorrent, type TorrentStore } from './torrents.ts'
 import { SESSION_COOKIE, SESSION_TTL_MS, parseCookies, type AuthService } from './auth.ts'
@@ -86,7 +87,12 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
     }
     next()
   })
-  app.use('/api', express.json())
+  // Scoped per-route (not mounted globally on /api): a global json() would
+  // greedily parse — and drain the raw body of — any request whose
+  // Content-Type happens to be application/json, including /api/upload
+  // requests for a .json file (browsers set that Content-Type from the
+  // file's extension), silently turning the upload into an empty file.
+  const jsonBody = express.json()
 
   // --- public endpoints ------------------------------------------------------
 
@@ -106,7 +112,7 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
   // First-run setup: creates the one and only admin account. Only reachable
   // until that account exists — afterwards it behaves like a disabled route,
   // so there is no standing "create a user" endpoint an attacker could hit.
-  app.post('/api/setup', wrap(async (req, res) => {
+  app.post('/api/setup', jsonBody, wrap(async (req, res) => {
     if (!auth.enabled) throw new BrowseError(400, 'authentication is disabled')
     if (!auth.needsSetup()) throw new BrowseError(409, 'setup already completed')
     const { username, password } = (req.body ?? {}) as { username?: unknown, password?: unknown }
@@ -124,7 +130,7 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
     res.json({ username: result.user.username })
   }))
 
-  app.post('/api/login', wrap(async (req, res) => {
+  app.post('/api/login', jsonBody, wrap(async (req, res) => {
     const { username, password } = (req.body ?? {}) as { username?: unknown, password?: unknown }
     if (!auth.enabled) throw new BrowseError(400, 'authentication is disabled')
     if (typeof username !== 'string' || typeof password !== 'string') {
@@ -210,7 +216,7 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
     res.json(await listDir(config.root, req.query.path ?? ''))
   }))
 
-  app.post('/api/delete', wrap(async (req, res) => {
+  app.post('/api/delete', jsonBody, wrap(async (req, res) => {
     const { path: relPath } = (req.body ?? {}) as { path?: unknown }
     const { rel, wasDir } = await deleteEntry(config.root, relPath)
     const requester = (res.locals as { user?: { username: string } }).user
@@ -220,7 +226,7 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
     res.json({ ok: true })
   }))
 
-  app.post('/api/move', wrap(async (req, res) => {
+  app.post('/api/move', jsonBody, wrap(async (req, res) => {
     const { from, to } = (req.body ?? {}) as { from?: unknown, to?: unknown }
     const { fromRel, toRel } = await moveEntry(config.root, from, to)
     const requester = (res.locals as { user?: { username: string } }).user
@@ -230,39 +236,46 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
     res.json({ ok: true, path: toRel })
   }))
 
-  // Streamed to disk (never buffered in memory) via a temp file + atomic
-  // rename, so a half-finished or aborted upload never shows up in listings
-  // and can't clobber an existing file of the same name.
+  // Streamed to disk (never buffered in memory) via a temp file, then
+  // published with fs.link — which fails with EEXIST if the destination
+  // already exists — instead of a plain rename, so two uploads racing for
+  // the same name can't silently overwrite one another (fs.rename would
+  // just replace the destination). NOT behind the jsonBody parser above:
+  // this route's body is the raw file, and a browser sets the upload's
+  // Content-Type from the file's own type (e.g. application/json for a
+  // .json file), which express.json() would otherwise try to parse.
   app.post('/api/upload', wrap(async (req, res) => {
     const destDirRel = typeof req.query.path === 'string' ? req.query.path : ''
     const name = typeof req.query.name === 'string' ? req.query.name : ''
-    if (!isValidEntryName(name)) throw new BrowseError(400, 'invalid file name')
-
-    const destDirAbs = await resolveInsideRoot(config.root, destDirRel)
-    const destStat = await fs.stat(destDirAbs)
-    if (!destStat.isDirectory()) throw new BrowseError(400, 'destination is not a folder')
-    const destAbs = path.join(destDirAbs, name)
-    const alreadyExists = await fs.stat(destAbs).then(() => true, () => false)
-    if (alreadyExists) throw new BrowseError(409, 'a file with that name already exists')
+    const destAbs = await resolveUploadTarget(config.root, destDirRel, name)
 
     const tmpAbs = `${destAbs}.p2f-upload-${crypto.randomUUID()}`
+    const out = fsSync.createWriteStream(tmpAbs, { flags: 'wx' })
     try {
       await new Promise<void>((resolve, reject) => {
-        const out = fsSync.createWriteStream(tmpAbs, { flags: 'wx' })
         req.on('aborted', () => reject(new Error('upload aborted')))
         req.on('error', reject)
         out.on('error', reject)
         out.on('finish', resolve)
         req.pipe(out)
       })
-      await fs.rename(tmpAbs, destAbs)
+      try {
+        await fs.link(tmpAbs, destAbs)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new BrowseError(409, 'a file with that name already exists')
+        }
+        throwIfPermissionError(err)
+      }
     } catch (err) {
+      out.destroy()
       await fs.rm(tmpAbs, { force: true })
       throw err
     }
+    await fs.rm(tmpAbs, { force: true })
 
     const rel = path.relative(config.root, destAbs)
-    const { size } = await fs.stat(destAbs)
+    const size = out.bytesWritten
     const requester = (res.locals as { user?: { username: string } }).user
     activity.add('browse', `uploaded "${rel}" (${size} bytes)${requester ? ` by ${requester.username}` : ''}`, {
       path: rel, size, user: requester?.username, ip: req.ip

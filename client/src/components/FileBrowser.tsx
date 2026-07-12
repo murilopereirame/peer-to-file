@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
 import { useApi } from '../context/ApiContext'
 import { errMessage, formatBytes, HttpError } from '../lib/format'
 import type { DownloadManager } from '../lib/downloadManager'
@@ -27,7 +27,7 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
   const pathRef = useRef('')
   pathRef.current = path
 
-  const load = (target: string): void => {
+  const load = useCallback((target: string): void => {
     // optimistic: show the target location and a loading state right away
     requestedPath.current = target
     setPath(target)
@@ -47,11 +47,15 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
         setLoading(false)
       }
     })()
-  }
+  }, [apiFetch])
 
-  useEffect(() => { load('') }, [])
+  useEffect(() => { load('') }, [load])
 
-  const refresh = (): void => { load(pathRef.current) }
+  // Stable identity (needed so useUploads doesn't treat onUploaded as a new
+  // callback on every render) that still always refreshes whatever folder
+  // is currently showing — reads it from a ref rather than taking `path` as
+  // a dependency, which would defeat the stability.
+  const refresh = useCallback((): void => { load(pathRef.current) }, [load])
   const { uploads, upload, dismiss } = useUploads(refresh)
 
   const uploadFiles = (files: FileList | File[]): void => {
@@ -157,9 +161,16 @@ function ListingRow ({
   const [renameValue, setRenameValue] = useState(entry.name)
   const [busy, setBusy] = useState(false)
   const [rowError, setRowError] = useState<string | null>(null)
+  // Both Enter (submitRename disables the input via `busy`) and Escape
+  // (cancelRename removes the still-focused input) can make the browser
+  // fire a native blur as a side effect of the key handler itself — set
+  // right before that happens so the input's onBlur (which submits on a
+  // genuine click/tab-away) can tell the difference and skip redundant work.
+  const keyHandledRef = useRef(false)
 
   const startRename = (e: React.MouseEvent): void => {
     e.stopPropagation()
+    keyHandledRef.current = false
     setRenameValue(entry.name)
     setRowError(null)
     setRenaming(true)
@@ -171,6 +182,7 @@ function ListingRow ({
   }
 
   const submitRename = (): void => {
+    if (busy) return
     const trimmed = renameValue.trim()
     if (trimmed === '' || trimmed === entry.name) {
       cancelRename()
@@ -200,8 +212,21 @@ function ListingRow ({
   }
 
   const onRenameKeyDown = (e: KeyboardEvent<HTMLInputElement>): void => {
-    if (e.key === 'Enter') submitRename()
-    else if (e.key === 'Escape') cancelRename()
+    if (e.key === 'Enter') {
+      keyHandledRef.current = true
+      submitRename()
+    } else if (e.key === 'Escape') {
+      keyHandledRef.current = true
+      cancelRename()
+    }
+  }
+
+  const onRenameBlur = (): void => {
+    if (keyHandledRef.current) {
+      keyHandledRef.current = false
+      return
+    }
+    submitRename()
   }
 
   const deleteEntry = (e: React.MouseEvent): void => {
@@ -235,7 +260,7 @@ function ListingRow ({
             onClick={e => e.stopPropagation()}
             onChange={e => setRenameValue(e.target.value)}
             onKeyDown={onRenameKeyDown}
-            onBlur={submitRename}
+            onBlur={onRenameBlur}
           />
           )
         : <span className="entry-name">{entry.name}</span>}
