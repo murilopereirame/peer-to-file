@@ -86,8 +86,17 @@ const executablePath = await findChromium()
 const browser = await chromium.launch({ executablePath })
 const context = await browser.newContext({ acceptDownloads: true })
 const page = await context.newPage()
+// Playwright can't drive the native save-file OS dialog the File System
+// Access API pops up, so force the client onto its next tier down: the
+// service-worker-streamed download — no Blob ever built, which is also the
+// path that actually matters for Safari (no File System Access API there at
+// all). That still exercises a real `download` event Playwright can await.
+await page.addInitScript(() => {
+  // @ts-expect-error test-only override of a read/write-capable optional API
+  delete window.showSaveFilePicker
+})
 page.on('console', msg => {
-  if (msg.type() === 'error') console.log(`  [browser] ${msg.text()}`)
+  if (msg.type() === 'error' || process.env.E2E_VERBOSE) console.log(`  [browser] ${msg.text()}`)
 })
 page.on('pageerror', err => console.log(`  [browser page error] ${err.message}`))
 
@@ -173,6 +182,26 @@ try {
   await page.waitForSelector('#downloads li[data-state="downloading"]', { timeout: 60_000 })
   console.log('✓ download started')
 
+  // details panel: info hash, elapsed time, at least one peer (the webseed —
+  // no WebRTC in this environment, node-datachannel isn't installed)
+  await page.click('#downloads li button:has-text("Details")')
+  await page.waitForSelector('.dl-details:not([hidden])', { timeout: 5_000 })
+  const infoHash = await page.getAttribute('#downloads li', 'data-infohash')
+  if (!infoHash || !/^[0-9a-f]{40}$/.test(infoHash)) fail(`bad data-infohash: ${infoHash}`)
+  await page.waitForFunction(
+    (hash) => (document.querySelector('.dl-details')?.textContent ?? '').includes(hash),
+    infoHash,
+    { timeout: 5_000 }
+  )
+  const detailsText = await page.locator('.dl-details').innerText()
+  if (!/Elapsed/.test(detailsText)) fail(`details panel missing elapsed time: ${detailsText}`)
+  await page.waitForFunction(
+    () => (document.querySelector('.dl-details')?.textContent ?? '').includes('webseed'),
+    undefined,
+    { timeout: 10_000 }
+  )
+  console.log('✓ details panel shows info hash, elapsed time and the webseed peer')
+
   // 5. pause: bandwidth must actually stop
   await waitForProgress(0.1)
   await page.click('#downloads li button:has-text("Pause")')
@@ -239,6 +268,68 @@ try {
   }
   if (savedSha !== payloadSha) fail(`checksum mismatch: ${savedSha} != ${payloadSha}`)
   console.log('✓ download completed; checksum matches the source')
+
+  // 9. logs page — opened as its own tab, shares the session cookie
+  const logsPage = await context.newPage()
+  await logsPage.goto(`http://127.0.0.1:${PORT}/logs.html`)
+  await logsPage.waitForSelector('#conn-status.ok', { timeout: 10_000 })
+  await logsPage.waitForFunction(
+    () => (document.querySelector('#log-list')?.textContent ?? '').includes('payload.bin'),
+    undefined,
+    { timeout: 10_000 }
+  )
+  const logsText = await logsPage.locator('#log-list').innerText()
+  if (!/torrent/i.test(logsText)) fail(`logs page missing a torrent-kind entry: ${logsText}`)
+  // filter by a kind guaranteed to be recent (the ring buffer only keeps the
+  // latest ~500/200-per-fetch entries, so anything from early in this long
+  // test — like the sign-in — may have already scrolled out, same as it
+  // would for a real admin watching a busy server)
+  await logsPage.selectOption('#kind-filter', 'torrent')
+  await logsPage.waitForFunction(
+    () => {
+      const kinds = [...document.querySelectorAll('#log-list .log-kind')]
+      return kinds.length > 0 && kinds.every(el => el.textContent === 'torrent')
+    },
+    undefined,
+    { timeout: 5_000 }
+  )
+  console.log('✓ logs page shows server activity and filters by kind')
+  await logsPage.close()
+
+  // 10. stale-download reconciliation: a synthetic orphaned OPFS store (no
+  // matching localStorage entry) and a pendingCleanup entry must both be
+  // reaped the next time the app starts up, without touching the real
+  // (already completed and forgotten) download from steps 1-8.
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory()
+    const dir = await root.getDirectoryHandle('p2f-downloads', { create: true })
+    await dir.getDirectoryHandle('orphan-no-entry', { create: true })
+    await dir.getDirectoryHandle('pending-cleanup-hash', { create: true })
+    const saved = JSON.parse(localStorage.getItem('p2f-downloads') ?? '[]')
+    saved.push({
+      path: 'movies/payload.bin', name: 'payload.bin',
+      infoHash: 'pending-cleanup-hash', lastActiveAt: Date.now(), pendingCleanup: true
+    })
+    localStorage.setItem('p2f-downloads', JSON.stringify(saved))
+  })
+  await page.reload()
+  await page.waitForSelector('#browser:not([hidden])', { timeout: 15_000 })
+  await sleep(1_000) // reconcileDownloads() runs before restoreDownloads(), give it a beat
+  const leftoverKeys = await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory()
+    const dir = await root.getDirectoryHandle('p2f-downloads', { create: true }).catch(() => null)
+    if (!dir) return []
+    const keys: string[] = []
+    // @ts-expect-error async iteration on FileSystemDirectoryHandle
+    for await (const [name] of dir) keys.push(name)
+    return keys
+  })
+  if (leftoverKeys.includes('orphan-no-entry') || leftoverKeys.includes('pending-cleanup-hash')) {
+    fail(`stale/orphaned OPFS entries were not reaped: ${JSON.stringify(leftoverKeys)}`)
+  }
+  const savedList = await page.evaluate(() => localStorage.getItem('p2f-downloads'))
+  if (savedList?.includes('pending-cleanup-hash')) fail('pendingCleanup entry was not dropped from localStorage')
+  console.log('✓ orphaned and pending-cleanup OPFS stores are reaped on next startup')
 
   console.log('\nE2E PASS')
 } finally {

@@ -28,6 +28,8 @@ h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; color: var(--muted); }
 a { color: var(--accent); }
 
 .title-row { display: flex; justify-content: space-between; align-items: baseline; }
+.title-actions { display: flex; align-items: baseline; gap: .75rem; }
+.title-actions a { font-size: .85rem; }
 
 #connect-form, #login-form { display: flex; gap: .5rem; flex-wrap: wrap; }
 
@@ -136,8 +138,73 @@ ul { list-style: none; margin: 0; padding: 0; }
 .dl-state.error { color: var(--err); }
 .dl-state.paused { color: #fbbf24; }
 #downloads button { padding: .25rem .6rem; font-size: .8rem; }
+
+.dl-details {
+  flex: 1 1 100%;
+  margin-top: .5rem;
+  padding-top: .5rem;
+  border-top: 1px solid var(--border);
+  font-size: .8rem;
+  color: var(--muted);
+}
+.dl-details dl { display: grid; grid-template-columns: auto 1fr; gap: .2rem .75rem; margin: 0 0 .5rem; }
+.dl-details dt { color: var(--muted); }
+.dl-details dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.dl-details .peers { list-style: none; margin: 0; padding: 0; }
+.dl-details .peers li {
+  display: flex;
+  gap: .5rem;
+  padding: .2rem 0;
+  border: none;
+  background: none;
+  margin: 0;
+}
+.dl-details .peer-type { flex: none; width: 4.5rem; color: var(--accent); }
+.dl-details .peer-addr { flex: 1; overflow-wrap: anywhere; }
+.dl-details .peer-speed { flex: none; color: var(--muted); }
+.dl-details .no-peers { color: var(--muted); font-style: italic; }
 .empty.loading { animation: pulse 1.2s ease-in-out infinite; }
 .empty.error { color: var(--err); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 
 footer { margin-top: 3rem; font-size: .75rem; color: var(--muted); }
+
+/* logs page */
+#logs-controls {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+  font-size: .85rem;
+  color: var(--muted);
+}
+#logs-controls select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .25rem .5rem;
+  margin-left: .35rem;
+}
+#log-list { display: flex; flex-direction: column; gap: .3rem; }
+#log-list li {
+  display: flex;
+  gap: .75rem;
+  align-items: baseline;
+  padding: .4rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: .82rem;
+}
+#log-list .log-time { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+#log-list .log-kind {
+  flex: none;
+  width: 5.5rem;
+  color: var(--accent);
+  text-transform: uppercase;
+  font-size: .7rem;
+  letter-spacing: .03em;
+}
+#log-list .log-msg { flex: 1; overflow-wrap: anywhere; }

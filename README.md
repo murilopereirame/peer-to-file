@@ -88,7 +88,8 @@ Clicking **Download**:
    tracker and pulls pieces over **WebRTC data channels**, with the **HTTP webseed as a
    second source/fallback** — both go through WebTorrent's chunking and per-piece SHA-1
    verification.
-4. On completion the file is handed to the browser's normal save-file flow.
+4. On completion the file is streamed to disk without ever being held in memory as a
+   single Blob — see "Saving without running out of memory" below.
 
 No DHT, no PEX, no public trackers: torrents are flagged `private` and both sides only
 announce to the embedded tracker. STUN/TURN are not used — on a VPN, host candidates are
@@ -108,6 +109,50 @@ enough.
 - **Pause** stops all transfer connections (zero bandwidth, not just "no new peers");
   **Resume** re-attaches the sources. **Cancel** discards the download and its stored
   pieces.
+- **Abandoned downloads get reclaimed automatically.** Cancelling, or finishing and
+  saving, always frees the piece store right away. A tab closed mid-download and never
+  reopened has no such trigger, so on every startup the client also: drops (and deletes
+  the on-disk pieces for) any download untouched for 14+ days, and removes any OPFS
+  piece store that isn't tracked by a known download at all (leftover from a save that
+  finished with no completion signal to act on immediately — see below — or any other
+  edge case). Nothing is silently accumulated forever.
+
+### Saving without running out of memory
+
+A completed download is written to disk one of three ways, tried in order, so that a
+huge file is never held in memory all at once:
+
+1. **File System Access API** (Chrome, Edge, …): streams straight from the on-disk piece
+   store to a file you choose, with a small, bounded memory footprint.
+2. **WebTorrent's own service worker**, for browsers without that API (this is what
+   actually matters for **Safari**, whose lack of the File System Access API combined
+   with a small Blob size limit is the classic way a large download used to OOM there):
+   streams the file to the browser's native download mechanism — no Blob is ever built.
+3. **A Blob built from the file's individual pieces**, only if neither of the above is
+   available (see below) — this is the one path whose memory use still scales with file
+   size, but even it skips the extra full-copy step a naive Blob build does.
+
+Both (1) and (2) need a **secure context** — HTTPS, or `localhost` — which a plain-HTTP
+VPN deployment (this project's default) doesn't have. On such a deployment every save
+falls back to (3). If you want large-file downloads to use the memory-safe path, put the
+server behind the [nginx + `P2F_PUBLIC_URL` reverse-proxy setup](#behind-a-reverse-proxy-nginx)
+described below (self-signed certificates are fine — once you've accepted the browser's
+warning once, the origin counts as secure).
+
+### Download details
+
+Click a download row's **Details** button for its info hash, elapsed time, and the
+active peer list (type, address if known — WebRTC addresses are best-effort, since
+they're not always exposed — and current speed per peer).
+
+### Activity logs
+
+The **View logs** link (top right, once connected) opens a dedicated tab showing recent
+server activity: connections, tracker announces, torrent metadata requests, and webseed
+hits, each with a timestamp and, where available, the remote IP. It polls
+`GET /api/logs` (same auth as everything else) and filters by kind. The log is an
+in-memory ring buffer (~500 entries) — a restart clears it; this is for "what's
+happening / just happened", not a persisted audit trail.
 
 ## Quick start
 
@@ -209,14 +254,24 @@ build.
   into), then `exec`s the actual server as `node` via `gosu`. Named volumes don't need
   this (Docker seeds them from the image, already owned by `node`), but bind mounts —
   `./config:/config`, the common case — do.
+- **WebTorrent's own service worker for streamed saves, not a bespoke one** — it already
+  implements exactly this (stream a torrent's data to a native download with no Blob),
+  is what the library's own examples use, and is one less thing to maintain. The one
+  non-obvious rule when using it: the anchor that triggers the download must **not**
+  carry the HTML `download` attribute — the service worker's response already sets
+  `Content-Disposition: attachment`, and setting both makes Chromium cancel the download
+  outright (two competing "force download" signals on the same navigation).
 
 ## Limitations
 
-- Completed downloads are assembled into a Blob for the browser save dialog — very large
-  files (multi-GB) are constrained by browser memory at that final step (pieces
-  themselves are stored in OPFS, not RAM).
+- Large-file downloads only avoid an in-memory Blob when the page is loaded over a
+  secure context (HTTPS or `localhost`) — see "Saving without running out of memory".
+  A plain-HTTP VPN deployment (this project's default) falls back to a Blob, whose
+  memory use scales with file size.
 - First download of a file waits for the server to hash it (~disk read speed); metadata
   is cached afterwards.
 - Transfer tokens expire after 48 h; a download paused longer than that resumes with
   fresh tokens on the next page load (or after re-clicking Download).
+- The activity log is in-memory and unauthenticated requests aren't attributed to a
+  user (only an IP) — it's an operational aid, not a security audit trail.
 - Download-only (no uploads), no previews, no sync, no multi-peer swarming.

@@ -18,7 +18,10 @@
   <header>
     <div class="title-row">
       <h1>peer-to-file</h1>
-      <button id="logout" type="button" hidden>Log out</button>
+      <div class="title-actions">
+        <a id="logs-link" href="logs.html" target="_blank" rel="noopener" hidden>View logs</a>
+        <button id="logout" type="button" hidden>Log out</button>
+      </div>
     </div>
     <form id="connect-form">
       <input id="server-input" type="text" placeholder="server ip:port (e.g. 10.0.0.1:8000)"

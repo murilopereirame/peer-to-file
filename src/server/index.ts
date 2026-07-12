@@ -9,6 +9,7 @@ import { createSeeder } from './seeder.ts'
 import { createApp, bracketHost } from './app.ts'
 import { createAuthService } from './auth.ts'
 import { AuthDb } from './db.ts'
+import { createActivityLog, type ActivityLog } from './activity.ts'
 import { consoleLogger, type Logger } from './log.ts'
 
 /**
@@ -45,6 +46,7 @@ export interface RunningServer {
   server: http.Server
   tracker: TrackerServer
   db: AuthDb | null
+  activity: ActivityLog
   close (): Promise<void>
 }
 
@@ -59,6 +61,7 @@ export async function startServer (
   const db = config.authEnabled ? new AuthDb(config.dbPath) : null
   db?.pruneExpiredSessions()
   const auth = createAuthService(db)
+  const activity = createActivityLog()
 
   // The Node seeder announces to its own tracker over loopback (or the bind
   // address when it isn't a wildcard). Peer matching only needs both sides to
@@ -85,6 +88,16 @@ export async function startServer (
   })
   tracker.on('error', (err: Error) => log.error(`tracker: ${err.message}`))
   tracker.on('warning', (err: Error) => log.warn(`tracker: ${err.message}`))
+  // Peer lifecycle from the swarm — fires the same way whichever path (the
+  // standalone tracker port or /tracker on the main port) a peer connected
+  // through, since both feed the same onWebSocketConnection() entry point.
+  for (const event of ['start', 'complete', 'stop'] as const) {
+    tracker.on(event, (peerId: string, params: { info_hash?: string }) => {
+      activity.add('tracker', `peer ${peerId.slice(0, 12)} ${event === 'start' ? 'started' : event === 'complete' ? 'completed' : 'stopped'} torrent ${params.info_hash?.slice(0, 12) ?? '?'}`, {
+        peerId, infoHash: params.info_hash, event
+      })
+    })
+  }
   if (!config.authEnabled) {
     await new Promise<void>(resolve => {
       tracker.listen(config.trackerPort, config.host, resolve)
@@ -96,7 +109,7 @@ export async function startServer (
   }
 
   const store = createTorrentStore()
-  const app = createApp({ config, store, seeder, auth, version })
+  const app = createApp({ config, store, seeder, auth, activity, version })
   const server = http.createServer(app)
 
   // Serve the tracker WebSocket on the main HTTP port too (at /tracker), so
@@ -124,6 +137,9 @@ export async function startServer (
       trackerWss.handleUpgrade(req, socket, head, ws => {
         trackerSockets.add(socket)
         socket.on('close', () => trackerSockets.delete(socket))
+        activity.add('connection', `tracker connection from ${req.socket.remoteAddress ?? 'unknown'}`, {
+          ip: req.socket.remoteAddress
+        })
         // bittorrent-tracker reads the request off the socket (ws >= 3
         // removed upgradeReq); mirror what its own ws server does.
         ;(ws as unknown as { upgradeReq: unknown }).upgradeReq = req
@@ -142,6 +158,8 @@ export async function startServer (
   })
   const addr = server.address()
   if (config.port === 0 && addr && typeof addr === 'object') config.port = addr.port
+
+  activity.add('server', `server started, serving ${config.root}`)
 
   log.info(`serving ${config.root}`)
   log.info(`web client + API on http://${bracketHost(config.host)}:${config.port}`)
@@ -175,7 +193,7 @@ export async function startServer (
     db?.close()
   }
 
-  return { config, server, tracker, db, close }
+  return { config, server, tracker, db, activity, close }
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])

@@ -9,5 +9,5 @@
     "rootDir": "src/client",
     "outDir": "public"
   },
-  "include": ["src/client/app.ts"]
+  "include": ["src/client/app.ts", "src/client/logs.ts"]
 }
