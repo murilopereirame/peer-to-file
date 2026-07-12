@@ -17,6 +17,9 @@ services:
       # P2F_HOST: 127.0.0.1
       # P2F_PUBLIC_URL: https://files.example.com
     volumes:
+      # Read-only by default: download/browse only. Delete/rename/move/upload
+      # need write access — drop the ":ro" (mount read-write) to enable them.
+      # See "Managing files" and the security note in the README first.
       - /srv/files:/data:ro # <-- change to the directory you want to share
       - p2f-config:/config # SQLite auth database (users, sessions, tokens)
     restart: unless-stopped

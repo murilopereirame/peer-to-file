@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { BrowseError, listDir, resolveInsideRoot } from '../src/server/browse.ts'
+import {
+  BrowseError, deleteEntry, isValidEntryName, listDir, moveEntry, resolveInsideRoot, resolveNewPathInsideRoot
+} from '../src/server/browse.ts'
 
 let outside: string
 let root: string
@@ -103,4 +105,132 @@ test('lists subdirectories', async () => {
 
 test('listDir on a file is a 400', async () => {
   await expectStatus(listDir(root, 'a.txt'), 400)
+})
+
+// --- mutation helpers: delete/move touch the filesystem, so each test below
+// gets its own throwaway root instead of sharing the read-only fixture above.
+
+async function makeMutableRoot (): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-mutate-'))
+  await fs.writeFile(path.join(dir, 'a.txt'), 'hello')
+  await fs.mkdir(path.join(dir, 'sub'))
+  await fs.writeFile(path.join(dir, 'sub', 'b.txt'), 'world!')
+  return fs.realpath(dir)
+}
+
+test('isValidEntryName rejects separators, dots and null bytes', () => {
+  assert.equal(isValidEntryName('report.pdf'), true)
+  assert.equal(isValidEntryName(''), false)
+  assert.equal(isValidEntryName('.'), false)
+  assert.equal(isValidEntryName('..'), false)
+  assert.equal(isValidEntryName('a/b'), false)
+  assert.equal(isValidEntryName('a\\b'), false)
+  assert.equal(isValidEntryName('a\0b'), false)
+})
+
+test('resolveNewPathInsideRoot resolves a not-yet-existing target in an existing folder', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    assert.equal(await resolveNewPathInsideRoot(mroot, 'new.txt'), path.join(mroot, 'new.txt'))
+    assert.equal(await resolveNewPathInsideRoot(mroot, 'sub/new.txt'), path.join(mroot, 'sub', 'new.txt'))
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('resolveNewPathInsideRoot rejects a missing parent, invalid names and traversal', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await expectStatus(resolveNewPathInsideRoot(mroot, 'nope/new.txt'), 404)
+    await expectStatus(resolveNewPathInsideRoot(mroot, 'a.txt/new.txt'), 400) // parent is a file
+    await expectStatus(resolveNewPathInsideRoot(mroot, '../escape.txt'), 403)
+    await expectStatus(resolveNewPathInsideRoot(mroot, 'sub/..'), 400) // ".." is not a valid file name
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('deleteEntry removes a file and reports its relative path', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    const result = await deleteEntry(mroot, 'a.txt')
+    assert.equal(result.rel, 'a.txt')
+    assert.equal(result.wasDir, false)
+    await assert.rejects(fs.stat(path.join(mroot, 'a.txt')))
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('deleteEntry removes a directory recursively', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    const result = await deleteEntry(mroot, 'sub')
+    assert.equal(result.wasDir, true)
+    await assert.rejects(fs.stat(path.join(mroot, 'sub')))
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('deleteEntry refuses to delete the shared root', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await expectStatus(deleteEntry(mroot, ''), 400)
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry renames a file in place', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    const result = await moveEntry(mroot, 'a.txt', 'renamed.txt')
+    assert.equal(result.toRel, 'renamed.txt')
+    await assert.rejects(fs.stat(path.join(mroot, 'a.txt')))
+    assert.equal(await fs.readFile(path.join(mroot, 'renamed.txt'), 'utf8'), 'hello')
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry moves a file into another folder', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    const result = await moveEntry(mroot, 'a.txt', 'sub/a.txt')
+    assert.equal(result.toRel, path.join('sub', 'a.txt'))
+    assert.equal(await fs.readFile(path.join(mroot, 'sub', 'a.txt'), 'utf8'), 'hello')
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry refuses to overwrite an existing entry', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await fs.writeFile(path.join(mroot, 'taken.txt'), 'already here')
+    await expectStatus(moveEntry(mroot, 'a.txt', 'taken.txt'), 409)
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry refuses to move a folder into its own subtree', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await expectStatus(moveEntry(mroot, 'sub', 'sub/nested'), 400)
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry refuses to move the shared root and rejects traversal', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await expectStatus(moveEntry(mroot, '', 'elsewhere'), 400)
+    await expectStatus(moveEntry(mroot, 'a.txt', '../escape.txt'), 403)
+    await expectStatus(moveEntry(mroot, '../escape.txt', 'a.txt'), 403)
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
 })

@@ -22,8 +22,14 @@ export interface Listing {
   entries: DirEntry[]
 }
 
-function isInside (root: string, candidate: string): boolean {
+export function isInside (root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(root + path.sep)
+}
+
+/** A single path segment: no separators, no `.`/`..`, no null bytes. */
+export function isValidEntryName (name: string): boolean {
+  return name !== '' && name !== '.' && name !== '..' &&
+    !name.includes('/') && !name.includes('\\') && !name.includes('\0')
 }
 
 async function mapLimit<T, R> (
@@ -80,6 +86,67 @@ export async function resolveInsideRoot (root: string, relPath: unknown = ''): P
     throw new BrowseError(403, 'path escapes the shared root')
   }
   return real
+}
+
+/**
+ * Resolve a client-supplied relative path for a target that does not exist
+ * yet (an upload destination, or a move/rename destination): the parent
+ * directory must already exist inside the root, and the final path segment
+ * must be a plain name with no separators or traversal tricks. Unlike
+ * resolveInsideRoot, this never touches the target itself (it may not
+ * exist), only its parent.
+ */
+export async function resolveNewPathInsideRoot (root: string, relPath: unknown): Promise<string> {
+  if (typeof relPath !== 'string') {
+    throw new BrowseError(400, 'path must be a string')
+  }
+  if (relPath.includes('\0')) {
+    throw new BrowseError(400, 'invalid path')
+  }
+  const trimmed = relPath.replace(/^[/\\]+/, '').replace(/[/\\]+$/, '')
+  const lastSep = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  const parentRel = lastSep === -1 ? '' : trimmed.slice(0, lastSep)
+  const name = lastSep === -1 ? trimmed : trimmed.slice(lastSep + 1)
+  if (!isValidEntryName(name)) {
+    throw new BrowseError(400, 'invalid file name')
+  }
+  const parentAbs = await resolveInsideRoot(root, parentRel)
+  const stat = await fs.stat(parentAbs)
+  if (!stat.isDirectory()) {
+    throw new BrowseError(400, 'destination folder does not exist')
+  }
+  return path.join(parentAbs, name)
+}
+
+/** Deletes a file or directory (recursively) inside the root. */
+export async function deleteEntry (root: string, relPath: unknown): Promise<{ abs: string, rel: string, wasDir: boolean }> {
+  const abs = await resolveInsideRoot(root, relPath)
+  if (abs === root) {
+    throw new BrowseError(400, 'cannot delete the shared root')
+  }
+  const st = await fs.stat(abs)
+  await fs.rm(abs, { recursive: true, force: false })
+  return { abs, rel: path.relative(root, abs), wasDir: st.isDirectory() }
+}
+
+/** Moves (or renames) a file or directory inside the root. Refuses to overwrite an existing entry. */
+export async function moveEntry (
+  root: string, fromRelPath: unknown, toRelPath: unknown
+): Promise<{ fromAbs: string, fromRel: string, toAbs: string, toRel: string }> {
+  const fromAbs = await resolveInsideRoot(root, fromRelPath)
+  if (fromAbs === root) {
+    throw new BrowseError(400, 'cannot move the shared root')
+  }
+  const toAbs = await resolveNewPathInsideRoot(root, toRelPath)
+  if (isInside(fromAbs, toAbs)) {
+    throw new BrowseError(400, 'cannot move a folder into itself')
+  }
+  const exists = await fs.stat(toAbs).then(() => true, () => false)
+  if (exists) {
+    throw new BrowseError(409, 'a file or folder already exists at the destination')
+  }
+  await fs.rename(fromAbs, toAbs)
+  return { fromAbs, fromRel: path.relative(root, fromAbs), toAbs, toRel: path.relative(root, toAbs) }
 }
 
 /**

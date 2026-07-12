@@ -331,6 +331,50 @@ try {
   if (savedList?.includes('pending-cleanup-hash')) fail('pendingCleanup entry was not dropped from localStorage')
   console.log('✓ orphaned and pending-cleanup OPFS stores are reaped on next startup')
 
+  // 11. file management: upload, rename, move and delete
+  const uploadPath = path.join(os.tmpdir(), 'p2f-e2e-upload.bin')
+  const uploadPayload = crypto.randomBytes(64 * 1024)
+  await fs.writeFile(uploadPath, uploadPayload)
+
+  const [fileChooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.click('.browser-toolbar button:has-text("Upload")')
+  ])
+  await fileChooser.setFiles(uploadPath)
+  await page.waitForSelector('#uploads li[data-state="done"]', { timeout: 30_000 })
+  await page.waitForSelector('#listing li:has-text("p2f-e2e-upload.bin")', { timeout: 10_000 })
+  console.log('✓ uploaded file appears in the listing')
+
+  await page.click('#listing li:has-text("p2f-e2e-upload.bin") button:has-text("Rename")')
+  await page.fill('.rename-input', 'e2e-renamed.bin')
+  await page.keyboard.press('Enter')
+  await page.waitForSelector('#listing li:has-text("e2e-renamed.bin")', { timeout: 10_000 })
+  await page.waitForFunction(
+    () => !(document.querySelector('#listing')?.textContent ?? '').includes('p2f-e2e-upload.bin'),
+    undefined, { timeout: 5_000 }
+  )
+  console.log('✓ renamed a file in place')
+
+  await page.click('#listing li:has-text("e2e-renamed.bin") button:has-text("Rename")')
+  await page.fill('.rename-input', 'movies/e2e-renamed.bin')
+  await page.keyboard.press('Enter')
+  await page.waitForFunction(
+    () => !(document.querySelector('#listing')?.textContent ?? '').includes('e2e-renamed.bin'),
+    undefined, { timeout: 5_000 }
+  )
+  await page.click('#listing li.dir:has-text("movies")')
+  await page.waitForSelector('#listing li:has-text("e2e-renamed.bin")', { timeout: 10_000 })
+  console.log('✓ moved a file into a subfolder')
+
+  page.once('dialog', dialog => { void dialog.accept() })
+  await page.click('#listing li:has-text("e2e-renamed.bin") button:has-text("Delete")')
+  await page.waitForFunction(
+    () => !(document.querySelector('#listing')?.textContent ?? '').includes('e2e-renamed.bin'),
+    undefined, { timeout: 10_000 }
+  )
+  console.log('✓ deleted a file (after confirmation)')
+  await fs.rm(uploadPath, { force: true })
+
   console.log('\nE2E PASS')
 } finally {
   await browser.close()

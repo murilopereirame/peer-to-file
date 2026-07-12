@@ -19,8 +19,13 @@ transfer token. Defense in depth still applies:
 - With Docker, either use host networking and bind to the VPN IP (recommended, see
   `docker-compose.yml`), or publish the container ports on the VPN IP only
   (`"10.0.0.1:8000:8000"`).
-- Path traversal is blocked (`../`, absolute paths, symlinks pointing outside the root),
-  and the shared volume should still be mounted read-only.
+- Path traversal is blocked (`../`, absolute paths, symlinks pointing outside the root).
+  The shared volume is mounted **read-only by default** (`docker-compose.yml`), which
+  disables delete/rename/move/upload entirely (they fail with a permission error) — the
+  safest option if you only need browsing and downloads. Mount it read-write only if you
+  want file management too, and only after you're satisfied with the auth/network
+  boundary above: with write access, anyone who can authenticate can delete or overwrite
+  anything under the shared root.
 - `P2F_AUTH=off` restores the original no-auth mode for pure-VPN setups — then the VPN is
   the only trust boundary.
 - Traffic is plain HTTP unless you terminate TLS in front (see the nginx section); on a
@@ -153,6 +158,31 @@ hits, each with a timestamp and, where available, the remote IP. It polls
 `GET /api/logs` (same auth as everything else) and filters by kind. The log is an
 in-memory ring buffer (~500 entries) — a restart clears it; this is for "what's
 happening / just happened", not a persisted audit trail.
+
+### Managing files
+
+Every listing row has **Rename** and **Delete** buttons, and folders/toolbar have an
+**Upload** button (drag-and-drop onto the file listing works too, dropping into whichever
+folder is currently open):
+
+- **Rename** turns the entry's name into an inline text field. Submitting a bare name
+  renames in place; including a `/` (e.g. `archive/report.pdf`) moves the entry into
+  another folder relative to the one currently open — both go through the same
+  `POST /api/move` endpoint, which refuses to overwrite an existing entry or move a
+  folder into its own subtree.
+- **Delete** asks for confirmation, then recursively removes the file or folder via
+  `POST /api/delete`. There is no trash/undo — deletion is immediate and permanent.
+- **Upload** streams each selected (or dropped) file straight to disk via
+  `POST /api/upload` — never buffered whole in memory, written to a temp file first and
+  atomically renamed into place, so an aborted upload can't leave a partial file visible
+  in listings or clobber an existing one of the same name. Progress is shown per file in
+  an **Uploads** panel; the listing refreshes automatically as each upload completes.
+
+All of these are gated by the same session/token authentication as everything else, and
+every mutation (delete, move, upload) is recorded in the activity log. They also require
+the shared directory to be writable — the default Docker Compose setup mounts it
+read-only, which disables them cleanly (a permission error, not a crash); see the
+security note above before switching to a read-write mount.
 
 ## Quick start
 
