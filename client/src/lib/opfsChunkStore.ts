@@ -2,8 +2,47 @@
 // file system so a refreshed tab can resume a download instead of restarting.
 // Implements the abstract-chunk-store interface WebTorrent expects; one file
 // per piece under p2f-downloads/<infohash>/.
+//
+// All actual piece reads/writes are proxied to a dedicated worker (see
+// opfsWorker.ts) that performs them with FileSystemSyncAccessHandle instead
+// of the main-thread-only, async createWritable() stream. A sync access
+// handle takes an exclusive lock on the file for its whole
+// open/write-or-read/flush/close lifetime, so two writes (or a write and a
+// read) can never race the same file, and a write is guaranteed durably
+// flushed before close() returns. Safari's async OPFS writes have been
+// observed to leave a file readable-but-truncated under concurrent access —
+// this sidesteps that class of bug rather than working around one symptom.
+
+import type { OpfsWorkerRequest, OpfsWorkerResponse } from './opfsWorkerProtocol'
 
 type StoreCb<T = void> = (err: Error | null, value?: T) => void
+
+let worker: Worker | null = null
+let nextRequestId = 0
+const pending = new Map<number, { resolve: (v: Uint8Array | undefined) => void, reject: (err: Error) => void }>()
+
+function getWorker (): Worker {
+  if (!worker) {
+    worker = new Worker(new URL('./opfsWorker.ts', import.meta.url), { type: 'module' })
+    worker.onmessage = (ev: MessageEvent<OpfsWorkerResponse>) => {
+      const res = ev.data
+      const req = pending.get(res.id)
+      if (!req) return
+      pending.delete(res.id)
+      if (res.ok) req.resolve(res.data)
+      else req.reject(new Error(res.error ?? 'OPFS worker error'))
+    }
+  }
+  return worker
+}
+
+function callWorker (req: Omit<OpfsWorkerRequest, 'id'>): Promise<Uint8Array | undefined> {
+  const id = nextRequestId++
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject })
+    getWorker().postMessage({ ...req, id } satisfies OpfsWorkerRequest)
+  })
+}
 
 export class OpfsChunkStore {
   chunkLength: number
@@ -12,7 +51,6 @@ export class OpfsChunkStore {
   private readonly lastChunkLength: number
   private readonly totalChunks: number
   private readonly key: string
-  private readonly dirPromise: Promise<FileSystemDirectoryHandle>
 
   // Instances keyed by infoHash, so code elsewhere (downloadManager.ts) can
   // find the store WebTorrent created internally for a given torrent — it
@@ -57,14 +95,7 @@ export class OpfsChunkStore {
     this.lastChunkLength = this.length - this.lastChunkIndex * chunkLength
     this.totalChunks = this.lastChunkIndex + 1
     this.key = opts.torrent?.infoHash ?? opts.name ?? 'unknown'
-    this.dirPromise = OpfsChunkStore.dirFor(this.key)
     OpfsChunkStore.instances.set(this.key, this)
-  }
-
-  static async dirFor (key: string): Promise<FileSystemDirectoryHandle> {
-    const rootDir = await navigator.storage.getDirectory()
-    const parent = await rootDir.getDirectoryHandle('p2f-downloads', { create: true })
-    return parent.getDirectoryHandle(key, { create: true })
   }
 
   static async remove (key: string): Promise<void> {
@@ -98,13 +129,10 @@ export class OpfsChunkStore {
   }
 
   put (index: number, buf: Uint8Array, cb: StoreCb): void {
-    this.dirPromise.then(async dir => {
-      const handle = await dir.getFileHandle(String(index), { create: true })
-      const writable = await handle.createWritable()
-      // cast: TS's DOM lib insists on non-shared ArrayBuffer backing
-      await writable.write(buf as Uint8Array<ArrayBuffer>)
-      await writable.close()
-    }).then(() => cb(null), (err: Error) => cb(err))
+    callWorker({ op: 'put', key: this.key, index, buf }).then(
+      () => cb(null),
+      (err: Error) => cb(err)
+    )
   }
 
   get (index: number, opts: { offset?: number, length?: number } | StoreCb<Uint8Array>, cb?: StoreCb<Uint8Array>): void {
@@ -115,16 +143,13 @@ export class OpfsChunkStore {
       options = opts
     }
     const done = cb as StoreCb<Uint8Array>
-    this.dirPromise.then(async dir => {
-      const handle = await dir.getFileHandle(String(index)) // throws if absent
-      const file = await handle.getFile()
-      if (file.size !== this.expectedLength(index)) {
-        throw new Error(`chunk ${index} is incomplete`)
-      }
-      const offset = options.offset ?? 0
-      const end = options.length !== undefined ? offset + options.length : file.size
-      const buf = await file.slice(offset, end).arrayBuffer()
-      return new Uint8Array(buf)
+    callWorker({
+      op: 'get',
+      key: this.key,
+      index,
+      offset: options.offset,
+      length: options.length,
+      expectedLength: this.expectedLength(index)
     }).then(data => {
       if (this.armed) {
         this.readIndices.add(index)
@@ -133,7 +158,7 @@ export class OpfsChunkStore {
           this.onAllRead?.()
         }
       }
-      done(null, data)
+      done(null, data as Uint8Array)
     }, (err: Error) => done(err))
   }
 
@@ -141,6 +166,6 @@ export class OpfsChunkStore {
 
   destroy (cb: StoreCb): void {
     if (OpfsChunkStore.instances.get(this.key) === this) OpfsChunkStore.instances.delete(this.key)
-    OpfsChunkStore.remove(this.key).then(() => cb(null), (err: Error) => cb(err))
+    callWorker({ op: 'destroy', key: this.key }).then(() => cb(null), (err: Error) => cb(err))
   }
 }

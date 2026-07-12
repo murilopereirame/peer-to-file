@@ -151,6 +151,14 @@ otherwise a large or slow save could have its pieces deleted out from under it m
 stream, which shows up to the user as the browser abruptly stopping/failing the
 download partway through.
 
+All OPFS piece reads/writes run in a dedicated worker via `FileSystemSyncAccessHandle`
+rather than the main-thread `createWritable()` stream. A sync access handle holds an
+exclusive lock on its file for its whole open/write-or-read/flush/close lifetime, so two
+operations can never race the same file, and a write is guaranteed durably flushed
+before `close()` returns — WebKit's async OPFS writes have been observed to leave a
+piece readable-but-truncated under concurrent access, which surfaced as path (2)
+streaming a 0-byte file on Safari with no error anywhere.
+
 ### Download details
 
 Click a download row's **Details** button for its info hash, elapsed time, and the
@@ -262,7 +270,7 @@ does not need to be exposed through the proxy.
 
 ```sh
 npm ci
-npm run check   # typecheck server + client
+npm run check   # typecheck server + client + OPFS worker
 npm test        # API + auth + path-safety tests (node:test)
 npm run e2e     # real-browser end-to-end: login, pause/resume, server-restart
                 # resume, page-reload resume (OPFS), checksum
@@ -322,4 +330,4 @@ build.
   fresh tokens on the next page load (or after re-clicking Download).
 - The activity log is in-memory and unauthenticated requests aren't attributed to a
   user (only an IP) — it's an operational aid, not a security audit trail.
-- Download-only (no uploads), no previews, no sync, no multi-peer swarming.
+- No previews, no sync, no multi-peer swarming.

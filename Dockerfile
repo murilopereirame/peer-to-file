@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json tsconfig.client.json vite.config.ts ./
+COPY tsconfig.json tsconfig.client.json tsconfig.worker.json vite.config.ts ./
 COPY src ./src
 COPY client ./client
 RUN npm run check && npm run build
