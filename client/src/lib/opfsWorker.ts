@@ -80,7 +80,10 @@ async function handle (req: OpfsWorkerRequest): Promise<void> {
     } else if (req.op === 'get') {
       if (req.index === undefined || req.expectedLength === undefined) throw new Error('get: missing index/expectedLength')
       const data = await get(req.key, req.index, req.offset ?? 0, req.length, req.expectedLength)
-      postMessage({ id: req.id, ok: true, data } satisfies OpfsWorkerResponse, { transfer: [data.buffer] })
+      // The array form (not the newer {transfer: [...]} options-bag form) is
+      // the one every browser's postMessage has supported since transferable
+      // objects existed at all — no reason to depend on the newer overload.
+      postMessage({ id: req.id, ok: true, data } satisfies OpfsWorkerResponse, [data.buffer])
     } else {
       await destroy(req.key)
       postMessage({ id: req.id, ok: true } satisfies OpfsWorkerResponse)
