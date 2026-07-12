@@ -144,6 +144,13 @@ server behind the [nginx + `P2F_PUBLIC_URL` reverse-proxy setup](#behind-a-rever
 described below (self-signed certificates are fine — once you've accepted the browser's
 warning once, the origin counts as secure).
 
+Path (2) has no JS-visible signal for when the browser actually finishes writing the
+file, so the on-disk piece store it streams from is kept around until every piece has
+been read back out at least once (real completion), not reclaimed on a fixed timer —
+otherwise a large or slow save could have its pieces deleted out from under it mid-
+stream, which shows up to the user as the browser abruptly stopping/failing the
+download partway through.
+
 ### Download details
 
 Click a download row's **Details** button for its info hash, elapsed time, and the
