@@ -424,6 +424,13 @@ export class DownloadManager {
         this.completeSave(torrent, entryPath, true)
       } else if (this.streamServer) {
         console.debug('[p2f] save tier 2: service worker stream, url =', file.streamURL)
+        // Reads from here on are the service worker actually streaming the
+        // file to the browser's download manager — start tracking now, not
+        // from construction, or piece-verification reads already made
+        // during the download itself (every piece is read back out and
+        // hashed right after it's written) would make it look like the
+        // save already finished before the browser has read a single byte.
+        OpfsChunkStore.instances.get(torrent.infoHash)?.beginTrackingReads()
         // No `download` attribute here: the service worker's response
         // already carries Content-Disposition: attachment, so setting the
         // HTML attribute too makes Chromium cancel the download outright —
