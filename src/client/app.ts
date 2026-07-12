@@ -4,11 +4,21 @@
 interface WTFile {
   name: string
   length: number
-  blob (): Promise<Blob>
+  type?: string
+  /** Only valid once a WTServer has been created on the client (streamed downloads). */
+  streamURL: string
+  stream (): ReadableStream<Uint8Array>
+  [Symbol.asyncIterator] (): AsyncIterableIterator<Uint8Array>
 }
 
 interface WTWire {
+  type: string // 'webrtc' | 'webSeed' | 'tcpIncoming' | ...
+  remoteAddress?: string
+  remotePort?: number
+  peerId?: string
   destroy (): void
+  downloadSpeed (): number
+  uploadSpeed (): number
 }
 
 interface WTTorrent {
@@ -33,6 +43,10 @@ interface WTTorrent {
   destroy (opts?: { destroyStore?: boolean }, cb?: () => void): void
 }
 
+interface WTServer {
+  listen (port: number, cb: () => void): void
+}
+
 declare class WebTorrent {
   constructor (opts?: object)
   add (
@@ -41,6 +55,22 @@ declare class WebTorrent {
     ontorrent: (torrent: WTTorrent) => void
   ): WTTorrent
   on (event: string, fn: (...args: unknown[]) => void): void
+  createServer (opts: { controller: ServiceWorkerRegistration }, force: 'browser' | 'node'): WTServer
+}
+
+// File System Access API — not yet in TS's bundled DOM lib.
+interface FileSystemWritableFileStream extends WritableStream {
+  write (data: BufferSource | Blob | string): Promise<void>
+  close (): Promise<void>
+}
+interface FileSystemFileHandle {
+  createWritable (): Promise<FileSystemWritableFileStream>
+}
+// This file has no top-level import/export, so TS treats it as a global
+// script — top-level interfaces here already merge with the real `Window`,
+// no `declare global` wrapper needed (that only applies inside modules).
+interface Window {
+  showSaveFilePicker?: (options?: { suggestedName?: string }) => Promise<FileSystemFileHandle>
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +113,24 @@ class OpfsChunkStore {
       const parent = await rootDir.getDirectoryHandle('p2f-downloads')
       await parent.removeEntry(key, { recursive: true })
     } catch { /* nothing stored */ }
+  }
+
+  /** All infoHash keys currently holding pieces on disk — used to reap orphans on startup. */
+  static async listKeys (): Promise<string[]> {
+    try {
+      const rootDir = await navigator.storage.getDirectory()
+      const parent = await rootDir.getDirectoryHandle('p2f-downloads')
+      const keys: string[] = []
+      // FileSystemDirectoryHandle is async-iterable in browsers that support
+      // OPFS, but TS's DOM lib doesn't declare that yet — cast to iterate.
+      const iter = parent as unknown as AsyncIterable<[string, FileSystemHandle]>
+      for await (const [name, handle] of iter) {
+        if (handle.kind === 'directory') keys.push(name)
+      }
+      return keys
+    } catch {
+      return []
+    }
   }
 
   private expectedLength (index: number): number {
@@ -151,6 +199,7 @@ const loginUser = $<HTMLInputElement>('#login-user')
 const loginPass = $<HTMLInputElement>('#login-pass')
 const loginStatus = $('#login-status')
 const logoutBtn = $<HTMLButtonElement>('#logout')
+const logsLink = $<HTMLAnchorElement>('#logs-link')
 const browserSection = $('#browser')
 const breadcrumbEl = $('#breadcrumb')
 const listingEl = $('#listing')
@@ -166,6 +215,39 @@ const client = new WebTorrent({ tracker: { rtcConfig: { iceServers: [] } } })
 client.on('error', (err: unknown) => {
   setStatus(`WebTorrent error: ${errMessage(err)}`, 'error')
 })
+
+// Streamed saving: WebTorrent's own service worker pipes a file's data
+// straight from its chunk store to the browser's native download mechanism
+// (Content-Disposition: attachment), so a completed download never has to
+// be materialized as one in-memory Blob first — the fix for OOM on huge
+// files and for Safari's much smaller Blob size limit. This needs a secure
+// context (HTTPS or localhost); on plain HTTP (e.g. an un-proxied VPN
+// deployment) Service Workers aren't available at all, so we fall back to
+// building the Blob from individual chunks (still avoids the extra full-size
+// copy `file.arrayBuffer()` does, just not the memory footprint itself).
+let streamServer: WTServer | null = null
+if (window.isSecureContext && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js')
+    .then(() => navigator.serviceWorker.ready)
+    .then(async registration => {
+      // .ready only means *a* worker is active for this scope — on this
+      // page's first-ever visit (nothing registered before), that worker
+      // still needs a moment to actually take control of the open page via
+      // clients.claim(). Fetching a stream URL before that finishes bypasses
+      // the service worker entirely and hits the real server, which 404s on
+      // /webtorrent/* — so wait for control before trusting streamed saves.
+      if (!navigator.serviceWorker.controller) {
+        await new Promise<void>(resolve => {
+          navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true })
+        })
+      }
+      streamServer = client.createServer({ controller: registration }, 'browser')
+      streamServer.listen(0, () => {})
+    })
+    .catch((err: unknown) => {
+      console.warn('streamed downloads unavailable, falling back to in-memory saves:', err)
+    })
+}
 
 function errMessage (err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -250,6 +332,7 @@ function showSetup (): void {
   loginSection.hidden = true
   browserSection.hidden = true
   logoutBtn.hidden = true
+  logsLink.hidden = true
   setupUser.focus()
 }
 
@@ -258,6 +341,7 @@ function showLogin (): void {
   loginSection.hidden = false
   browserSection.hidden = true
   logoutBtn.hidden = true
+  logsLink.hidden = true
   loginUser.focus()
 }
 
@@ -266,9 +350,11 @@ async function showBrowser (authed: boolean): Promise<void> {
   loginSection.hidden = true
   browserSection.hidden = false
   logoutBtn.hidden = !authed
+  logsLink.hidden = false
   await loadListing('')
   if (!downloadsRestored) {
     downloadsRestored = true
+    await reconcileDownloads()
     restoreDownloads()
   }
 }
@@ -454,10 +540,34 @@ function renderListing (entries: DirEntry[]): void {
 // ---------------------------------------------------------------------------
 // Downloads
 
+// A download untouched this long is treated as abandoned (tab closed and
+// never reopened) and reaped on the next visit — both the localStorage entry
+// and, more importantly, its OPFS piece store, which otherwise has no owner
+// and would sit there forever.
+const STALE_DOWNLOAD_MS = 14 * 24 * 60 * 60 * 1000
+// How often an in-progress download's lastActiveAt gets refreshed on disk —
+// no need to write localStorage on every 500ms progress tick.
+const TOUCH_INTERVAL_MS = 30_000
+// Grace period before reclaiming a completed download's OPFS store when we
+// have no direct signal that the browser's own save/download finished (the
+// service-worker + <a download> path) — long enough for any real transfer
+// speed to finish streaming, short enough not to waste much disk space.
+const PENDING_CLEANUP_DELAY_MS = 2 * 60_000
+
 interface SavedDownload {
   path: string
   name: string
   paused?: boolean
+  infoHash?: string
+  lastActiveAt: number
+  /**
+   * Set once a download finished saving through a path with no completion
+   * signal (the service-worker + <a download> trick — see saveFile). The
+   * OPFS store still needs reaping, but only once we're done using it, which
+   * for that path we can't observe directly, so it's deferred to the next
+   * reconciliation pass instead of done inline.
+   */
+  pendingCleanup?: boolean
 }
 
 function savedDownloads (): SavedDownload[] {
@@ -474,11 +584,48 @@ function persistDownload (entry: SavedDownload): void {
   localStorage.setItem('p2f-downloads', JSON.stringify(list))
 }
 
+function touchDownload (path: string, patch: Partial<SavedDownload> = {}): void {
+  const existing = savedDownloads().find(d => d.path === path)
+  if (!existing) return
+  persistDownload({ ...existing, ...patch, lastActiveAt: Date.now() })
+}
+
 function forgetDownload (path: string): void {
   localStorage.setItem(
     'p2f-downloads',
     JSON.stringify(savedDownloads().filter(d => d.path !== path))
   )
+}
+
+/**
+ * Runs once at startup, before downloads are restored: drops (and reclaims
+ * the OPFS storage for) entries that finished saving via a no-completion-
+ * signal path, entries abandoned for longer than STALE_DOWNLOAD_MS, and any
+ * OPFS piece store left with no tracked download at all.
+ */
+async function reconcileDownloads (): Promise<void> {
+  const list = savedDownloads()
+  const now = Date.now()
+  const keep: SavedDownload[] = []
+  const reap = new Set<string>()
+
+  for (const entry of list) {
+    const abandoned = now - entry.lastActiveAt > STALE_DOWNLOAD_MS
+    if (entry.pendingCleanup || abandoned) {
+      if (entry.infoHash) reap.add(entry.infoHash)
+      continue
+    }
+    keep.push(entry)
+  }
+  if (keep.length !== list.length) {
+    localStorage.setItem('p2f-downloads', JSON.stringify(keep))
+  }
+
+  const tracked = new Set(keep.map(e => e.infoHash).filter((h): h is string => Boolean(h)))
+  for (const key of await OpfsChunkStore.listKeys()) {
+    if (!tracked.has(key)) reap.add(key)
+  }
+  await Promise.all([...reap].map(key => OpfsChunkStore.remove(key)))
 }
 
 function restoreDownloads (): void {
@@ -494,6 +641,8 @@ interface DownloadRow {
   state: HTMLSpanElement
   pauseBtn: HTMLButtonElement
   cancelBtn: HTMLButtonElement
+  detailsBtn: HTMLButtonElement
+  details: HTMLDivElement
 }
 
 const activeDownloads = new Set<string>() // entry paths with a live download
@@ -518,6 +667,10 @@ function createDownloadRow (name: string): DownloadRow {
   state.className = 'dl-state'
   state.textContent = 'preparing…'
 
+  const detailsBtn = document.createElement('button')
+  detailsBtn.type = 'button'
+  detailsBtn.textContent = 'Details'
+
   const pauseBtn = document.createElement('button')
   pauseBtn.type = 'button'
   pauseBtn.textContent = 'Pause'
@@ -527,15 +680,74 @@ function createDownloadRow (name: string): DownloadRow {
   cancelBtn.type = 'button'
   cancelBtn.textContent = 'Cancel'
 
-  li.append(title, bar, stats, state, pauseBtn, cancelBtn)
+  const details = document.createElement('div')
+  details.className = 'dl-details'
+  details.hidden = true
+
+  li.append(title, bar, stats, state, detailsBtn, pauseBtn, cancelBtn, details)
   downloadsEl.prepend(li)
-  return { li, bar: fill, stats, state, pauseBtn, cancelBtn }
+  return { li, bar: fill, stats, state, pauseBtn, cancelBtn, detailsBtn, details }
 }
 
 function setRowState (row: DownloadRow, state: string, cssClass = ''): void {
   row.state.textContent = state
   row.state.className = `dl-state ${cssClass}`
   row.li.dataset.state = cssClass || state
+}
+
+function renderDetails (torrent: WTTorrent, row: DownloadRow, startedAt: number): void {
+  row.details.replaceChildren()
+
+  const dl = document.createElement('dl')
+  const addField = (term: string, value: string): void => {
+    const dt = document.createElement('dt')
+    dt.textContent = term
+    const dd = document.createElement('dd')
+    dd.textContent = value
+    dl.append(dt, dd)
+  }
+  addField('Info hash', torrent.infoHash)
+  addField('Elapsed', formatDuration(Date.now() - startedAt))
+  addField('Size', formatBytes(torrent.length))
+  row.details.append(dl)
+
+  const peersTitle = document.createElement('div')
+  peersTitle.textContent = `Peers (${torrent.wires.length})`
+  row.details.append(peersTitle)
+
+  if (torrent.wires.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'no-peers'
+    empty.textContent = 'no active peers'
+    row.details.append(empty)
+    return
+  }
+
+  const ul = document.createElement('ul')
+  ul.className = 'peers'
+  for (const wire of torrent.wires) {
+    const li = document.createElement('li')
+
+    const type = document.createElement('span')
+    type.className = 'peer-type'
+    type.textContent = wire.type === 'webSeed' ? 'webseed' : wire.type
+
+    const addr = document.createElement('span')
+    addr.className = 'peer-addr'
+    // WebRTC peer addresses are best-effort (from getStats()) and not
+    // always available; the webseed "peer" is the server itself.
+    addr.textContent = wire.remoteAddress
+      ? `${wire.remoteAddress}${wire.remotePort ? ':' + wire.remotePort : ''}`
+      : wire.type === 'webSeed' ? 'server' : 'address unavailable'
+
+    const speed = document.createElement('span')
+    speed.className = 'peer-speed'
+    speed.textContent = `${formatBytes(wire.downloadSpeed())}/s`
+
+    li.append(type, addr, speed)
+    ul.append(li)
+  }
+  row.details.append(ul)
 }
 
 async function startDownload (
@@ -564,7 +776,10 @@ async function startDownload (
     }
     const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
     row.li.dataset.infohash = meta.infoHash
-    persistDownload({ path: entryPath, name, paused: startPaused })
+    persistDownload({
+      path: entryPath, name, paused: startPaused,
+      infoHash: meta.infoHash, lastActiveAt: Date.now()
+    })
 
     const opfsAvailable = typeof navigator.storage?.getDirectory === 'function'
     client.add(torrentFile, {
@@ -600,7 +815,10 @@ function trackTorrent (
 ): void {
   let finished = false
   let lastWebseedRetry = 0
+  let lastTouch = 0
   let smoothedSpeed = 0
+  const startedAt = Date.now()
+  row.li.dataset.startedAt = String(startedAt)
 
   if (startPaused) {
     pauseTorrent(torrent)
@@ -618,12 +836,12 @@ function trackTorrent (
       lastWebseedRetry = 0 // let the watchdog re-attach the webseed right away
       row.pauseBtn.textContent = 'Pause'
       setRowState(row, 'downloading')
-      persistDownload({ path: entryPath, name, paused: false })
+      touchDownload(entryPath, { paused: false })
     } else {
       pauseTorrent(torrent)
       row.pauseBtn.textContent = 'Resume'
       setRowState(row, 'paused', 'paused')
-      persistDownload({ path: entryPath, name, paused: true })
+      touchDownload(entryPath, { paused: true })
     }
   })
 
@@ -637,12 +855,20 @@ function trackTorrent (
     if (downloadsEl.childElementCount === 0) downloadsPanel.hidden = true
   })
 
+  row.detailsBtn.addEventListener('click', () => {
+    row.details.hidden = !row.details.hidden
+    row.detailsBtn.textContent = row.details.hidden ? 'Details' : 'Hide details'
+    if (!row.details.hidden) renderDetails(torrent, row, startedAt)
+  })
+
   const tick = setInterval(() => {
     if (finished || torrent.destroyed) { clearInterval(tick); return }
 
     row.bar.style.width = `${(torrent.progress * 100).toFixed(1)}%`
     row.li.dataset.downloaded = String(torrent.downloaded)
     row.li.dataset.progress = String(torrent.progress)
+
+    if (!row.details.hidden) renderDetails(torrent, row, startedAt)
 
     if (torrent.paused) {
       row.stats.textContent =
@@ -664,9 +890,14 @@ function trackTorrent (
       `${(torrent.progress * 100).toFixed(1)}% · ` +
       `${formatBytes(torrent.downloaded)} / ${formatBytes(torrent.length)} · ` +
       `${formatBytes(smoothedSpeed)}/s · ` +
-      `ETA ${formatEta(eta)} · ` +
+      `ETA ${formatDuration(eta)} · ` +
       `${torrent.numPeers} peer${torrent.numPeers === 1 ? '' : 's'}`
     setRowState(row, torrent.numPeers === 0 ? 'waiting for server…' : 'downloading')
+
+    if (Date.now() - lastTouch > TOUCH_INTERVAL_MS) {
+      lastTouch = Date.now()
+      touchDownload(entryPath)
+    }
 
     // Resume watchdog. The WebRTC path re-establishes itself via tracker
     // re-announce; the webseed connection is not re-added by WebTorrent after
@@ -696,31 +927,102 @@ function trackTorrent (
   })
 }
 
+/**
+ * Three ways to get a completed download onto disk, tried in order of how
+ * little memory they use — none of them build a single in-memory Blob sized
+ * to the whole file, except the last-resort fallback:
+ *
+ *  1. File System Access API (`showSaveFilePicker`): streams straight from
+ *     the OPFS piece store to the chosen file with a small, bounded memory
+ *     footprint, and gives a real completion promise — safe to reclaim the
+ *     piece store the instant it resolves.
+ *  2. WebTorrent's own service worker + an `<a download>` click: streams to
+ *     the browser's native download with no Blob ever created (this is what
+ *     actually fixes Safari, whose Blob size limit is the reason a whole
+ *     download can OOM there). There is no JS-visible "finished" signal for
+ *     an anchor-triggered download, so the piece store is reclaimed after a
+ *     grace period instead of immediately (see completeSave / PENDING_
+ *     CLEANUP_DELAY_MS) — reconcileDownloads() finishes the job if the tab
+ *     closes before the timer fires.
+ *  3. Both of the above need a secure context (HTTPS or localhost); on plain
+ *     HTTP a Blob is the only remaining option. Building it from the file's
+ *     individual chunks — rather than calling file.blob(), which internally
+ *     calls arrayBuffer() and copies everything into one contiguous buffer
+ *     first — skips that extra full-size copy, though the total memory
+ *     footprint is still proportional to the file size; there's no way
+ *     around that without a secure context (see the README).
+ */
 async function saveFile (torrent: WTTorrent, row: DownloadRow, entryPath: string): Promise<void> {
   setRowState(row, 'saving…')
   row.bar.style.width = '100%'
   try {
     const file = torrent.files[0]
     if (!file) throw new Error('torrent has no files')
-    const blob = await file.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = file.name
-    document.body.append(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 60_000)
 
-    setRowState(row, 'done', 'done')
-    row.stats.textContent = formatBytes(torrent.length)
-    row.cancelBtn.textContent = 'Clear'
-    forgetDownload(entryPath)
-    torrent.destroy({ destroyStore: true }) // free the stored pieces
+    if (window.showSaveFilePicker) {
+      console.debug('[p2f] save tier 1: File System Access API')
+      const handle = await window.showSaveFilePicker({ suggestedName: file.name })
+      const writable = await handle.createWritable()
+      await file.stream().pipeTo(writable)
+      completeSave(torrent, row, entryPath, true)
+    } else if (streamServer) {
+      console.debug('[p2f] save tier 2: service worker stream, url =', file.streamURL)
+      // No `download` attribute here: the service worker's response already
+      // carries Content-Disposition: attachment (server.js forces it for
+      // "document"-destination requests) to trigger the save. Setting the
+      // HTML attribute *as well* makes Chromium cancel the download outright
+      // — two competing "force download" signals on the same navigation.
+      // WebTorrent's own example UI does the same (a plain <a href>).
+      clickDownloadLink(file.streamURL)
+      completeSave(torrent, row, entryPath, false)
+    } else {
+      console.debug('[p2f] save tier 3: chunked blob fallback')
+      const chunks: Uint8Array<ArrayBuffer>[] = []
+      for await (const chunk of file) chunks.push(chunk as Uint8Array<ArrayBuffer>)
+      const url = URL.createObjectURL(new Blob(chunks, { type: file.type }))
+      // blob: URLs carry no headers at all, so this one does need `download`.
+      clickDownloadLink(url, file.name)
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      completeSave(torrent, row, entryPath, true)
+    }
   } catch (err) {
+    // The torrent (and its OPFS pieces) is left intact on failure — e.g. the
+    // user cancelled a save-as dialog — so reloading the page picks the
+    // already-complete download back up and offers to save it again.
     setRowState(row, `save failed: ${errMessage(err)}`, 'error')
   }
   activeDownloads.delete(entryPath)
+}
+
+function clickDownloadLink (href: string, filename?: string): void {
+  const a = document.createElement('a')
+  a.href = href
+  if (filename) a.download = filename
+  document.body.append(a)
+  a.click()
+  a.remove()
+}
+
+function completeSave (
+  torrent: WTTorrent,
+  row: DownloadRow,
+  entryPath: string,
+  immediateCleanup: boolean
+): void {
+  setRowState(row, 'done', 'done')
+  row.stats.textContent = formatBytes(torrent.length)
+  row.cancelBtn.textContent = 'Clear'
+
+  if (immediateCleanup) {
+    forgetDownload(entryPath)
+    torrent.destroy({ destroyStore: true })
+    return
+  }
+  touchDownload(entryPath, { pendingCleanup: true })
+  setTimeout(() => {
+    if (!torrent.destroyed) torrent.destroy({ destroyStore: true })
+    forgetDownload(entryPath)
+  }, PENDING_CLEANUP_DELAY_MS)
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +1037,7 @@ function formatBytes (n: number): string {
   return `${u === 0 ? value : value.toFixed(1)} ${units[u]}`
 }
 
-function formatEta (ms: number): string {
+function formatDuration (ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '—'
   const s = Math.round(ms / 1000)
   if (s < 60) return `${s}s`

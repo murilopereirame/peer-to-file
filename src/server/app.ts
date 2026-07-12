@@ -5,6 +5,7 @@ import express, { type Request, type Response, type NextFunction, type Express }
 import { BrowseError, listDir, resolveInsideRoot } from './browse.ts'
 import { renderTorrent, type TorrentStore } from './torrents.ts'
 import { SESSION_COOKIE, SESSION_TTL_MS, parseCookies, type AuthService } from './auth.ts'
+import { createDebouncer, type ActivityLog } from './activity.ts'
 import type { Config } from './config.ts'
 import type { Seeder } from './seeder.ts'
 
@@ -13,12 +14,23 @@ export interface AppDeps {
   store: TorrentStore
   seeder: Seeder
   auth: AuthService
+  activity: ActivityLog
   version: string
 }
 
 const publicDir = fileURLToPath(new URL('../../public', import.meta.url))
 const webtorrentBundle = fileURLToPath(
   new URL('../../node_modules/webtorrent/dist/webtorrent.min.js', import.meta.url)
+)
+// WebTorrent's own service worker: streams a torrent's file data straight to
+// the browser's native download mechanism (Content-Disposition: attachment)
+// without ever materializing the whole file as an in-memory Blob — the fix
+// for large-file OOM and Safari's Blob size limits. Served at the root path
+// (not under /vendor/) so its default scope covers the whole origin, which
+// is what the /webtorrent/<infoHash>/<file> stream URLs need. Requires a
+// secure context (HTTPS or localhost) — see README.
+const webtorrentSw = fileURLToPath(
+  new URL('../../node_modules/webtorrent/dist/sw.min.js', import.meta.url)
 )
 
 /** Strip the port from a Host header value, keeping IPv6 brackets. */
@@ -41,9 +53,10 @@ const wrap = (fn: AsyncHandler) =>
     fn(req, res).catch(next)
   }
 
-export function createApp ({ config, store, seeder, auth, version }: AppDeps): Express {
+export function createApp ({ config, store, seeder, auth, activity, version }: AppDeps): Express {
   const app = express()
   app.disable('x-powered-by')
+  const webseedLogOnce = createDebouncer(30_000)
 
   const secureCookies = config.publicUrl?.startsWith('https:') ?? false
   const sessionCookie = (value: string, maxAgeSec: number): string => {
@@ -102,6 +115,7 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
     } catch (err) {
       throw new BrowseError(400, err instanceof Error ? err.message : 'setup failed')
     }
+    activity.add('auth', `admin account "${result.user.username}" created`, { ip: req.ip })
     res.append('Set-Cookie', sessionCookie(result.sessionId, SESSION_TTL_MS / 1000))
     res.json({ username: result.user.username })
   }))
@@ -114,10 +128,12 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
     }
     const result = auth.login(username, password)
     if (!result) {
+      activity.add('auth', `failed login for "${username}"`, { ip: req.ip })
       // blunt the brute-force edge a little
       await new Promise(resolve => setTimeout(resolve, 300))
       throw new BrowseError(401, 'invalid credentials')
     }
+    activity.add('auth', `"${result.user.username}" signed in`, { ip: req.ip })
     res.append('Set-Cookie', sessionCookie(result.sessionId, SESSION_TTL_MS / 1000))
     res.json({ username: result.user.username })
   }))
@@ -136,6 +152,9 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
     const abs = await resolveInsideRoot(config.root, relQuery)
     const st = await fs.stat(abs)
     if (!st.isFile()) throw new BrowseError(400, 'not a file')
+    if (webseedLogOnce(`${req.ip}:${relQuery}`)) {
+      activity.add('webseed', `serving "${relQuery}" to ${req.ip}`, { path: relQuery, ip: req.ip })
+    }
     await new Promise<void>((resolve, reject) => {
       res.sendFile(abs, {
         dotfiles: 'allow',
@@ -161,6 +180,8 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
   app.post('/api/logout', (req, res) => {
     const sessionId = parseCookies(req.headers.cookie)[SESSION_COOKIE]
     if (sessionId) auth.logout(sessionId)
+    const user = (res.locals as { user?: { username: string } }).user
+    if (user) activity.add('auth', `"${user.username}" signed out`, { ip: req.ip })
     res.append('Set-Cookie', sessionCookie('', 0))
     res.json({ ok: true })
   })
@@ -168,6 +189,17 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
   app.get('/api/me', (req, res) => {
     const user = (res.locals as { user?: { username: string } }).user
     res.json({ username: auth.enabled ? user?.username ?? null : null })
+  })
+
+  app.get('/api/logs', (req, res) => {
+    const limit = Number(req.query.limit)
+    const sinceId = req.query.sinceId !== undefined ? Number(req.query.sinceId) : undefined
+    res.json({
+      entries: activity.list({
+        limit: Number.isFinite(limit) ? limit : undefined,
+        sinceId
+      })
+    })
   })
 
   app.get('/api/list', wrap(async (req, res) => {
@@ -214,6 +246,11 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
 
     seeder.ensureSeeding(abs, meta)
 
+    const requester = (res.locals as { user?: { username: string } }).user
+    activity.add('torrent', `metadata requested for "${rel}"${requester ? ` by ${requester.username}` : ''}`, {
+      path: rel, infoHash: meta.infoHash, user: requester?.username, ip: req.ip
+    })
+
     const { torrentFile, magnet } = renderTorrent(meta, { announce, urlList: [webseed] })
     res.json({
       name: meta.name,
@@ -231,6 +268,10 @@ export function createApp ({ config, store, seeder, auth, version }: AppDeps): E
   app.use(express.static(publicDir))
   app.get('/vendor/webtorrent.min.js', (req, res) => {
     res.sendFile(webtorrentBundle)
+  })
+  app.get('/sw.js', (req, res) => {
+    res.set('Service-Worker-Allowed', '/')
+    res.sendFile(webtorrentSw)
   })
 
   app.use('/api', (req: Request, res: Response) => {
