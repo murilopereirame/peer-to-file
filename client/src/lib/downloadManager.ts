@@ -50,7 +50,17 @@ interface SavedDownload {
 
 const STALE_DOWNLOAD_MS = 14 * 24 * 60 * 60 * 1000
 const TOUCH_INTERVAL_MS = 30_000
-const PENDING_CLEANUP_DELAY_MS = 2 * 60_000
+// Grace period after the OPFS store reports every piece has been read back
+// out at least once (see OpfsChunkStore.onAllRead) — the real completion
+// signal for a save with no other one, giving the OS/browser a moment to
+// finish flushing the last bytes to disk before pieces are reclaimed.
+const POST_READ_CLEANUP_DELAY_MS = 15_000
+// Safety-net fallback only, for when the read-completion signal never
+// fires at all (OPFS unavailable, so no store to track, or something else
+// went wrong): long enough that it should never legitimately still be
+// mid-stream, since real completion is normally caught by the delay above
+// regardless of file size or transfer speed.
+const MAX_PENDING_CLEANUP_DELAY_MS = 30 * 60_000
 
 function savedDownloads (): SavedDownload[] {
   try {
@@ -446,9 +456,36 @@ export class DownloadManager {
       return
     }
     touchDownload(entryPath, { pendingCleanup: true })
-    setTimeout(() => {
+
+    let cleaned = false
+    let safetyNet: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      if (cleaned) return
+      cleaned = true
+      clearTimeout(safetyNet)
       if (!torrent.destroyed) torrent.destroy({ destroyStore: true })
       forgetDownload(entryPath)
-    }, PENDING_CLEANUP_DELAY_MS)
+    }
+
+    // The service-worker-streamed save (the no-completion-signal path this
+    // branch handles) reads every piece back out of the store as it streams
+    // the file to the browser's native download — previously this store was
+    // reclaimed on a flat 2-minute timer regardless of file size, which for
+    // a large/slow download destroyed the pieces (and broke the still-in-
+    // flight stream, which Safari surfaces as a "stopped" download) well
+    // before the browser had actually finished saving it. Real completion,
+    // when available, now drives cleanup instead of a guessed timeout.
+    const store = OpfsChunkStore.instances.get(torrent.infoHash)
+    if (store) {
+      // guard against the (unlikely, only possible for a very small/fast
+      // file) race where every piece was already read back out before this
+      // listener could be attached
+      if (store.readComplete) {
+        setTimeout(cleanup, POST_READ_CLEANUP_DELAY_MS)
+      } else {
+        store.onAllRead = () => { setTimeout(cleanup, POST_READ_CLEANUP_DELAY_MS) }
+      }
+    }
+    safetyNet = setTimeout(cleanup, MAX_PENDING_CLEANUP_DELAY_MS)
   }
 }

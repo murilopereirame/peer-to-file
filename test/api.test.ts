@@ -120,10 +120,127 @@ test('API responses carry permissive CORS headers', async () => {
   assert.equal(res.headers.get('access-control-allow-origin'), '*')
 })
 
+test('POST /api/delete removes a file', async () => {
+  await fs.writeFile(path.join(root, 'scratch.txt'), 'delete me')
+  const res = await fetch(`${base}/api/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'scratch.txt' })
+  })
+  assert.equal(res.status, 200)
+  await assert.rejects(fs.stat(path.join(root, 'scratch.txt')))
+})
+
+test('POST /api/delete rejects traversal and missing files', async () => {
+  const escape = await fetch(`${base}/api/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: '../escape.txt' })
+  })
+  assert.equal(escape.status, 403)
+
+  const missing = await fetch(`${base}/api/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'nope.bin' })
+  })
+  assert.equal(missing.status, 404)
+})
+
+test('POST /api/move renames and moves entries', async () => {
+  await fs.writeFile(path.join(root, 'movable.txt'), 'move me')
+
+  const rename = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: 'movable.txt', to: 'renamed.txt' })
+  })
+  assert.equal(rename.status, 200)
+  const renameBody = await rename.json() as any
+  assert.equal(renameBody.path, 'renamed.txt')
+
+  const move = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: 'renamed.txt', to: 'docs/renamed.txt' })
+  })
+  assert.equal(move.status, 200)
+  assert.equal(await fs.readFile(path.join(root, 'docs', 'renamed.txt'), 'utf8'), 'move me')
+
+  // clean up so later tests still see the original docs/ listing
+  await fs.rm(path.join(root, 'docs', 'renamed.txt'))
+})
+
+test('POST /api/move refuses to overwrite an existing entry', async () => {
+  await fs.writeFile(path.join(root, 'src-move.txt'), 'a')
+  const res = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: 'src-move.txt', to: 'big.bin' })
+  })
+  assert.equal(res.status, 409)
+  await fs.rm(path.join(root, 'src-move.txt'))
+})
+
+test('POST /api/upload streams a file to disk', async () => {
+  const payload = crypto.randomBytes(256 * 1024)
+  const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('uploaded.bin')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: payload,
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(res.status, 201)
+  const body = await res.json() as any
+  assert.equal(body.path, 'uploaded.bin')
+  assert.equal(body.size, payload.length)
+  assert.deepEqual(await fs.readFile(path.join(root, 'uploaded.bin')), payload)
+  await fs.rm(path.join(root, 'uploaded.bin'))
+})
+
+test('POST /api/upload works for a .json file (not swallowed by the JSON body parser)', async () => {
+  // A browser sets the upload's Content-Type from the File's own type, which
+  // for a .json file is application/json — this must NOT be intercepted by
+  // the same express.json() used by /api/setup, /api/login, /api/delete and
+  // /api/move, or the raw body never reaches the upload handler.
+  const payload = Buffer.from(JSON.stringify({ hello: 'world', n: 42 }))
+  const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('data.json')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload,
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(res.status, 201)
+  const body = await res.json() as any
+  assert.equal(body.size, payload.length)
+  assert.deepEqual(await fs.readFile(path.join(root, 'data.json')), payload)
+  await fs.rm(path.join(root, 'data.json'))
+})
+
+test('POST /api/upload rejects an invalid name and an existing target', async () => {
+  const badName = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('../escape.bin')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: Buffer.from('x'),
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(badName.status, 400)
+
+  const collision = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('big.bin')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: Buffer.from('x'),
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(collision.status, 409)
+  // the original file must survive an attempted overwrite
+  assert.deepEqual(await fs.readFile(path.join(root, 'big.bin')), fileContent)
+})
+
 test('serves the web client and the WebTorrent bundle', async () => {
   const page = await fetch(`${base}/`)
   assert.equal(page.status, 200)
-  assert.match(await page.text(), /peer-to-file/)
+  assert.match(await page.text(), /P2File/)
 
   const bundle = await fetch(`${base}/vendor/webtorrent.min.js`, { method: 'HEAD' })
   assert.equal(bundle.status, 200)

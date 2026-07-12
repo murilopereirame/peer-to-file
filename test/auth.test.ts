@@ -49,6 +49,31 @@ test('unauthenticated API requests are rejected', async () => {
   }
   const raw = await fetch(`${base}/api/raw?path=file.bin`)
   assert.equal(raw.status, 401)
+
+  const del = await fetch(`${base}/api/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'file.bin' })
+  })
+  assert.equal(del.status, 401)
+
+  const move = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: 'file.bin', to: 'renamed.bin' })
+  })
+  assert.equal(move.status, 401)
+
+  const upload = await fetch(`${base}/api/upload?path=&name=nope.bin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: Buffer.from('x'),
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(upload.status, 401)
+
+  // none of the rejected requests should have touched the filesystem
+  assert.deepEqual(await fs.readdir(root), ['file.bin'])
 })
 
 test('/api/info stays public and reports auth state', async () => {

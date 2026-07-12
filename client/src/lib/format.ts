@@ -26,14 +26,3 @@ export function formatDuration (ms: number): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
 }
-
-export function normalizeServer (input: string): string {
-  let addr = input.trim().replace(/\/+$/, '')
-  if (!/^https?:\/\//.test(addr)) {
-    // Default to the page's own scheme: on an https page (e.g. behind an
-    // nginx TLS proxy) a http:// API call would be blocked as mixed content.
-    const scheme = location.protocol === 'https:' ? 'https' : 'http'
-    addr = `${scheme}://${addr}`
-  }
-  return addr
-}

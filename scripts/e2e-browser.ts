@@ -134,11 +134,11 @@ async function waitForProgress (target: number, timeoutMs = 120_000): Promise<vo
 }
 
 try {
-  // 1-2. load with no users yet, expect the first-run setup screen
+  // 1-2. load with no users yet, expect the first-run setup screen — the
+  // client auto-detects the server (same origin), no address to type in
   await page.goto(`http://127.0.0.1:${PORT}/`)
-  await page.waitForSelector('#conn-status.ok', { timeout: 10_000 })
-  await page.waitForSelector('#setup:not([hidden])', { timeout: 5_000 })
-  console.log('✓ client connected, first-run setup required')
+  await page.waitForSelector('#setup:not([hidden])', { timeout: 10_000 })
+  console.log('✓ client auto-connected, first-run setup required')
 
   await page.fill('#setup-user', USER)
   await page.fill('#setup-pass', PASSWORD)
@@ -177,6 +177,20 @@ try {
   )
   await page.waitForSelector('#listing li.file')
   console.log('✓ folder navigation works')
+
+  // fixed "../" row at the top of the listing navigates back up
+  await page.waitForSelector('#listing li.up')
+  await page.click('#listing li.up')
+  await page.waitForFunction(
+    () => document.querySelector('#breadcrumb')?.textContent?.trim() === '⌂ root',
+    undefined,
+    { timeout: 10_000 }
+  )
+  await page.waitForSelector('#listing li.up', { state: 'detached', timeout: 5_000 })
+  console.log('✓ "../" row navigates back up a folder')
+
+  await page.click('#listing li.dir')
+  await page.waitForSelector('#listing li.file')
 
   await page.click('#listing li.file button')
   await page.waitForSelector('#downloads li[data-state="downloading"]', { timeout: 60_000 })
@@ -259,6 +273,7 @@ try {
   await page.click('#downloads li button:has-text("Resume")')
   const download = await downloadPromise
   await page.waitForSelector('#downloads li[data-state="done"]', { timeout: 60_000 })
+  const finishedInfoHash = await page.getAttribute('#downloads li', 'data-infohash')
 
   const savedFile = path.join(root, 'downloaded-payload.bin')
   await download.saveAs(savedFile)
@@ -268,6 +283,32 @@ try {
   }
   if (savedSha !== payloadSha) fail(`checksum mismatch: ${savedSha} != ${payloadSha}`)
   console.log('✓ download completed; checksum matches the source')
+
+  // This save went through the service-worker-streamed tier (no
+  // showSaveFilePicker in this test), which has no JS-visible "save
+  // finished" signal — the OPFS piece store is reclaimed once every piece
+  // has been read back out at least once (real completion), not on a fixed
+  // timer. Regression check for the bug where a flat multi-minute timer
+  // destroyed the store while a large/slow save was still streaming: this
+  // must clear out well within the short post-read grace period, not stay
+  // around waiting for a long fallback timer.
+  const reapDeadline = Date.now() + 25_000
+  let stillPresent = true
+  while (Date.now() < reapDeadline) {
+    const keys: string[] = await page.evaluate(async () => {
+      const root = await navigator.storage.getDirectory()
+      const dir = await root.getDirectoryHandle('p2f-downloads', { create: true }).catch(() => null)
+      if (!dir) return []
+      const names: string[] = []
+      // @ts-expect-error async iteration on FileSystemDirectoryHandle
+      for await (const [name] of dir) names.push(name)
+      return names
+    })
+    if (finishedInfoHash && !keys.includes(finishedInfoHash)) { stillPresent = false; break }
+    await sleep(500)
+  }
+  if (stillPresent) fail('completed download\'s OPFS piece store was not reaped promptly after streaming finished')
+  console.log('✓ OPFS piece store reaped promptly once the streamed save actually finished')
 
   // 9. logs page — opened as its own tab, shares the session cookie
   const logsPage = await context.newPage()
@@ -330,6 +371,50 @@ try {
   const savedList = await page.evaluate(() => localStorage.getItem('p2f-downloads'))
   if (savedList?.includes('pending-cleanup-hash')) fail('pendingCleanup entry was not dropped from localStorage')
   console.log('✓ orphaned and pending-cleanup OPFS stores are reaped on next startup')
+
+  // 11. file management: upload, rename, move and delete
+  const uploadPath = path.join(os.tmpdir(), 'p2f-e2e-upload.bin')
+  const uploadPayload = crypto.randomBytes(64 * 1024)
+  await fs.writeFile(uploadPath, uploadPayload)
+
+  const [fileChooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.click('.browser-toolbar button:has-text("Upload")')
+  ])
+  await fileChooser.setFiles(uploadPath)
+  await page.waitForSelector('#uploads li[data-state="done"]', { timeout: 30_000 })
+  await page.waitForSelector('#listing li:has-text("p2f-e2e-upload.bin")', { timeout: 10_000 })
+  console.log('✓ uploaded file appears in the listing')
+
+  await page.click('#listing li:has-text("p2f-e2e-upload.bin") button:has-text("Rename")')
+  await page.fill('.rename-input', 'e2e-renamed.bin')
+  await page.keyboard.press('Enter')
+  await page.waitForSelector('#listing li:has-text("e2e-renamed.bin")', { timeout: 10_000 })
+  await page.waitForFunction(
+    () => !(document.querySelector('#listing')?.textContent ?? '').includes('p2f-e2e-upload.bin'),
+    undefined, { timeout: 5_000 }
+  )
+  console.log('✓ renamed a file in place')
+
+  await page.click('#listing li:has-text("e2e-renamed.bin") button:has-text("Rename")')
+  await page.fill('.rename-input', 'movies/e2e-renamed.bin')
+  await page.keyboard.press('Enter')
+  await page.waitForFunction(
+    () => !(document.querySelector('#listing')?.textContent ?? '').includes('e2e-renamed.bin'),
+    undefined, { timeout: 5_000 }
+  )
+  await page.click('#listing li.dir:has-text("movies")')
+  await page.waitForSelector('#listing li:has-text("e2e-renamed.bin")', { timeout: 10_000 })
+  console.log('✓ moved a file into a subfolder')
+
+  page.once('dialog', dialog => { void dialog.accept() })
+  await page.click('#listing li:has-text("e2e-renamed.bin") button:has-text("Delete")')
+  await page.waitForFunction(
+    () => !(document.querySelector('#listing')?.textContent ?? '').includes('e2e-renamed.bin'),
+    undefined, { timeout: 10_000 }
+  )
+  console.log('✓ deleted a file (after confirmation)')
+  await fs.rm(uploadPath, { force: true })
 
   console.log('\nE2E PASS')
 } finally {
