@@ -1,11 +1,11 @@
-# Build stage: typecheck + compile the browser client
+# Build stage: typecheck + build the React client
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json tsconfig.client.json ./
+COPY tsconfig.json tsconfig.client.json vite.config.ts ./
 COPY src ./src
-COPY public ./public
+COPY client ./client
 RUN npm run check && npm run build
 
 # Runtime stage
@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gosu \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
-COPY --from=build /app/public ./public
+COPY --from=build /app/client/dist ./client/dist
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

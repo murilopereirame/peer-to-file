@@ -165,7 +165,7 @@ docker compose up -d --build
 ```
 
 Open `http://<vpn-ip>:8000` from the client machine, and that's it — the page connects to
-the server it was loaded from automatically. You can also host the `public/` bundle
+the server it was loaded from automatically. You can also host the `client/dist/` bundle
 anywhere else and point it at the server's `ip:port` (CORS is open).
 
 The first visit shows a **setup screen** since no account exists yet — pick a username
@@ -176,7 +176,7 @@ for the CLI alternative).
 
 ```sh
 npm ci
-npm run build          # compiles the browser client (public/app.js)
+npm run build          # builds the React client (client/dist/)
 P2F_ROOT=/srv/files P2F_HOST=10.0.0.1 npm start
 ```
 
@@ -236,6 +236,14 @@ build.
 
 ## Design decisions (v1)
 
+- **Client-side React (Vite), no SSR** — the app's actual work (WebTorrent, OPFS, the
+  service worker stream, the File System Access API) only runs in the browser, so
+  server-rendering it would add a framework without removing any client-side code. There's
+  no SEO or slow-network case either: this is a VPN-bound internal tool, always opened
+  already authenticated to a known server. `client/` is a plain Vite + React + TypeScript
+  project with two HTML entry points (the browser and the logs page); it builds to
+  `client/dist/`, which the server serves as static files exactly like the old vanilla-JS
+  client did.
 - **Client served by the server process** — one container, one origin, zero setup; a
   separate static host still works via CORS.
 - **Embedded `bittorrent-tracker` over custom WebRTC signaling** — boring, maintained,

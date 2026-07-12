@@ -1,6 +1,5 @@
 node_modules/
 data/
-public/app.js
-public/logs.js
+client/dist/
 p2f.db*
 *.log

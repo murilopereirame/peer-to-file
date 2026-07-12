@@ -18,7 +18,7 @@ export interface AppDeps {
   version: string
 }
 
-const publicDir = fileURLToPath(new URL('../../public', import.meta.url))
+const clientDist = fileURLToPath(new URL('../../client/dist', import.meta.url))
 const webtorrentBundle = fileURLToPath(
   new URL('../../node_modules/webtorrent/dist/webtorrent.min.js', import.meta.url)
 )
@@ -265,7 +265,7 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
   }))
 
   // Static web client + the WebTorrent browser bundle.
-  app.use(express.static(publicDir))
+  app.use(express.static(clientDist))
   app.get('/vendor/webtorrent.min.js', (req, res) => {
     res.sendFile(webtorrentBundle)
   })

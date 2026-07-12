@@ -3,7 +3,7 @@ node_modules
 data
 test
 scripts
-public/app.js
+client/dist
 Dockerfile
 docker-compose.yml
 README.md
