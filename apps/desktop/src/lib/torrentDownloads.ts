@@ -1,5 +1,6 @@
 import { errMessage, type P2FClient } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
+import { proxiedHttp, proxiedWs } from './localProxy'
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
 
@@ -108,8 +109,21 @@ export class TorrentDownloadManager {
       const meta = await client.torrentMeta(path)
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length })
-      this.client.add(torrentFile, { maxWebConns: 8 }, torrent => {
-        this.track(client, torrent, meta.webseed, path)
+
+      // The webview enforces real CORS, which the server's fixed
+      // `Access-Control-Allow-Origin: *` doesn't satisfy for these —
+      // route both through the local proxy (src-tauri/src/proxy.rs)
+      // instead of hitting the real server directly. The torrent file's
+      // own baked-in tracker/webseed (the unproxied originals) are still
+      // present too and will just fail silently alongside these.
+      const [proxyWebseed, proxyAnnounce] = await Promise.all([
+        proxiedHttp(meta.webseed),
+        Promise.all(meta.announce.map(proxiedWs))
+      ])
+
+      this.client.add(torrentFile, { maxWebConns: 8, announce: proxyAnnounce }, torrent => {
+        torrent.addWebSeed(proxyWebseed)
+        this.track(client, torrent, proxyWebseed, path)
       })
     } catch (err) {
       this.set(path, { status: 'error', message: errMessage(err) })

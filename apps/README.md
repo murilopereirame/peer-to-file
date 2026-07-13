@@ -46,6 +46,33 @@ things a native app needs that a same-origin web page doesn't: a server
 address field, persistent login, a connection indicator, and a settings
 screen.
 
+## Desktop's local proxy (why P2P transfer needs it)
+
+Tauri's webview is a real browser engine, so it enforces real CORS — and
+the server's `Access-Control-Allow-Origin: *` doesn't satisfy what
+WebTorrent's webseed (cross-origin Range requests) and tracker (WebSocket)
+connections need from an origin (`tauri://localhost` / `https://
+tauri.localhost`) that never matches the user's server URL. Early builds
+hit exactly this: the tracker/webseed connections silently failed CORS,
+leaving the torrent with no working peer or webseed — WebTorrent doesn't
+error loudly in that case, it just crawls at whatever trickles through
+(hence a report of ~80 B/s downloads).
+
+The fix (`src-tauri/src/proxy.rs`) is a tiny reverse proxy bound to
+`127.0.0.1` that the app starts on launch. The webview talks to *it*
+instead of the real server for exactly the webseed GET and the tracker
+WebSocket; the proxy forwards both to the real server using Rust's HTTP/
+WebSocket clients (no CORS concept there at all — same reason the rest of
+this app's networking already goes through `tauri-plugin-http` instead of
+the webview's own `fetch`) and answers with its own permissive CORS
+headers, which the webview accepts since *it's* the one talking to the
+proxy. `torrentDownloads.ts` rewrites the `webseed`/`announce` URLs from
+`/api/torrent` through `lib/localProxy.ts` before handing them to
+WebTorrent. Critically, this only proxies the initial HTTP/WS handshake —
+once the tracker exchange completes, the resulting WebRTC data channel is
+a genuine direct peer-to-peer connection between the webview and the
+server; it doesn't route through the proxy, or through Rust, at all.
+
 ## Authentication
 
 The server's only client-facing auth flow is a login endpoint that sets a
@@ -181,3 +208,9 @@ Developer credentials.
   downloads) — fine for the file sizes this project targets, but worth
   knowing before uploading something enormous from a memory-constrained
   device.
+- The local proxy (above) fixes the CORS failure that was blocking
+  WebRTC entirely, but it can't fix a webview whose WebRTC implementation
+  is itself incomplete — WebKitGTK (Linux) has historically lagged
+  WebView2/WKWebView here. If a download still crawls on Linux after this
+  fix, that's the next thing to suspect; it would fall back to whatever
+  the webseed alone (now working, just single-source) can do.

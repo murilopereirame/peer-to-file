@@ -1,18 +1,21 @@
 // Prevents an extra console window from popping up on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod proxy;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
-use tauri::webview::DownloadEvent;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 const KEYRING_SERVICE: &str = "dev.p2file.desktop";
 
 #[derive(Clone)]
 struct DownloadDirState(Arc<Mutex<Option<PathBuf>>>);
+
+struct ProxyPort(u16);
 
 #[derive(Serialize, Deserialize)]
 struct StoredCredentials {
@@ -71,6 +74,13 @@ fn set_download_dir(path: Option<String>, state: tauri::State<DownloadDirState>)
     *guard = path.map(PathBuf::from);
 }
 
+/// The frontend calls this once at startup to learn which loopback port
+/// the local CORS-relaxing proxy (proxy.rs) ended up on.
+#[tauri::command]
+fn proxy_port(state: tauri::State<ProxyPort>) -> u16 {
+    state.0
+}
+
 fn main() {
     let download_dir = DownloadDirState(Arc::new(Mutex::new(dirs::download_dir())));
     let on_download_state = download_dir.0.clone();
@@ -85,23 +95,33 @@ fn main() {
             load_credentials,
             clear_credentials,
             default_downloads_dir,
-            set_download_dir
+            set_download_dir,
+            proxy_port,
         ])
         .setup(move |app| {
             let on_download_state = on_download_state.clone();
+
+            // Binding + spawning the accept loop only needs a moment of
+            // blocking; the server itself keeps running on the async
+            // runtime for the app's whole lifetime (see proxy::start).
+            let port = tauri::async_runtime::block_on(proxy::start())
+                .expect("failed to start local proxy server");
+            app.manage(ProxyPort(port));
+
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("P2File")
                 .inner_size(1080.0, 720.0)
                 .min_inner_size(720.0, 480.0)
                 // Real WebTorrent P2P transfers run in this webview (see
-                // src/lib/webtorrent.ts) exactly like the browser client;
-                // finished downloads surface as a normal browser "download"
-                // (via WebTorrent's own service worker, or a File System
-                // Access / Blob fallback) — this hook is what redirects
-                // that into the user's configured default download folder
-                // instead of the OS's own Downloads dir / a Save As prompt.
+                // src/lib/webtorrent.ts and torrentDownloads.ts) exactly
+                // like the browser client; finished downloads surface as
+                // a normal browser "download" (via WebTorrent's own
+                // service worker, or a File System Access / Blob
+                // fallback) — this hook is what redirects that into the
+                // user's configured default download folder instead of
+                // the OS's own Downloads dir / a Save As prompt.
                 .on_download(move |_webview, event| match event {
-                    DownloadEvent::Requested { destination, .. } => {
+                    tauri::webview::DownloadEvent::Requested { destination, .. } => {
                         let dir = on_download_state
                             .lock()
                             .expect("download dir mutex poisoned")
