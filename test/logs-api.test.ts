@@ -29,7 +29,7 @@ before(async () => {
     dbPath: path.join(dbDir, 'p2f.db')
   }, silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
-  running.db!.createUser('alice', 'correct horse battery')
+  running.db.createUser('alice', 'correct horse battery')
 })
 
 after(async () => {

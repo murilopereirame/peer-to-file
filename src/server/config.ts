@@ -71,8 +71,9 @@ function parsePort (value: string | undefined, fallback: number): number {
  *                    <origin>/tracker and takes precedence over P2F_PUBLIC_HOST
  *   P2F_AUTH         'on' (default) or 'off' — require login/tokens on all
  *                    endpoints; 'off' restores the VPN-only trust model
- *   P2F_DB           SQLite database path for users/sessions/API tokens
- *                    (default ./p2f.db; only used when auth is on)
+ *   P2F_DB           SQLite database path for users/sessions/API tokens and
+ *                    download history (default ./p2f.db; opened regardless
+ *                    of P2F_AUTH)
  */
 export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
   const rootInput = path.resolve(env.P2F_ROOT || './data')

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiContext } from './context/ApiContext'
 import { HttpError, errMessage } from './lib/format'
 import { useDownloadManager, useDownloads } from './hooks/useDownloads'
@@ -6,6 +6,7 @@ import { SetupScreen } from './components/SetupScreen'
 import { LoginScreen } from './components/LoginScreen'
 import { FileBrowser } from './components/FileBrowser'
 import { DownloadsPanel } from './components/DownloadsPanel'
+import { HistoryPanel } from './components/HistoryPanel'
 
 // The client is always served by the same origin as the API it talks to, so
 // there's nothing for a user to type in — see the "Managing files"/CORS
@@ -52,6 +53,9 @@ export function App (): React.JSX.Element {
   }, [setStatus])
   const manager = useDownloadManager(onClientError)
   const downloads = useDownloads(manager)
+  // Bumps only when a download finishes, not on every progress tick — the
+  // right granularity to refetch the server-persisted history list on.
+  const doneCount = useMemo(() => downloads.filter(d => d.status === 'done').length, [downloads])
 
   // Replaces the old "connect" step: the server is always this same origin,
   // so there's nothing to fetch but its auth state to decide which screen to
@@ -132,6 +136,7 @@ export function App (): React.JSX.Element {
             <>
               <FileBrowser manager={manager} />
               <DownloadsPanel entries={downloads} manager={manager} />
+              <HistoryPanel refreshSignal={doneCount} />
             </>
           )}
         </main>

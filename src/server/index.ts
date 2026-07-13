@@ -45,7 +45,7 @@ export interface RunningServer {
   config: Config
   server: http.Server
   tracker: TrackerServer
-  db: AuthDb | null
+  db: AuthDb
   activity: ActivityLog
   close (): Promise<void>
 }
@@ -58,9 +58,14 @@ export async function startServer (
   config: Config,
   log: Logger = consoleLogger
 ): Promise<RunningServer> {
-  const db = config.authEnabled ? new AuthDb(config.dbPath) : null
-  db?.pruneExpiredSessions()
-  const auth = createAuthService(db)
+  // Always open, regardless of auth: download history (and any other future
+  // local state) needs somewhere to live even with P2F_AUTH=off, where it's
+  // just kept as a single shared, unscoped history instead of per-user.
+  // createAuthService still gets null when auth is off, so login/session
+  // behavior is unaffected — every endpoint stays open with no gate.
+  const db = new AuthDb(config.dbPath)
+  db.pruneExpiredSessions()
+  const auth = createAuthService(config.authEnabled ? db : null)
   const activity = createActivityLog()
 
   // The Node seeder announces to its own tracker over loopback (or the bind
@@ -109,7 +114,7 @@ export async function startServer (
   }
 
   const store = createTorrentStore()
-  const app = createApp({ config, store, seeder, auth, activity, version })
+  const app = createApp({ config, store, seeder, auth, activity, db, version })
   const server = http.createServer(app)
 
   // Serve the tracker WebSocket on the main HTTP port too (at /tracker), so
@@ -190,7 +195,7 @@ export async function startServer (
       new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() }),
       3000, 'server.close()', log
     )
-    db?.close()
+    db.close()
   }
 
   return { config, server, tracker, db, activity, close }

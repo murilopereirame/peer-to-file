@@ -93,12 +93,12 @@ test('/api/setup is rejected once an account exists', async () => {
     body: JSON.stringify({ username: 'someone-else', password: 'another password' })
   })
   assert.equal(second.status, 409)
-  assert.deepEqual(running.db!.listUsers().map(u => u.username), ['admin'])
+  assert.deepEqual(running.db.listUsers().map(u => u.username), ['admin'])
   await teardown()
 })
 
 test('/api/setup is rejected once a user exists via the CLI path (createUser)', async () => {
-  running.db!.createUser('precreated', 'correct horse battery')
+  running.db.createUser('precreated', 'correct horse battery')
   const res = await fetch(`${base}/api/setup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -123,7 +123,7 @@ test('/api/setup validates input', async () => {
   })
   assert.equal(shortPassword.status, 400)
 
-  assert.equal(running.db!.userCount(), 0)
+  assert.equal(running.db.userCount(), 0)
   await teardown()
 })
 
@@ -142,6 +142,6 @@ test('two concurrent setup requests only create one account', async () => {
   ])
   const statuses = [a.status, b.status].sort()
   assert.deepEqual(statuses, [200, 409])
-  assert.equal(running.db!.userCount(), 1)
+  assert.equal(running.db.userCount(), 1)
   await teardown()
 })

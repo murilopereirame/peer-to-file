@@ -63,6 +63,19 @@ export function LogsApp (): React.JSX.Element {
 
   const visible = kindFilter ? entries.filter(e => e.kind === kindFilter) : entries
 
+  const downloadLogs = (): void => {
+    const lines = visible.map(e => `[${new Date(e.ts).toISOString()}] ${e.kind.toUpperCase()}: ${e.message}`)
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `p2file-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`
+    document.body.append(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -102,6 +115,9 @@ export function LogsApp (): React.JSX.Element {
               auto-refresh
             </label>
             <button id="clear-view" type="button" onClick={() => setEntries([])}>Clear view</button>
+            <button id="download-logs" type="button" disabled={visible.length === 0} onClick={downloadLogs}>
+              Download logs
+            </button>
           </section>
 
           <ul id="log-list">

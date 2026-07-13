@@ -133,6 +133,11 @@ export class DownloadManager {
   private readonly listeners = new Set<() => void>()
   private snapshot: DownloadEntry[] = []
   private restored = false
+  // Stashed from the most recent start() call so completeSave() can record
+  // download history without every intermediate method having to thread an
+  // apiFetch parameter through just for this — there's only ever one, reused
+  // across the app (see App.tsx).
+  private apiFetch: ApiFetch | null = null
 
   constructor (onClientError: (msg: string) => void) {
     // No STUN/TURN: both peers sit on the same VPN, host candidates are enough.
@@ -235,7 +240,14 @@ export class DownloadManager {
     apiFetch: ApiFetch,
     { startPaused = false } = {}
   ): Promise<void> {
-    if (this.entries.has(entryPath)) return
+    const existing = this.entries.get(entryPath)
+    if (existing) {
+      // still active: no-op, same as before. Finished (done/error): clicking
+      // Download again re-queues it instead of requiring a manual Clear first.
+      if (existing.status !== 'done' && existing.status !== 'error') return
+      await this.restartAndWait(entryPath)
+    }
+    this.apiFetch = apiFetch
     this.entries.set(entryPath, blankEntry(entryPath, name))
     this.notify()
 
@@ -377,6 +389,49 @@ export class DownloadManager {
     }
   }
 
+  /**
+   * Force-destroys a previously finished (done/error) download's torrent so
+   * it can be safely re-added, and waits for that teardown to fully finish —
+   * not just for destroy() to be *called*. Store teardown (an OPFS directory
+   * removal, via a worker) is asynchronous, so re-adding the same infoHash
+   * before this resolves would race the old store's in-flight directory
+   * removal against the new download's piece writes into that same
+   * directory. This has to check torrent.destroyed, not our own t.finished —
+   * t.finished is already true the moment a download reaches 'done' (see
+   * track()), long before completeSave() actually destroys the torrent, so a
+   * guard on t.finished would skip destroying it here. WebTorrent then treats
+   * the re-add as a duplicate infoHash and hands back the *same*, already-
+   * completed torrent object instead of downloading again — 'done' has
+   * already fired once on it and never fires again for a newly attached
+   * listener, so the UI gets stuck at 100%/downloading forever.
+   *
+   * Only used for an explicit restart. cancel() below intentionally does NOT
+   * do this for an already-finished download — forcing an immediate destroy
+   * there would reintroduce the large-file truncation bug (#38/#39): a
+   * service-worker-streamed save has no completion signal of its own, so its
+   * store is kept alive on a real-completion timer even after the UI already
+   * shows 'done'. A restart is a deliberate user action that supersedes that
+   * old save, so overriding it here is correct specifically for this path.
+   */
+  private restartAndWait (path: string): Promise<void> {
+    const t = this.tracked.get(path)
+    let destroyed: Promise<void> = Promise.resolve()
+    if (t) {
+      t.finished = true
+      clearInterval(t.tick)
+      if (!t.torrent.destroyed) {
+        destroyed = new Promise(resolve => {
+          t.torrent.destroy({ destroyStore: true }, () => resolve()) // free bandwidth AND stored pieces
+        })
+      }
+    }
+    forgetDownload(path)
+    this.tracked.delete(path)
+    this.entries.delete(path)
+    this.notify()
+    return destroyed
+  }
+
   cancel (path: string): void {
     const t = this.tracked.get(path)
     if (t && !t.finished) {
@@ -455,8 +510,22 @@ export class DownloadManager {
     }
   }
 
+  private recordHistory (entryPath: string): void {
+    const entry = this.entries.get(entryPath)
+    const apiFetch = this.apiFetch
+    if (!entry || !apiFetch) return
+    // Best-effort: history is a convenience list, not load-bearing for the
+    // download itself, so a failure here doesn't surface as a save error.
+    void apiFetch('/api/downloads/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: entryPath, name: entry.name, length: entry.length })
+    }).catch(() => {})
+  }
+
   private completeSave (torrent: WTTorrent, entryPath: string, immediateCleanup: boolean): void {
     this.setEntry(entryPath, { status: 'done', progress: 1 })
+    this.recordHistory(entryPath)
     if (immediateCleanup) {
       forgetDownload(entryPath)
       torrent.destroy({ destroyStore: true })

@@ -218,6 +218,17 @@ try {
 
   // 5. pause: bandwidth must actually stop
   await waitForProgress(0.1)
+  // Average speed: "—" until real progress/elapsed time exists (checked right
+  // after download started, above) — by now both do, so a real value must show.
+  await page.waitForFunction(
+    () => {
+      const text = document.querySelector('.dl-details')?.textContent ?? ''
+      const after = text.split('Average speed')[1] ?? ''
+      return /\d/.test(after) && /(B|KiB|MiB|GiB)\/s/.test(after)
+    },
+    undefined, { timeout: 10_000 }
+  )
+  console.log('✓ details panel shows a real average speed once progress has been made')
   await page.click('#downloads li button:has-text("Pause")')
   await page.waitForSelector('#downloads li[data-state="paused"]', { timeout: 5_000 })
   await sleep(2000) // let in-flight pieces land (generous for slow CI runners)
@@ -310,6 +321,38 @@ try {
   if (stillPresent) fail('completed download\'s OPFS piece store was not reaped promptly after streaming finished')
   console.log('✓ OPFS piece store reaped promptly once the streamed save actually finished')
 
+  // 8b. download history: a small, fast root-level file to keep this quick.
+  // FileBrowser resets to root on mount, and the page.reload() in step 7
+  // didn't navigate anywhere since, so we're still there.
+  await page.waitForSelector('#listing li:has-text("notes.txt")', { timeout: 10_000 })
+  await page.click('#listing li:has-text("notes.txt") button:has-text("Download")')
+  await page.waitForSelector('#downloads li:has-text("notes.txt")[data-state="done"]', { timeout: 20_000 })
+  await page.waitForFunction(
+    () => (document.querySelector('#history-panel')?.textContent ?? '').includes('notes.txt'),
+    undefined, { timeout: 10_000 }
+  )
+  console.log('✓ a finished download is recorded in the download history')
+
+  // 8c. re-download a finished file without a manual Clear first — regression
+  // check for WebTorrent treating the re-add as a duplicate of the still-
+  // "done" torrent and handing back the same object, whose 'done' event
+  // never fires again for a newly attached listener.
+  await page.click('#listing li:has-text("notes.txt") button:has-text("Download")')
+  await sleep(300)
+  const notesRowCount = await page.locator('#downloads li:has-text("notes.txt")').count()
+  if (notesRowCount !== 1) fail(`re-downloading created ${notesRowCount} rows instead of reusing one`)
+  await page.waitForSelector('#downloads li:has-text("notes.txt")[data-state="done"]', { timeout: 20_000 })
+  console.log('✓ re-downloading a finished file restarts it in place, no manual Clear needed')
+
+  // 8d. clear history
+  page.once('dialog', dialog => { void dialog.accept() })
+  await page.click('#history-panel >> text=Clear history')
+  await page.waitForFunction(
+    () => (document.querySelector('#history-panel')?.textContent ?? '').includes('no downloads yet'),
+    undefined, { timeout: 5_000 }
+  )
+  console.log('✓ clear history empties the download history list')
+
   // 9. logs page — opened as its own tab, shares the session cookie
   const logsPage = await context.newPage()
   await logsPage.goto(`http://127.0.0.1:${PORT}/logs.html`)
@@ -335,6 +378,20 @@ try {
     { timeout: 5_000 }
   )
   console.log('✓ logs page shows server activity and filters by kind')
+
+  const logsDownloadPromise = logsPage.waitForEvent('download', { timeout: 10_000 })
+  await logsPage.click('#download-logs')
+  const logsDownload = await logsDownloadPromise
+  if (!/^p2file-logs-.*\.txt$/.test(logsDownload.suggestedFilename())) {
+    fail(`unexpected logs download filename: ${logsDownload.suggestedFilename()}`)
+  }
+  const logsSavedPath = path.join(os.tmpdir(), 'p2f-e2e-logs.txt')
+  await logsDownload.saveAs(logsSavedPath)
+  const logsFileText = await fs.readFile(logsSavedPath, 'utf8')
+  if (!/torrent/i.test(logsFileText)) fail(`downloaded logs file missing a torrent-kind entry: ${logsFileText}`)
+  await fs.rm(logsSavedPath, { force: true })
+  console.log('✓ download logs button exports the filtered log as a file')
+
   await logsPage.close()
 
   // 10. stale-download reconciliation: a synthetic orphaned OPFS store (no
@@ -386,7 +443,18 @@ try {
   await page.waitForSelector('#listing li:has-text("p2f-e2e-upload.bin")', { timeout: 10_000 })
   console.log('✓ uploaded file appears in the listing')
 
-  await page.click('#listing li:has-text("p2f-e2e-upload.bin") button:has-text("Rename")')
+  // uploads get their own card, separate from the file browser
+  const uploadsIsSeparateCard = await page.evaluate(() => {
+    const browser = document.querySelector('#browser')
+    const uploads = document.querySelector('#uploads-panel')
+    return !!browser && !!uploads && !browser.contains(uploads) && uploads.classList.contains('card')
+  })
+  if (!uploadsIsSeparateCard) fail('#uploads-panel is not rendered as its own card, separate from #browser')
+  console.log('✓ upload section renders as its own card, separate from the file browser')
+
+  // Rename/Move/Delete are collapsed into a per-row kebab (⋮) menu.
+  await page.click('#listing li:has-text("p2f-e2e-upload.bin") .kebab-btn')
+  await page.click('.kebab-menu >> text=Rename')
   await page.fill('.rename-input', 'e2e-renamed.bin')
   await page.keyboard.press('Enter')
   await page.waitForSelector('#listing li:has-text("e2e-renamed.bin")', { timeout: 10_000 })
@@ -396,19 +464,28 @@ try {
   )
   console.log('✓ renamed a file in place')
 
-  await page.click('#listing li:has-text("e2e-renamed.bin") button:has-text("Rename")')
-  await page.fill('.rename-input', 'movies/e2e-renamed.bin')
-  await page.keyboard.press('Enter')
+  // Move: the kebab's Move action opens a folder-navigation modal.
+  await page.click('#listing li:has-text("e2e-renamed.bin") .kebab-btn')
+  await page.click('.kebab-menu >> text=Move')
+  await page.waitForSelector('.modal-backdrop', { timeout: 5_000 })
+  await page.click('.modal-listing li.dir:has-text("movies")')
+  await page.waitForFunction(
+    () => (document.querySelector('.modal-dest')?.textContent ?? '').includes('/movies'),
+    undefined, { timeout: 5_000 }
+  )
+  await page.click('.modal-actions >> text=Move here')
+  await page.waitForSelector('.modal-backdrop', { state: 'detached', timeout: 5_000 })
   await page.waitForFunction(
     () => !(document.querySelector('#listing')?.textContent ?? '').includes('e2e-renamed.bin'),
     undefined, { timeout: 5_000 }
   )
   await page.click('#listing li.dir:has-text("movies")')
   await page.waitForSelector('#listing li:has-text("e2e-renamed.bin")', { timeout: 10_000 })
-  console.log('✓ moved a file into a subfolder')
+  console.log('✓ moved a file into a subfolder via the folder-navigation modal')
 
   page.once('dialog', dialog => { void dialog.accept() })
-  await page.click('#listing li:has-text("e2e-renamed.bin") button:has-text("Delete")')
+  await page.click('#listing li:has-text("e2e-renamed.bin") .kebab-btn')
+  await page.click('.kebab-menu >> text=Delete')
   await page.waitForFunction(
     () => !(document.querySelector('#listing')?.textContent ?? '').includes('e2e-renamed.bin'),
     undefined, { timeout: 10_000 }

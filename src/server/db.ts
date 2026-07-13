@@ -26,6 +26,14 @@ export interface ApiTokenInfo {
   last_used_at: number | null
 }
 
+export interface DownloadHistoryEntry {
+  id: number
+  path: string
+  name: string
+  length: number
+  completed_at: number
+}
+
 const SCRYPT_N = 16384
 const SCRYPT_R = 8
 const SCRYPT_P = 1
@@ -91,6 +99,16 @@ export class AuthDb {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS download_history (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        length INTEGER NOT NULL,
+        completed_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_download_history_user
+        ON download_history(user_id, completed_at DESC);
     `)
   }
 
@@ -235,5 +253,33 @@ export class AuthDb {
     this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
       .run('transfer_secret', secret.toString('hex'))
     return secret
+  }
+
+  // --- download history -------------------------------------------------
+  // Scoped by user_id when auth is on; NULL (a single shared, unscoped
+  // history) when it's off, since there's no user identity to key it by.
+
+  recordDownload (userId: number | null, path: string, name: string, length: number): void {
+    this.db.prepare(
+      'INSERT INTO download_history (user_id, path, name, length, completed_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(userId, path, name, length, Date.now())
+  }
+
+  listDownloadHistory (userId: number | null, limit = 200): DownloadHistoryEntry[] {
+    const sql = `
+      SELECT id, path, name, length, completed_at FROM download_history
+      WHERE user_id ${userId === null ? 'IS NULL' : '= ?'}
+      ORDER BY completed_at DESC LIMIT ?
+    `
+    const stmt = this.db.prepare(sql)
+    const rows = userId === null ? stmt.all(limit) : stmt.all(userId, limit)
+    return rows as unknown as DownloadHistoryEntry[]
+  }
+
+  clearDownloadHistory (userId: number | null): void {
+    const sql = `DELETE FROM download_history WHERE user_id ${userId === null ? 'IS NULL' : '= ?'}`
+    const stmt = this.db.prepare(sql)
+    if (userId === null) stmt.run()
+    else stmt.run(userId)
   }
 }

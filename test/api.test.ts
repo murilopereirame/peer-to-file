@@ -237,6 +237,23 @@ test('POST /api/upload rejects an invalid name and an existing target', async ()
   assert.deepEqual(await fs.readFile(path.join(root, 'big.bin')), fileContent)
 })
 
+test('download history works without auth as a single shared, unscoped list', async () => {
+  const record = await fetch(`${base}/api/downloads/history`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'big.bin', name: 'big.bin', length: fileContent.length })
+  })
+  assert.equal(record.status, 201)
+
+  const list = await (await fetch(`${base}/api/downloads/history`)).json() as any
+  assert.deepEqual(list.entries.map((e: any) => e.name), ['big.bin'])
+
+  const clear = await fetch(`${base}/api/downloads/history/clear`, { method: 'POST' })
+  assert.equal(clear.status, 200)
+  const after = await (await fetch(`${base}/api/downloads/history`)).json() as any
+  assert.deepEqual(after.entries, [])
+})
+
 test('serves the web client and the WebTorrent bundle', async () => {
   const page = await fetch(`${base}/`)
   assert.equal(page.status, 200)
