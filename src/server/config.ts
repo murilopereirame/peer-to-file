@@ -22,6 +22,12 @@ export interface Config {
   authEnabled: boolean
   /** SQLite database path for users/sessions/tokens (default ./p2f.db). */
   dbPath: string
+  /**
+   * Directory for the on-demand ciphertext cache (default ./p2f-cache).
+   * Deliberately separate from P2F_ROOT so it stays writable even when the
+   * shared root is mounted read-only.
+   */
+  cacheDir: string
 }
 
 function parseAuth (value: string | undefined): boolean {
@@ -74,6 +80,8 @@ function parsePort (value: string | undefined, fallback: number): number {
  *   P2F_DB           SQLite database path for users/sessions/API tokens and
  *                    download history (default ./p2f.db; opened regardless
  *                    of P2F_AUTH)
+ *   P2F_CACHE_DIR    directory for the on-demand transfer-encryption
+ *                    ciphertext cache (default ./p2f-cache)
  */
 export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
   const rootInput = path.resolve(env.P2F_ROOT || './data')
@@ -95,6 +103,7 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
     publicHost: env.P2F_PUBLIC_HOST || null,
     publicUrl: parsePublicUrl(env.P2F_PUBLIC_URL),
     authEnabled: parseAuth(env.P2F_AUTH),
-    dbPath: env.P2F_DB || path.resolve('./p2f.db')
+    dbPath: env.P2F_DB || path.resolve('./p2f.db'),
+    cacheDir: env.P2F_CACHE_DIR || path.resolve('./p2f-cache')
   }
 }

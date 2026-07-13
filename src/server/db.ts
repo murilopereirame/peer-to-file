@@ -255,6 +255,24 @@ export class AuthDb {
     return secret
   }
 
+  /**
+   * Stable random master secret the ciphertext cache (cipherCache.ts) derives
+   * per-file transfer-encryption keys from, created on first use. Must be
+   * stable across restarts — deriving a *different* key per process would
+   * re-encrypt unchanged files to different ciphertext, and with it a
+   * different infohash, breaking the "resume after a server restart"
+   * property the whole torrent-metadata cache depends on.
+   */
+  cipherMasterSecret (): Buffer {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?')
+      .get('cipher_secret') as ({ value: string } | undefined)
+    if (row) return Buffer.from(row.value, 'hex')
+    const secret = crypto.randomBytes(32)
+    this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
+      .run('cipher_secret', secret.toString('hex'))
+    return secret
+  }
+
   // --- download history -------------------------------------------------
   // Scoped by user_id when auth is on; NULL (a single shared, unscoped
   // history) when it's off, since there's no user identity to key it by.

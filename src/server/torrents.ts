@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import createTorrent from 'create-torrent'
 import parseTorrent, { toMagnetURI, toTorrentFile, type ParsedTorrent } from 'parse-torrent'
 import { BrowseError } from './browse.ts'
+import type { CipherCache } from './cipherCache.ts'
 
 export interface RenderedTorrent {
   torrentFile: Uint8Array
@@ -18,8 +19,13 @@ export interface TorrentStore {
  * change. The info dict (and therefore the infohash) is deterministic for
  * unchanged file content, so it survives server restarts — a client holding
  * old metadata can keep downloading after the server comes back.
+ *
+ * Metadata is built from the file's ciphertext cache entry (cipherCache.ts),
+ * not the plaintext file itself — piece hashes (and the infohash) end up
+ * computed over ciphertext, which is what the webseed and the WebRTC seeder
+ * actually serve, so the wire never carries plaintext.
  */
-export function createTorrentStore (): TorrentStore {
+export function createTorrentStore (cipherCache: CipherCache): TorrentStore {
   const cache = new Map<string, { key: string, promise: Promise<ParsedTorrent> }>()
 
   async function getMeta (absPath: string): Promise<ParsedTorrent> {
@@ -44,6 +50,21 @@ export function createTorrentStore (): TorrentStore {
     return entry.promise
   }
 
+  async function buildMeta (absPath: string): Promise<ParsedTorrent> {
+    const { cachePath } = await cipherCache.getEntry(absPath)
+    const { size } = await fs.stat(cachePath)
+    return new Promise((resolve, reject) => {
+      // `private` keeps conforming clients off DHT/PEX; announce/urlList live
+      // outside the info dict and get filled in per request. Same basename as
+      // the source file (cipherCache preserves it), so `name` here still
+      // matches what the user asked to download.
+      createTorrent(cachePath, { private: true, pieceLength: pieceLengthFor(size) }, (err, buf) => {
+        if (err) return reject(err)
+        parseTorrent(buf).then(resolve, reject)
+      })
+    })
+  }
+
   return { getMeta }
 }
 
@@ -56,18 +77,6 @@ export function pieceLengthFor (size: number): number {
   let pieceLength = 256 * 1024
   while (pieceLength < target && pieceLength < 8 * 1024 * 1024) pieceLength *= 2
   return pieceLength
-}
-
-async function buildMeta (absPath: string): Promise<ParsedTorrent> {
-  const { size } = await fs.stat(absPath)
-  return new Promise((resolve, reject) => {
-    // `private` keeps conforming clients off DHT/PEX; announce/urlList live
-    // outside the info dict and get filled in per request.
-    createTorrent(absPath, { private: true, pieceLength: pieceLengthFor(size) }, (err, buf) => {
-      if (err) return reject(err)
-      parseTorrent(buf).then(resolve, reject)
-    })
-  })
 }
 
 /**

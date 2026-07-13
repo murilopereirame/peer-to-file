@@ -1,4 +1,4 @@
-import { errMessage, type P2FClient } from '@p2f/shared'
+import { base64ToBytes, ensureFileDecryptionPatched, errMessage, importCtrKey, transferKeys, type P2FClient } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
@@ -98,7 +98,17 @@ export class TorrentDownloadManager {
       const meta = await client.torrentMeta(path)
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length })
+
+      // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
+      // torrents.ts server-side) — register the key so the patched File
+      // iterator (below) decrypts transparently, same as the web client.
+      transferKeys.set(meta.infoHash, {
+        key: await importCtrKey(meta.encKey),
+        iv: base64ToBytes(meta.encIv)
+      })
+
       this.client.add(torrentFile, { maxWebConns: 8 }, torrent => {
+        if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
         this.track(client, torrent, meta.webseed, path)
       })
     } catch (err) {
@@ -148,7 +158,10 @@ export class TorrentDownloadManager {
 
   cancel (path: string): void {
     const t = this.tracked.get(path)
-    if (t) t.torrent.destroy({ destroyStore: true })
+    if (t) {
+      transferKeys.delete(t.torrent.infoHash)
+      t.torrent.destroy({ destroyStore: true })
+    }
     this.tracked.delete(path)
     this.snapshots.delete(path)
     this.notify()

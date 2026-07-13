@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApi } from '../context/ApiContext'
+import { encryptFileForUpload } from '@p2f/shared'
 
 export type UploadStatus = 'uploading' | 'done' | 'error'
 
@@ -42,30 +43,39 @@ export function useUploads (onUploaded: () => void): {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     setUploads(list => [...list, { id, name: file.name, progress: 0, status: 'uploading' }])
 
-    const url = `${apiBase}/api/upload?path=${encodeURIComponent(destPath)}&name=${encodeURIComponent(file.name)}`
-    const xhr = new XMLHttpRequest()
-    inFlight.current.set(id, xhr)
-    xhr.open('POST', url)
-    xhr.withCredentials = true
-    xhr.upload.addEventListener('progress', e => {
-      if (e.lengthComputable) patch(id, { progress: e.loaded / e.total })
+    // Encrypted client-side (AES-256-CTR, key/IV generated per upload) so the
+    // wire never carries plaintext — see the doc comment on the /api/upload
+    // handler in src/server/app.ts and packages/shared/src/browserCrypto.ts.
+    void encryptFileForUpload(file).then(({ body, headers }) => {
+      const url = `${apiBase}/api/upload?path=${encodeURIComponent(destPath)}&name=${encodeURIComponent(file.name)}`
+      const xhr = new XMLHttpRequest()
+      inFlight.current.set(id, xhr)
+      xhr.open('POST', url)
+      xhr.withCredentials = true
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+      for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value)
+      xhr.upload.addEventListener('progress', e => {
+        if (e.lengthComputable) patch(id, { progress: e.loaded / e.total })
+      })
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          patch(id, { progress: 1, status: 'done' })
+          onUploaded()
+        } else {
+          let message = `HTTP ${xhr.status}`
+          try {
+            const responseBody = JSON.parse(xhr.responseText) as { error?: string }
+            if (responseBody.error) message = responseBody.error
+          } catch { /* non-JSON error body */ }
+          patch(id, { status: 'error', message })
+        }
+      })
+      xhr.addEventListener('error', () => patch(id, { status: 'error', message: 'network error' }))
+      xhr.addEventListener('loadend', () => { inFlight.current.delete(id) })
+      xhr.send(body)
+    }, err => {
+      patch(id, { status: 'error', message: err instanceof Error ? err.message : 'encryption failed' })
     })
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        patch(id, { progress: 1, status: 'done' })
-        onUploaded()
-      } else {
-        let message = `HTTP ${xhr.status}`
-        try {
-          const body = JSON.parse(xhr.responseText) as { error?: string }
-          if (body.error) message = body.error
-        } catch { /* non-JSON error body */ }
-        patch(id, { status: 'error', message })
-      }
-    })
-    xhr.addEventListener('error', () => patch(id, { status: 'error', message: 'network error' }))
-    xhr.addEventListener('loadend', () => { inFlight.current.delete(id) })
-    xhr.send(file)
   }, [apiBase, patch, onUploaded])
 
   const dismiss = useCallback((id: string) => {

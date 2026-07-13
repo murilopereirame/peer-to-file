@@ -26,7 +26,8 @@ before(async () => {
     publicHost: null,
     publicUrl: null,
     authEnabled: true,
-    dbPath: path.join(dbDir, 'p2f.db')
+    dbPath: path.join(dbDir, 'p2f.db'),
+    cacheDir: path.join(root, '.p2f-cache')
   }, silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
   running.db.createUser('alice', 'correct horse battery')

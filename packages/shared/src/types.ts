@@ -47,6 +47,10 @@ export interface TorrentMeta {
   webseed: string
   magnet: string
   torrentBase64: string
+  /** Base64 AES-256 key for the transfer-encryption ciphertext this torrent/webseed carries. */
+  encKey: string
+  /** Base64 AES-CTR IV/nonce paired with encKey. */
+  encIv: string
 }
 
 export interface Credentials {

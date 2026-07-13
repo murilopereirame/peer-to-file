@@ -27,7 +27,8 @@ before(async () => {
     publicHost: null,
     publicUrl: null,
     authEnabled: false,
-    dbPath: ':memory:'
+    dbPath: ':memory:',
+    cacheDir: path.join(root, '.p2f-cache')
   }, silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
 })
@@ -76,6 +77,10 @@ test('GET /api/torrent returns consistent, webseed-carrying metadata', async () 
   assert.ok(body.webseed.startsWith(`http://127.0.0.1:${running.config.port}/api/raw?path=`))
   assert.ok(body.magnet.startsWith(`magnet:?xt=urn:btih:${body.infoHash}`))
 
+  // the transfer-encryption key/IV ride alongside the rest of the metadata
+  assert.equal(Buffer.from(body.encKey, 'base64').length, 32)
+  assert.equal(Buffer.from(body.encIv, 'base64').length, 16)
+
   // the .torrent must parse and agree with the JSON envelope
   const parsed = await parseTorrent(Buffer.from(body.torrentBase64, 'base64'))
   assert.equal(parsed.infoHash, body.infoHash)
@@ -94,18 +99,41 @@ test('GET /api/torrent on a directory is a 400', async () => {
   assert.equal(res.status, 400)
 })
 
-test('GET /api/raw serves the file with Range support (webseed)', async () => {
+test('GET /api/raw serves AES-256-CTR ciphertext with Range support (webseed)', async () => {
+  const meta = await (await fetch(`${base}/api/torrent?path=big.bin`)).json() as any
+  const key = Buffer.from(meta.encKey, 'base64')
+  const iv = Buffer.from(meta.encIv, 'base64')
+  const decrypt = (buf: Buffer, offset: number): Buffer => {
+    // AES-CTR at a byte offset: bump the counter by whole blocks, matching
+    // the client-side offset-aware helper (packages/shared/browserCrypto.ts).
+    const blockOffset = offset % 16
+    const counter = Buffer.from(iv)
+    let carry = Math.floor(offset / 16)
+    for (let i = 15; i >= 0 && carry > 0; i--) {
+      const sum = counter[i]! + (carry % 256)
+      counter[i] = sum % 256
+      carry = Math.floor(carry / 256) + Math.floor(sum / 256)
+    }
+    const decipher = crypto.createDecipheriv('aes-256-ctr', key, counter)
+    const padded = Buffer.concat([Buffer.alloc(blockOffset), buf])
+    return Buffer.concat([decipher.update(padded), decipher.final()]).subarray(blockOffset)
+  }
+
   const whole = await fetch(`${base}/api/raw?path=big.bin`)
   assert.equal(whole.status, 200)
   assert.equal(whole.headers.get('accept-ranges'), 'bytes')
-  assert.deepEqual(Buffer.from(await whole.arrayBuffer()), fileContent)
+  const wholeCipher = Buffer.from(await whole.arrayBuffer())
+  // the wire must not carry plaintext — that's the whole point of this feature
+  assert.notDeepEqual(wholeCipher, fileContent)
+  assert.deepEqual(decrypt(wholeCipher, 0), fileContent)
 
   const res = await fetch(`${base}/api/raw?path=big.bin`, {
     headers: { Range: 'bytes=10-13' }
   })
   assert.equal(res.status, 206)
   assert.equal(res.headers.get('content-range'), `bytes 10-13/${fileContent.length}`)
-  assert.deepEqual(Buffer.from(await res.arrayBuffer()), fileContent.subarray(10, 14))
+  const rangeCipher = Buffer.from(await res.arrayBuffer())
+  assert.deepEqual(decrypt(rangeCipher, 10), fileContent.subarray(10, 14))
 })
 
 test('GET /api/raw rejects traversal and missing files', async () => {
@@ -182,20 +210,65 @@ test('POST /api/move refuses to overwrite an existing entry', async () => {
   await fs.rm(path.join(root, 'src-move.txt'))
 })
 
+// Uploads are encrypted client-side (AES-256-CTR, key/IV generated
+// per-upload) with a plaintext SHA-256 the server verifies after decrypting
+// — see the doc comment on the /api/upload handler in app.ts.
+function encryptUpload (payload: Buffer): { body: Buffer, headers: Record<string, string> } {
+  const key = crypto.randomBytes(32)
+  const iv = crypto.randomBytes(16)
+  const cipher = crypto.createCipheriv('aes-256-ctr', key, iv)
+  const body = Buffer.concat([cipher.update(payload), cipher.final()])
+  const plainSha256 = crypto.createHash('sha256').update(payload).digest('hex')
+  return {
+    body,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-P2F-Enc-Key': key.toString('base64'),
+      'X-P2F-Enc-Iv': iv.toString('base64'),
+      'X-P2F-Plain-Sha256': plainSha256
+    }
+  }
+}
+
 test('POST /api/upload streams a file to disk', async () => {
   const payload = crypto.randomBytes(256 * 1024)
+  const { body, headers } = encryptUpload(payload)
   const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('uploaded.bin')}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: payload,
+    headers,
+    body,
     duplex: 'half'
   } as RequestInit)
   assert.equal(res.status, 201)
-  const body = await res.json() as any
-  assert.equal(body.path, 'uploaded.bin')
-  assert.equal(body.size, payload.length)
+  const resBody = await res.json() as any
+  assert.equal(resBody.path, 'uploaded.bin')
+  assert.equal(resBody.size, payload.length)
   assert.deepEqual(await fs.readFile(path.join(root, 'uploaded.bin')), payload)
   await fs.rm(path.join(root, 'uploaded.bin'))
+})
+
+test('POST /api/upload rejects a bad plaintext checksum', async () => {
+  const payload = crypto.randomBytes(1024)
+  const { body, headers } = encryptUpload(payload)
+  headers['X-P2F-Plain-Sha256'] = crypto.randomBytes(32).toString('hex')
+  const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('bad-checksum.bin')}`, {
+    method: 'POST',
+    headers,
+    body,
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(res.status, 400)
+  await assert.rejects(fs.access(path.join(root, 'bad-checksum.bin')))
+})
+
+test('POST /api/upload rejects missing encryption headers', async () => {
+  const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('no-headers.bin')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: crypto.randomBytes(1024),
+    duplex: 'half'
+  } as RequestInit)
+  assert.equal(res.status, 400)
 })
 
 test('POST /api/upload works for a .json file (not swallowed by the JSON body parser)', async () => {
@@ -204,15 +277,17 @@ test('POST /api/upload works for a .json file (not swallowed by the JSON body pa
   // the same express.json() used by /api/setup, /api/login, /api/delete and
   // /api/move, or the raw body never reaches the upload handler.
   const payload = Buffer.from(JSON.stringify({ hello: 'world', n: 42 }))
+  const { body, headers } = encryptUpload(payload)
+  headers['Content-Type'] = 'application/json'
   const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('data.json')}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: payload,
+    headers,
+    body,
     duplex: 'half'
   } as RequestInit)
   assert.equal(res.status, 201)
-  const body = await res.json() as any
-  assert.equal(body.size, payload.length)
+  const resBody = await res.json() as any
+  assert.equal(resBody.size, payload.length)
   assert.deepEqual(await fs.readFile(path.join(root, 'data.json')), payload)
   await fs.rm(path.join(root, 'data.json'))
 })
@@ -220,16 +295,14 @@ test('POST /api/upload works for a .json file (not swallowed by the JSON body pa
 test('POST /api/upload rejects an invalid name and an existing target', async () => {
   const badName = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('../escape.bin')}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: Buffer.from('x'),
+    ...encryptUpload(Buffer.from('x')),
     duplex: 'half'
   } as RequestInit)
   assert.equal(badName.status, 400)
 
   const collision = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('big.bin')}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: Buffer.from('x'),
+    ...encryptUpload(Buffer.from('x')),
     duplex: 'half'
   } as RequestInit)
   assert.equal(collision.status, 409)

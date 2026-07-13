@@ -28,7 +28,8 @@ before(async () => {
     publicHost: null,
     publicUrl: 'https://files.example.com',
     authEnabled: false,
-    dbPath: ':memory:'
+    dbPath: ':memory:',
+    cacheDir: path.join(root, '.p2f-cache')
   }, silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
 })

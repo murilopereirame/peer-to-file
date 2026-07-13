@@ -14,6 +14,7 @@ import { createDebouncer, type ActivityLog } from './activity.ts'
 import type { Config } from './config.ts'
 import type { Seeder } from './seeder.ts'
 import type { AuthDb } from './db.ts'
+import type { CipherCache } from './cipherCache.ts'
 
 export interface AppDeps {
   config: Config
@@ -22,6 +23,7 @@ export interface AppDeps {
   auth: AuthService
   activity: ActivityLog
   db: AuthDb
+  cipherCache: CipherCache
   version: string
 }
 
@@ -60,7 +62,7 @@ const wrap = (fn: AsyncHandler) =>
     fn(req, res).catch(next)
   }
 
-export function createApp ({ config, store, seeder, auth, activity, db, version }: AppDeps): Express {
+export function createApp ({ config, store, seeder, auth, activity, db, cipherCache, version }: AppDeps): Express {
   const app = express()
   app.disable('x-powered-by')
   const webseedLogOnce = createDebouncer(30_000)
@@ -167,8 +169,12 @@ export function createApp ({ config, store, seeder, auth, activity, db, version 
     if (webseedLogOnce(`${req.ip}:${relQuery}`)) {
       activity.add('webseed', `serving "${relQuery}" to ${req.ip}`, { path: relQuery, ip: req.ip })
     }
+    // Serve the ciphertext cache entry, not the plaintext file — this is the
+    // encrypted-at-rest-and-in-transit copy the torrent's piece hashes were
+    // computed against (see cipherCache.ts / torrents.ts).
+    const { cachePath } = await cipherCache.getEntry(abs)
     await new Promise<void>((resolve, reject) => {
-      res.sendFile(abs, {
+      res.sendFile(cachePath, {
         dotfiles: 'allow',
         cacheControl: false,
         headers: { 'Cache-Control': 'no-store' }
@@ -273,21 +279,50 @@ export function createApp ({ config, store, seeder, auth, activity, db, version 
   // this route's body is the raw file, and a browser sets the upload's
   // Content-Type from the file's own type (e.g. application/json for a
   // .json file), which express.json() would otherwise try to parse.
+  //
+  // The request body is AES-256-CTR ciphertext, encrypted client-side so the
+  // wire never carries plaintext — see packages/shared/src/browserCrypto.ts.
+  // The client generates the key/IV itself (uploads are one-shot, no
+  // cross-session reuse the way downloads need) and sends them alongside the
+  // body as headers, plus a plaintext SHA-256 the server verifies after
+  // decrypting: CTR has no built-in authentication, and this closes that gap
+  // cheaply without the complexity of a streaming AEAD — uploads had no
+  // integrity check at all before this feature, so this is a net improvement,
+  // not a weaker guarantee than some alternative.
   app.post('/api/upload', wrap(async (req, res) => {
     const destDirRel = typeof req.query.path === 'string' ? req.query.path : ''
     const name = typeof req.query.name === 'string' ? req.query.name : ''
     const destAbs = await resolveUploadTarget(config.root, destDirRel, name)
 
+    const keyHeader = req.get('X-P2F-Enc-Key')
+    const ivHeader = req.get('X-P2F-Enc-Iv')
+    const plainShaHeader = req.get('X-P2F-Plain-Sha256')
+    if (!keyHeader || !ivHeader || !plainShaHeader) {
+      throw new BrowseError(400, 'missing encryption headers')
+    }
+    const encKey = Buffer.from(keyHeader, 'base64')
+    const encIv = Buffer.from(ivHeader, 'base64')
+    if (encKey.length !== 32 || encIv.length !== 16) {
+      throw new BrowseError(400, 'invalid encryption headers')
+    }
+
     const tmpAbs = `${destAbs}.p2f-upload-${crypto.randomUUID()}`
     const out = fsSync.createWriteStream(tmpAbs, { flags: 'wx' })
+    const decipher = crypto.createDecipheriv('aes-256-ctr', encKey, encIv)
+    const plainHash = crypto.createHash('sha256')
+    decipher.on('data', chunk => plainHash.update(chunk))
     try {
       await new Promise<void>((resolve, reject) => {
         req.on('aborted', () => reject(new Error('upload aborted')))
         req.on('error', reject)
+        decipher.on('error', reject)
         out.on('error', reject)
         out.on('finish', resolve)
-        req.pipe(out)
+        req.pipe(decipher).pipe(out)
       })
+      if (plainHash.digest('hex') !== plainShaHeader.toLowerCase()) {
+        throw new BrowseError(400, 'upload failed integrity check')
+      }
       try {
         await fs.link(tmpAbs, destAbs)
       } catch (err) {
@@ -350,7 +385,8 @@ export function createApp ({ config, store, seeder, auth, activity, db, version 
       webseed = `http://${httpHostPort}/api/raw?${rawQuery(rel)}`
     }
 
-    seeder.ensureSeeding(abs, meta)
+    const cipherEntry = await cipherCache.getEntry(abs)
+    seeder.ensureSeeding(cipherEntry.cachePath, meta)
 
     const requester = (res.locals as { user?: { username: string } }).user
     activity.add('torrent', `metadata requested for "${rel}"${requester ? ` by ${requester.username}` : ''}`, {
@@ -366,7 +402,12 @@ export function createApp ({ config, store, seeder, auth, activity, db, version 
       announce,
       webseed,
       magnet,
-      torrentBase64: Buffer.from(torrentFile).toString('base64')
+      torrentBase64: Buffer.from(torrentFile).toString('base64'),
+      // AES-256-CTR key/IV for the ciphertext this torrent/webseed actually
+      // carries — the client decrypts transparently after WebTorrent's own
+      // piece verification passes (see packages/shared/src/browserCrypto.ts).
+      encKey: cipherEntry.key.toString('base64'),
+      encIv: cipherEntry.iv.toString('base64')
     })
   }))
 

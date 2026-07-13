@@ -7,6 +7,7 @@
 import type { WTTorrent, WTServer } from './webtorrent-types'
 import { OpfsChunkStore } from './opfsChunkStore'
 import { errMessage } from './format'
+import { base64ToBytes, ensureFileDecryptionPatched, importCtrKey, transferKeys } from '@p2f/shared'
 
 export type DownloadStatus =
   | 'preparing' | 'downloading' | 'waiting' | 'paused' | 'saving' | 'done' | 'error'
@@ -263,6 +264,8 @@ export class DownloadManager {
         magnet: string
         webseed: string
         torrentBase64: string
+        encKey: string
+        encIv: string
       }
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       persistDownload({
@@ -271,6 +274,14 @@ export class DownloadManager {
       })
       this.setEntry(entryPath, { infoHash: meta.infoHash, length: meta.length })
 
+      // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
+      // torrents.ts server-side) — register the key so the patched File
+      // iterator (below) can decrypt transparently once a torrent comes back.
+      transferKeys.set(meta.infoHash, {
+        key: await importCtrKey(meta.encKey),
+        iv: base64ToBytes(meta.encIv)
+      })
+
       const opfsAvailable = typeof navigator.storage?.getDirectory === 'function'
       this.client.add(torrentFile, {
         // more parallel webseed connections: smoother, higher throughput
@@ -278,6 +289,7 @@ export class DownloadManager {
         // persist verified pieces so a refreshed tab resumes, not restarts
         ...(opfsAvailable ? { store: OpfsChunkStore } : {})
       }, torrent => {
+        if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
         this.track(torrent, meta.webseed, entryPath, startPaused)
       })
     } catch (err) {
@@ -419,6 +431,7 @@ export class DownloadManager {
     if (t) {
       t.finished = true
       clearInterval(t.tick)
+      transferKeys.delete(t.torrent.infoHash)
       if (!t.torrent.destroyed) {
         destroyed = new Promise(resolve => {
           t.torrent.destroy({ destroyStore: true }, () => resolve()) // free bandwidth AND stored pieces
@@ -437,6 +450,7 @@ export class DownloadManager {
     if (t && !t.finished) {
       t.finished = true
       clearInterval(t.tick)
+      transferKeys.delete(t.torrent.infoHash)
       t.torrent.destroy({ destroyStore: true }) // free bandwidth AND stored pieces
     }
     forgetDownload(path)
@@ -528,6 +542,7 @@ export class DownloadManager {
     this.recordHistory(entryPath)
     if (immediateCleanup) {
       forgetDownload(entryPath)
+      transferKeys.delete(torrent.infoHash)
       torrent.destroy({ destroyStore: true })
       return
     }
@@ -540,6 +555,7 @@ export class DownloadManager {
       cleaned = true
       clearTimeout(safetyNet)
       if (!torrent.destroyed) torrent.destroy({ destroyStore: true })
+      transferKeys.delete(torrent.infoHash)
       forgetDownload(entryPath)
     }
 

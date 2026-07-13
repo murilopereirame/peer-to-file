@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useState } from 'react'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
-import { errMessage } from '@p2f/shared'
+import { encryptFileForUpload, errMessage } from '@p2f/shared'
 import { useApp } from './AppContext'
 
 export interface UploadEntry {
@@ -36,17 +36,19 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
   // desktop's RAM budget, and there's no signed-token/streamed path for
   // uploads the way there is for downloads (see torrentDownloads.ts); this
   // mirrors the same worst-case trade-off the browser client documents for
-  // its own Blob fallback.
+  // its own Blob fallback. Encrypted client-side (AES-256-CTR, key/IV
+  // generated per upload) so the wire never carries plaintext — see the
+  // doc comment on the /api/upload handler in src/server/app.ts.
   const start = useCallback((destDir: string, file: File, onSettled?: () => void) => {
     const client = app.client
     if (!client) return
     const id = `${destDir}/${file.name}#${Date.now()}`
     setUploads(prev => [{ id, name: file.name, status: 'running' }, ...prev])
-    void file.arrayBuffer()
-      .then(buf => tauriFetch(client.uploadUrl(destDir, file.name), {
+    void encryptFileForUpload(file)
+      .then(async ({ body, headers }) => tauriFetch(client.uploadUrl(destDir, file.name), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: buf
+        headers: { 'Content-Type': 'application/octet-stream', ...headers },
+        body: await body.arrayBuffer()
       }))
       .then(res => {
         if (res.ok) patch(id, { status: 'done' })

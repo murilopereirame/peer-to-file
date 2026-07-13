@@ -76,7 +76,8 @@ const config = () => ({
   publicHost: null,
   publicUrl: null,
   authEnabled: true,
-  dbPath: path.join(dbDir, 'p2f.db')
+  dbPath: path.join(dbDir, 'p2f.db'),
+  cacheDir: path.join(root, '.p2f-cache')
 })
 
 let running: RunningServer = await startServer(config(), consoleLogger)
