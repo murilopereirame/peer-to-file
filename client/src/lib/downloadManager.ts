@@ -7,7 +7,10 @@
 import type { WTTorrent, WTServer } from './webtorrent-types'
 import { OpfsChunkStore } from './opfsChunkStore'
 import { errMessage } from './format'
-import { base64ToBytes, ensureFileDecryptionPatched, importCtrKey, transferKeys } from '@p2f/shared'
+import {
+  establishKeyWrap, ensureFileDecryptionPatched, getServerEcdhPublicKey, importCtrKey, transferKeys,
+  unwrapKeyMaterial
+} from '@p2f/shared'
 
 export type DownloadStatus =
   | 'preparing' | 'downloading' | 'waiting' | 'paused' | 'saving' | 'done' | 'error'
@@ -253,19 +256,29 @@ export class DownloadManager {
     this.notify()
 
     try {
+      // ECDH key wrap (fresh ephemeral keypair per download) so the
+      // transfer key below never crosses the wire in the clear — see
+      // src/server/keyExchange.ts and packages/shared/src/browserCrypto.ts.
+      const serverPublicKey = await getServerEcdhPublicKey(async () => {
+        const res = await apiFetch('/api/info')
+        return await res.json() as { ecdhPublicKey: string }
+      })
+      const keyWrap = await establishKeyWrap(serverPublicKey)
+
       // The server hashes the file on first request — may take a while for
       // large files, hence the "preparing" state. Re-fetched on every start
       // so restored downloads get fresh transfer tokens (the infohash — and
       // with it the OPFS piece store — stays the same for unchanged files).
-      const res = await apiFetch(`/api/torrent?path=${encodeURIComponent(entryPath)}`)
+      const res = await apiFetch(
+        `/api/torrent?path=${encodeURIComponent(entryPath)}&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`
+      )
       const meta = await res.json() as {
         infoHash: string
         length: number
         magnet: string
         webseed: string
         torrentBase64: string
-        encKey: string
-        encIv: string
+        encKeyWrapped: string
       }
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       persistDownload({
@@ -277,9 +290,10 @@ export class DownloadManager {
       // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
       // torrents.ts server-side) — register the key so the patched File
       // iterator (below) can decrypt transparently once a torrent comes back.
+      const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
       transferKeys.set(meta.infoHash, {
-        key: await importCtrKey(meta.encKey),
-        iv: base64ToBytes(meta.encIv)
+        key: await importCtrKey(keyMaterial.subarray(0, 32)),
+        iv: keyMaterial.subarray(32, 48)
       })
 
       const opfsAvailable = typeof navigator.storage?.getDirectory === 'function'

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApi } from '../context/ApiContext'
-import { encryptFileForUpload } from '@p2f/shared'
+import { encryptFileForUpload, establishKeyWrap, getServerEcdhPublicKey } from '@p2f/shared'
 
 export type UploadStatus = 'uploading' | 'done' | 'error'
 
@@ -22,7 +22,7 @@ export function useUploads (onUploaded: () => void): {
   upload: (file: File, destPath: string) => void
   dismiss: (id: string) => void
 } {
-  const { apiBase } = useApi()
+  const { apiBase, apiFetch } = useApi()
   const [uploads, setUploads] = useState<UploadEntry[]>([])
   const inFlight = useRef(new Map<string, XMLHttpRequest>())
 
@@ -43,10 +43,18 @@ export function useUploads (onUploaded: () => void): {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     setUploads(list => [...list, { id, name: file.name, progress: 0, status: 'uploading' }])
 
-    // Encrypted client-side (AES-256-CTR, key/IV generated per upload) so the
-    // wire never carries plaintext — see the doc comment on the /api/upload
-    // handler in src/server/app.ts and packages/shared/src/browserCrypto.ts.
-    void encryptFileForUpload(file).then(({ body, headers }) => {
+    // Encrypted client-side (AES-256-CTR, key/IV generated per upload, then
+    // ECDH-wrapped so the wire never carries the key either) — see the doc
+    // comment on the /api/upload handler in src/server/app.ts and
+    // packages/shared/src/browserCrypto.ts.
+    void (async () => {
+      const serverPublicKey = await getServerEcdhPublicKey(async () => {
+        const res = await apiFetch('/api/info')
+        return await res.json() as { ecdhPublicKey: string }
+      })
+      const keyWrap = await establishKeyWrap(serverPublicKey)
+      return encryptFileForUpload(file, keyWrap)
+    })().then(({ body, headers }) => {
       const url = `${apiBase}/api/upload?path=${encodeURIComponent(destPath)}&name=${encodeURIComponent(file.name)}`
       const xhr = new XMLHttpRequest()
       inFlight.current.set(id, xhr)
@@ -76,7 +84,7 @@ export function useUploads (onUploaded: () => void): {
     }, err => {
       patch(id, { status: 'error', message: err instanceof Error ? err.message : 'encryption failed' })
     })
-  }, [apiBase, patch, onUploaded])
+  }, [apiBase, apiFetch, patch, onUploaded])
 
   const dismiss = useCallback((id: string) => {
     setUploads(list => list.filter(u => u.id !== id))

@@ -20,6 +20,8 @@ export interface ServerInfo {
   name: string
   version: string
   webrtcSeeding: boolean
+  /** Base64 raw ECDH (P-256) public key — see browserCrypto.ts's establishKeyWrap. */
+  ecdhPublicKey: string
   auth: AuthInfo
 }
 
@@ -47,10 +49,12 @@ export interface TorrentMeta {
   webseed: string
   magnet: string
   torrentBase64: string
-  /** Base64 AES-256 key for the transfer-encryption ciphertext this torrent/webseed carries. */
-  encKey: string
-  /** Base64 AES-CTR IV/nonce paired with encKey. */
-  encIv: string
+  /**
+   * Base64 ECDH-wrapped AES-256-CTR key+IV for the ciphertext this torrent/
+   * webseed carries — unwrap with the same keypair used to request this
+   * metadata (see browserCrypto.ts's establishKeyWrap/unwrapKeyMaterial).
+   */
+  encKeyWrapped: string
 }
 
 export interface Credentials {

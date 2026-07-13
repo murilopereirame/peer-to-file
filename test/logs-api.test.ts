@@ -13,6 +13,12 @@ let running: RunningServer
 let base: string
 let cookie: string
 
+/** A throwaway ECDH (P-256) public key — /api/torrent requires one (see keyExchange.ts) but this test doesn't unwrap the response's key material. */
+async function clientPublicKey (): Promise<string> {
+  const keyPair = await crypto.webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+  return Buffer.from(await crypto.webcrypto.subtle.exportKey('raw', keyPair.publicKey)).toString('base64')
+}
+
 before(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-logs-')))
   await fs.writeFile(path.join(root, 'file.bin'), crypto.randomBytes(32 * 1024))
@@ -56,7 +62,8 @@ test('server activity accumulates in the log, newest first', async () => {
   })
   cookie = login.headers.get('set-cookie')!.split(';')[0]!
 
-  await fetch(`${base}/api/torrent?path=file.bin`, { headers: { Cookie: cookie } })
+  const ck = await clientPublicKey()
+  await fetch(`${base}/api/torrent?path=file.bin&ck=${encodeURIComponent(ck)}`, { headers: { Cookie: cookie } })
 
   const res = await fetch(`${base}/api/logs`, { headers: { Cookie: cookie } })
   assert.equal(res.status, 200)

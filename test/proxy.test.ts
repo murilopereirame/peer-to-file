@@ -16,6 +16,12 @@ let root: string
 let running: RunningServer
 let base: string
 
+/** A throwaway ECDH (P-256) public key — /api/torrent requires one (see keyExchange.ts) but these tests don't unwrap the response's key material. */
+async function clientPublicKey (): Promise<string> {
+  const keyPair = await crypto.webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+  return Buffer.from(await crypto.webcrypto.subtle.exportKey('raw', keyPair.publicKey)).toString('base64')
+}
+
 before(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-proxy-')))
   await fs.writeFile(path.join(root, 'file.bin'), crypto.randomBytes(32 * 1024))
@@ -40,7 +46,8 @@ after(async () => {
 })
 
 test('metadata URLs use the public origin (wss + same-port tracker path)', async () => {
-  const res = await fetch(`${base}/api/torrent?path=file.bin`)
+  const ck = await clientPublicKey()
+  const res = await fetch(`${base}/api/torrent?path=file.bin&ck=${encodeURIComponent(ck)}`)
   assert.equal(res.status, 200)
   const body = await res.json() as any
 
@@ -53,7 +60,8 @@ test('metadata URLs use the public origin (wss + same-port tracker path)', async
 })
 
 test('the tracker answers announces on the main port at /tracker', async () => {
-  const res = await fetch(`${base}/api/torrent?path=file.bin`)
+  const ck = await clientPublicKey()
+  const res = await fetch(`${base}/api/torrent?path=file.bin&ck=${encodeURIComponent(ck)}`)
   const { infoHash } = await res.json() as any
 
   const ws = new WebSocket(`ws://127.0.0.1:${running.config.port}/tracker`)

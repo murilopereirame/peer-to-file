@@ -15,6 +15,7 @@ import type { Config } from './config.ts'
 import type { Seeder } from './seeder.ts'
 import type { AuthDb } from './db.ts'
 import type { CipherCache } from './cipherCache.ts'
+import { KeyExchangeError, type KeyExchange } from './keyExchange.ts'
 
 export interface AppDeps {
   config: Config
@@ -24,6 +25,7 @@ export interface AppDeps {
   activity: ActivityLog
   db: AuthDb
   cipherCache: CipherCache
+  keyExchange: KeyExchange
   version: string
 }
 
@@ -62,10 +64,27 @@ const wrap = (fn: AsyncHandler) =>
     fn(req, res).catch(next)
   }
 
-export function createApp ({ config, store, seeder, auth, activity, db, cipherCache, version }: AppDeps): Express {
+export function createApp ({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version }: AppDeps): Express {
   const app = express()
   app.disable('x-powered-by')
   const webseedLogOnce = createDebouncer(30_000)
+
+  const wrapOrBadRequest = (clientKey: string, plaintext: Buffer): string => {
+    try {
+      return keyExchange.wrap(clientKey, plaintext)
+    } catch (err) {
+      if (err instanceof KeyExchangeError) throw new BrowseError(400, err.message)
+      throw err
+    }
+  }
+  const unwrapOrBadRequest = (clientKey: string, wrapped: string): Buffer => {
+    try {
+      return keyExchange.unwrap(clientKey, wrapped)
+    } catch (err) {
+      if (err instanceof KeyExchangeError) throw new BrowseError(400, err.message)
+      throw err
+    }
+  }
 
   const secureCookies = config.publicUrl?.startsWith('https:') ?? false
   const sessionCookie = (value: string, maxAgeSec: number): string => {
@@ -105,6 +124,10 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       name: 'peer-to-file',
       version,
       webrtcSeeding: seeder.enabled,
+      // Public by design — an ECDH public key, not a secret. Clients use it
+      // to wrap/unwrap transfer-encryption keys (see keyExchange.ts) so the
+      // key never crosses the wire in the clear.
+      ecdhPublicKey: keyExchange.publicKeyBase64,
       auth: {
         required: auth.enabled,
         needsSetup: auth.enabled && auth.needsSetup(),
@@ -283,28 +306,30 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   // The request body is AES-256-CTR ciphertext, encrypted client-side so the
   // wire never carries plaintext — see packages/shared/src/browserCrypto.ts.
   // The client generates the key/IV itself (uploads are one-shot, no
-  // cross-session reuse the way downloads need) and sends them alongside the
-  // body as headers, plus a plaintext SHA-256 the server verifies after
-  // decrypting: CTR has no built-in authentication, and this closes that gap
-  // cheaply without the complexity of a streaming AEAD — uploads had no
-  // integrity check at all before this feature, so this is a net improvement,
-  // not a weaker guarantee than some alternative.
+  // cross-session reuse the way downloads need), but doesn't send it in the
+  // clear: it's ECDH-wrapped (keyExchange.ts) under the client's own
+  // per-request ephemeral keypair, so an observer of the wire can't recover
+  // it just by watching. A plaintext SHA-256 (also only readable after
+  // decrypting) closes the integrity gap CTR alone leaves — uploads had no
+  // integrity check at all before this feature, so this is a net
+  // improvement, not a weaker guarantee than some alternative.
   app.post('/api/upload', wrap(async (req, res) => {
     const destDirRel = typeof req.query.path === 'string' ? req.query.path : ''
     const name = typeof req.query.name === 'string' ? req.query.name : ''
     const destAbs = await resolveUploadTarget(config.root, destDirRel, name)
 
-    const keyHeader = req.get('X-P2F-Enc-Key')
-    const ivHeader = req.get('X-P2F-Enc-Iv')
+    const clientKey = req.get('X-P2F-Enc-Client-Pubkey')
+    const wrappedKey = req.get('X-P2F-Enc-Key-Wrapped')
     const plainShaHeader = req.get('X-P2F-Plain-Sha256')
-    if (!keyHeader || !ivHeader || !plainShaHeader) {
+    if (!clientKey || !wrappedKey || !plainShaHeader) {
       throw new BrowseError(400, 'missing encryption headers')
     }
-    const encKey = Buffer.from(keyHeader, 'base64')
-    const encIv = Buffer.from(ivHeader, 'base64')
-    if (encKey.length !== 32 || encIv.length !== 16) {
+    const keyMaterial = unwrapOrBadRequest(clientKey, wrappedKey)
+    if (keyMaterial.length !== 48) {
       throw new BrowseError(400, 'invalid encryption headers')
     }
+    const encKey = keyMaterial.subarray(0, 32)
+    const encIv = keyMaterial.subarray(32, 48)
 
     const tmpAbs = `${destAbs}.p2f-upload-${crypto.randomUUID()}`
     const out = fsSync.createWriteStream(tmpAbs, { flags: 'wx' })
@@ -351,6 +376,12 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   // Announce points at the embedded tracker, urlList at /api/raw as an HTTP
   // webseed fallback. Requesting metadata also starts the WebRTC seeder.
   app.get('/api/torrent', wrap(async (req, res) => {
+    // The client's ephemeral ECDH public key for this request — required so
+    // the transfer key below can be wrapped under a key an eavesdropper
+    // can't derive just by watching the wire (see keyExchange.ts).
+    const clientKey = typeof req.query.ck === 'string' ? req.query.ck : ''
+    if (!clientKey) throw new BrowseError(400, 'missing ck (client ECDH public key)')
+
     const abs = await resolveInsideRoot(config.root, req.query.path ?? '')
     const meta = await store.getMeta(abs)
     const rel = path.relative(config.root, abs)
@@ -403,11 +434,11 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       webseed,
       magnet,
       torrentBase64: Buffer.from(torrentFile).toString('base64'),
-      // AES-256-CTR key/IV for the ciphertext this torrent/webseed actually
-      // carries — the client decrypts transparently after WebTorrent's own
+      // AES-256-CTR key+IV for the ciphertext this torrent/webseed actually
+      // carries, ECDH-wrapped for `clientKey` (keyExchange.ts) — the client
+      // unwraps this, then decrypts transparently after WebTorrent's own
       // piece verification passes (see packages/shared/src/browserCrypto.ts).
-      encKey: cipherEntry.key.toString('base64'),
-      encIv: cipherEntry.iv.toString('base64')
+      encKeyWrapped: wrapOrBadRequest(clientKey, Buffer.concat([cipherEntry.key, cipherEntry.iv]))
     })
   }))
 

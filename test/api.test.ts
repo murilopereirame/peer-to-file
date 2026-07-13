@@ -38,6 +38,77 @@ after(async () => {
   await fs.rm(root, { recursive: true, force: true })
 })
 
+// Test-side mirror of the client's ECDH key-wrap flow (packages/shared/src/
+// browserCrypto.ts), using node:crypto's webcrypto instead of a browser, to
+// exercise /api/torrent and /api/upload the same way a real client would —
+// including unwrapping/wrapping the transfer key, not just asserting it's
+// present.
+const webcrypto = crypto.webcrypto
+
+async function establishKeyWrap (serverPublicKeyBase64: string): Promise<{ wrapKey: CryptoKey, clientPublicKeyBase64: string }> {
+  const keyPair = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+  const serverPublicKey = await webcrypto.subtle.importKey(
+    'raw', Buffer.from(serverPublicKeyBase64, 'base64'), { name: 'ECDH', namedCurve: 'P-256' }, false, []
+  )
+  const sharedBits = await webcrypto.subtle.deriveBits({ name: 'ECDH', public: serverPublicKey }, keyPair.privateKey, 256)
+  const hkdfKey = await webcrypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey'])
+  const wrapKey = await webcrypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new TextEncoder().encode('p2f-key-wrap') },
+    hkdfKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+  )
+  const clientPublicKeyRaw = Buffer.from(await webcrypto.subtle.exportKey('raw', keyPair.publicKey))
+  return { wrapKey, clientPublicKeyBase64: clientPublicKeyRaw.toString('base64') }
+}
+
+async function unwrapKeyMaterial (wrapKey: CryptoKey, wrappedBase64: string): Promise<Buffer> {
+  const blob = Buffer.from(wrappedBase64, 'base64')
+  const nonce = blob.subarray(0, 12)
+  const ciphertextAndTag = blob.subarray(12)
+  const plain = await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, wrapKey, ciphertextAndTag)
+  return Buffer.from(plain)
+}
+
+async function wrapKeyMaterial (wrapKey: CryptoKey, plaintext: Buffer): Promise<string> {
+  const nonce = crypto.randomBytes(12)
+  const ciphertext = await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, wrapKey, Uint8Array.from(plaintext))
+  return Buffer.concat([nonce, Buffer.from(ciphertext)]).toString('base64')
+}
+
+/** Fetches /api/torrent the way a real client does: establish a key wrap, unwrap the returned key+IV. */
+async function fetchTorrentMeta (relPath: string): Promise<{ meta: any, key: Buffer, iv: Buffer }> {
+  const info = await (await fetch(`${base}/api/info`)).json() as any
+  const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
+  const res = await fetch(
+    `${base}/api/torrent?path=${encodeURIComponent(relPath)}&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`
+  )
+  const meta = await res.json() as any
+  const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+  return { meta, key: keyMaterial.subarray(0, 32), iv: keyMaterial.subarray(32, 48) }
+}
+
+/** Encrypts an upload payload the way a real client does, returning ready-to-send headers. */
+async function encryptUpload (payload: Buffer): Promise<{ body: Buffer, headers: Record<string, string> }> {
+  const info = await (await fetch(`${base}/api/info`)).json() as any
+  const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
+
+  const key = crypto.randomBytes(32)
+  const iv = crypto.randomBytes(16)
+  const cipher = crypto.createCipheriv('aes-256-ctr', key, iv)
+  const body = Buffer.concat([cipher.update(payload), cipher.final()])
+  const plainSha256 = crypto.createHash('sha256').update(payload).digest('hex')
+  const wrappedKey = await wrapKeyMaterial(keyWrap.wrapKey, Buffer.concat([key, iv]))
+
+  return {
+    body,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-P2F-Enc-Client-Pubkey': keyWrap.clientPublicKeyBase64,
+      'X-P2F-Enc-Key-Wrapped': wrappedKey,
+      'X-P2F-Plain-Sha256': plainSha256
+    }
+  }
+}
+
 test('GET /api/info identifies the server', async () => {
   const res = await fetch(`${base}/api/info`)
   assert.equal(res.status, 200)
@@ -66,9 +137,7 @@ test('GET /api/list rejects traversal', async () => {
 })
 
 test('GET /api/torrent returns consistent, webseed-carrying metadata', async () => {
-  const res = await fetch(`${base}/api/torrent?path=big.bin`)
-  assert.equal(res.status, 200)
-  const body = await res.json() as any
+  const { meta: body, key, iv } = await fetchTorrentMeta('big.bin')
 
   assert.equal(body.name, 'big.bin')
   assert.equal(body.length, fileContent.length)
@@ -77,9 +146,9 @@ test('GET /api/torrent returns consistent, webseed-carrying metadata', async () 
   assert.ok(body.webseed.startsWith(`http://127.0.0.1:${running.config.port}/api/raw?path=`))
   assert.ok(body.magnet.startsWith(`magnet:?xt=urn:btih:${body.infoHash}`))
 
-  // the transfer-encryption key/IV ride alongside the rest of the metadata
-  assert.equal(Buffer.from(body.encKey, 'base64').length, 32)
-  assert.equal(Buffer.from(body.encIv, 'base64').length, 16)
+  // the transfer-encryption key/IV are ECDH-wrapped, not sent in the clear
+  assert.equal(key.length, 32)
+  assert.equal(iv.length, 16)
 
   // the .torrent must parse and agree with the JSON envelope
   const parsed = await parseTorrent(Buffer.from(body.torrentBase64, 'base64'))
@@ -90,19 +159,26 @@ test('GET /api/torrent returns consistent, webseed-carrying metadata', async () 
   assert.deepEqual(parsed.urlList, [body.webseed])
 
   // metadata is cached: a second request returns the same infohash
-  const again = await (await fetch(`${base}/api/torrent?path=big.bin`)).json() as any
+  const { meta: again } = await fetchTorrentMeta('big.bin')
   assert.equal(again.infoHash, body.infoHash)
 })
 
+test('GET /api/torrent without ck (client ECDH public key) is a 400', async () => {
+  const res = await fetch(`${base}/api/torrent?path=big.bin`)
+  assert.equal(res.status, 400)
+})
+
 test('GET /api/torrent on a directory is a 400', async () => {
-  const res = await fetch(`${base}/api/torrent?path=docs`)
+  const info = await (await fetch(`${base}/api/info`)).json() as any
+  const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
+  const res = await fetch(
+    `${base}/api/torrent?path=docs&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`
+  )
   assert.equal(res.status, 400)
 })
 
 test('GET /api/raw serves AES-256-CTR ciphertext with Range support (webseed)', async () => {
-  const meta = await (await fetch(`${base}/api/torrent?path=big.bin`)).json() as any
-  const key = Buffer.from(meta.encKey, 'base64')
-  const iv = Buffer.from(meta.encIv, 'base64')
+  const { key, iv } = await fetchTorrentMeta('big.bin')
   const decrypt = (buf: Buffer, offset: number): Buffer => {
     // AES-CTR at a byte offset: bump the counter by whole blocks, matching
     // the client-side offset-aware helper (packages/shared/browserCrypto.ts).
@@ -210,29 +286,9 @@ test('POST /api/move refuses to overwrite an existing entry', async () => {
   await fs.rm(path.join(root, 'src-move.txt'))
 })
 
-// Uploads are encrypted client-side (AES-256-CTR, key/IV generated
-// per-upload) with a plaintext SHA-256 the server verifies after decrypting
-// — see the doc comment on the /api/upload handler in app.ts.
-function encryptUpload (payload: Buffer): { body: Buffer, headers: Record<string, string> } {
-  const key = crypto.randomBytes(32)
-  const iv = crypto.randomBytes(16)
-  const cipher = crypto.createCipheriv('aes-256-ctr', key, iv)
-  const body = Buffer.concat([cipher.update(payload), cipher.final()])
-  const plainSha256 = crypto.createHash('sha256').update(payload).digest('hex')
-  return {
-    body,
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'X-P2F-Enc-Key': key.toString('base64'),
-      'X-P2F-Enc-Iv': iv.toString('base64'),
-      'X-P2F-Plain-Sha256': plainSha256
-    }
-  }
-}
-
 test('POST /api/upload streams a file to disk', async () => {
   const payload = crypto.randomBytes(256 * 1024)
-  const { body, headers } = encryptUpload(payload)
+  const { body, headers } = await encryptUpload(payload)
   const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('uploaded.bin')}`, {
     method: 'POST',
     headers,
@@ -249,7 +305,7 @@ test('POST /api/upload streams a file to disk', async () => {
 
 test('POST /api/upload rejects a bad plaintext checksum', async () => {
   const payload = crypto.randomBytes(1024)
-  const { body, headers } = encryptUpload(payload)
+  const { body, headers } = await encryptUpload(payload)
   headers['X-P2F-Plain-Sha256'] = crypto.randomBytes(32).toString('hex')
   const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('bad-checksum.bin')}`, {
     method: 'POST',
@@ -277,7 +333,7 @@ test('POST /api/upload works for a .json file (not swallowed by the JSON body pa
   // the same express.json() used by /api/setup, /api/login, /api/delete and
   // /api/move, or the raw body never reaches the upload handler.
   const payload = Buffer.from(JSON.stringify({ hello: 'world', n: 42 }))
-  const { body, headers } = encryptUpload(payload)
+  const { body, headers } = await encryptUpload(payload)
   headers['Content-Type'] = 'application/json'
   const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('data.json')}`, {
     method: 'POST',
@@ -295,14 +351,14 @@ test('POST /api/upload works for a .json file (not swallowed by the JSON body pa
 test('POST /api/upload rejects an invalid name and an existing target', async () => {
   const badName = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('../escape.bin')}`, {
     method: 'POST',
-    ...encryptUpload(Buffer.from('x')),
+    ...await encryptUpload(Buffer.from('x')),
     duplex: 'half'
   } as RequestInit)
   assert.equal(badName.status, 400)
 
   const collision = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('big.bin')}`, {
     method: 'POST',
-    ...encryptUpload(Buffer.from('x')),
+    ...await encryptUpload(Buffer.from('x')),
     duplex: 'half'
   } as RequestInit)
   assert.equal(collision.status, 409)

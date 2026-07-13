@@ -4,18 +4,95 @@
 // carrying plaintext, independent of whatever TLS/VPN the deployment does or
 // doesn't have — see src/server/cipherCache.ts for the server-side half.
 //
+// The AES-256-CTR key/IV that actually encrypts a transfer never crosses the
+// wire in the clear: each request establishes an ECDH (P-256) shared secret
+// with the server's stable public key, using a fresh ephemeral keypair, and
+// the key material is AES-256-GCM-wrapped under a key derived from that
+// secret (see keyExchange.ts server-side). A passive observer of the wire
+// sees ciphertext and a wrapped-key blob, but recovering the key requires
+// solving ECDH, not just capturing traffic.
+//
 // CTR encrypt and decrypt are the *same* XOR-with-keystream operation, so one
-// function serves both directions: the download side decrypts what the
-// server encrypted, the upload side encrypts what the server will decrypt.
-
-/** Imports a raw AES-256 key for use with ctrXor. */
-export async function importCtrKey (rawKeyBase64: string): Promise<CryptoKey> {
-  const raw = base64ToBytes(rawKeyBase64)
-  return crypto.subtle.importKey('raw', raw.buffer, { name: 'AES-CTR' }, false, ['encrypt', 'decrypt'])
-}
+// function (ctrXor) serves both directions: the download side decrypts what
+// the server encrypted, the upload side encrypts what the server will decrypt.
 
 export function base64ToBytes (b64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(b64), c => c.charCodeAt(0)) as Uint8Array<ArrayBuffer>
+}
+
+function bytesToBase64 (bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+}
+
+// --- ECDH key wrapping -------------------------------------------------------
+
+const ECDH_PARAMS = { name: 'ECDH', namedCurve: 'P-256' } as const
+const WRAP_INFO = new TextEncoder().encode('p2f-key-wrap')
+const GCM_NONCE_LEN = 12
+const GCM_TAG_LEN = 16
+
+export interface KeyWrap {
+  wrapKey: CryptoKey
+  /** This session's ephemeral ECDH public key (base64) — send as `ck`/`X-P2F-Enc-Client-Pubkey`. */
+  clientPublicKeyBase64: string
+}
+
+/**
+ * Fetches (once) and caches the server's stable ECDH public key. `fetchInfo`
+ * is injected so this module stays transport-agnostic (plain fetch on web,
+ * `@tauri-apps/plugin-http` on desktop) — same pattern as P2FClient.
+ */
+let serverPublicKeyPromise: Promise<Uint8Array> | null = null
+export function getServerEcdhPublicKey (fetchInfo: () => Promise<{ ecdhPublicKey: string }>): Promise<Uint8Array> {
+  serverPublicKeyPromise ??= fetchInfo().then(info => base64ToBytes(info.ecdhPublicKey))
+  return serverPublicKeyPromise
+}
+
+/**
+ * Generates a fresh ephemeral ECDH keypair and derives the AES-256-GCM
+ * wrapping key shared with the server (same derivation as keyExchange.ts:
+ * ECDH shared secret -> HKDF-SHA256, info "p2f-key-wrap" -> 32-byte key).
+ * A new keypair per call, not reused across requests, so each transfer's
+ * key-wrap is independent.
+ */
+export async function establishKeyWrap (serverPublicKeyRaw: Uint8Array): Promise<KeyWrap> {
+  const keyPair = await crypto.subtle.generateKey(ECDH_PARAMS, true, ['deriveBits'])
+  const serverPublicKey = await crypto.subtle.importKey('raw', serverPublicKeyRaw as BufferSource, ECDH_PARAMS, false, [])
+  const sharedBits = await crypto.subtle.deriveBits({ name: 'ECDH', public: serverPublicKey }, keyPair.privateKey, 256)
+  const hkdfKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey'])
+  const wrapKey = await crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: WRAP_INFO },
+    hkdfKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+  )
+  const clientPublicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey))
+  return { wrapKey, clientPublicKeyBase64: bytesToBase64(clientPublicKeyRaw) }
+}
+
+/** AES-256-GCM-wraps `plaintext` (the transfer key+IV) — wire format: nonce(12) || ciphertext || tag(16). */
+export async function wrapKeyMaterial (wrapKey: CryptoKey, plaintext: Uint8Array): Promise<string> {
+  const nonce = crypto.getRandomValues(new Uint8Array(GCM_NONCE_LEN))
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, wrapKey, plaintext as BufferSource)
+  const out = new Uint8Array(nonce.length + ciphertext.byteLength)
+  out.set(nonce, 0)
+  out.set(new Uint8Array(ciphertext), nonce.length)
+  return bytesToBase64(out)
+}
+
+/** Reverses wrapKeyMaterial(). Throws if the GCM tag doesn't verify. */
+export async function unwrapKeyMaterial (wrapKey: CryptoKey, wrappedBase64: string): Promise<Uint8Array> {
+  const blob = base64ToBytes(wrappedBase64)
+  if (blob.length < GCM_NONCE_LEN + GCM_TAG_LEN) throw new Error('invalid wrapped key')
+  const nonce = blob.subarray(0, GCM_NONCE_LEN)
+  const ciphertextAndTag = blob.subarray(GCM_NONCE_LEN)
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, wrapKey, ciphertextAndTag)
+  return new Uint8Array(plain)
+}
+
+// --- AES-256-CTR bulk transfer encryption -----------------------------------
+
+/** Imports raw AES-256 key bytes for use with ctrXor. */
+export async function importCtrKey (rawKey: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', rawKey as BufferSource, { name: 'AES-CTR' }, false, ['encrypt', 'decrypt'])
 }
 
 /**
@@ -71,18 +148,19 @@ export interface EncryptedUpload {
  * Encrypts a file client-side before it goes over the wire to /api/upload.
  * Unlike downloads (a server-generated, cross-session-stable key), uploads
  * are one-shot — the client just generates a fresh random key/IV, encrypts,
- * and hands the server what it needs to decrypt via headers (see the
- * doc comment on the /api/upload handler in src/server/app.ts). Reads the
- * file twice (once streamed through ctrXor for the ciphertext body, once via
- * `arrayBuffer()` for the plaintext SHA-256 the server verifies after
- * decrypting) rather than hand-rolling an incremental SHA-256 — this project
- * already accepts O(file size) memory for the equivalent download-side
- * fallback, so the same trade-off here isn't a new category of limitation.
+ * and hands the server what it needs to decrypt: the key/IV themselves
+ * ECDH-wrapped under `keyWrap` (see the doc comment on the /api/upload
+ * handler in src/server/app.ts), plus a plaintext SHA-256 the server
+ * verifies after decrypting. Reads the file twice (once streamed through
+ * ctrXor for the ciphertext body, once via `arrayBuffer()` for the SHA-256)
+ * rather than hand-rolling an incremental SHA-256 — this project already
+ * accepts O(file size) memory for the equivalent download-side fallback, so
+ * the same trade-off here isn't a new category of limitation.
  */
-export async function encryptFileForUpload (file: Blob): Promise<EncryptedUpload> {
+export async function encryptFileForUpload (file: Blob, keyWrap: KeyWrap): Promise<EncryptedUpload> {
   const rawKey = crypto.getRandomValues(new Uint8Array(32))
   const iv = crypto.getRandomValues(new Uint8Array(16))
-  const key = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-CTR' }, false, ['encrypt'])
+  const key = await crypto.subtle.importKey('raw', rawKey.buffer, { name: 'AES-CTR' }, false, ['encrypt'])
 
   const parts: Uint8Array[] = []
   let offset = 0
@@ -99,18 +177,18 @@ export async function encryptFileForUpload (file: Blob): Promise<EncryptedUpload
   const plainSha256 = Array.from(new Uint8Array(plainDigest))
     .map(b => b.toString(16).padStart(2, '0')).join('')
 
+  const keyMaterial = new Uint8Array(48)
+  keyMaterial.set(rawKey, 0)
+  keyMaterial.set(iv, 32)
+
   return {
     body: new Blob(parts as BlobPart[]),
     headers: {
-      'X-P2F-Enc-Key': bytesToBase64(rawKey),
-      'X-P2F-Enc-Iv': bytesToBase64(iv),
+      'X-P2F-Enc-Client-Pubkey': keyWrap.clientPublicKeyBase64,
+      'X-P2F-Enc-Key-Wrapped': await wrapKeyMaterial(keyWrap.wrapKey, keyMaterial),
       'X-P2F-Plain-Sha256': plainSha256
     }
   }
-}
-
-function bytesToBase64 (bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
 }
 
 export interface EncKeyEntry {
@@ -120,10 +198,11 @@ export interface EncKeyEntry {
 
 /**
  * infoHash -> key/IV registry, populated when a download starts (from the
- * `encKey`/`encIv` fields on the /api/torrent response) and consulted by the
- * patched File async iterator below. Shared module-level state: the registry
- * and the monkey-patch both need to be the same instance across every caller
- * in a page (downloadManager.ts et al.), so this file, not its caller, owns it.
+ * unwrapped `encKeyWrapped` field on the /api/torrent response) and
+ * consulted by the patched File async iterator below. Shared module-level
+ * state: the registry and the monkey-patch both need to be the same
+ * instance across every caller in a page (downloadManager.ts et al.), so
+ * this file, not its caller, owns it.
  */
 export const transferKeys = new Map<string, EncKeyEntry>()
 

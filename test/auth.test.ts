@@ -15,6 +15,12 @@ let base: string
 let cookie: string
 let apiToken: string
 
+/** A throwaway ECDH (P-256) public key — /api/torrent requires one (see keyExchange.ts) but these tests don't unwrap the response's key material. */
+async function clientPublicKey (): Promise<string> {
+  const keyPair = await crypto.webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+  return Buffer.from(await crypto.webcrypto.subtle.exportKey('raw', keyPair.publicKey)).toString('base64')
+}
+
 before(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-auth-')))
   await fs.writeFile(path.join(root, 'file.bin'), crypto.randomBytes(32 * 1024))
@@ -124,7 +130,8 @@ test('Bearer API tokens unlock the API', async () => {
 })
 
 test('torrent metadata carries tokenized webseed + tracker URLs that work', async () => {
-  const res = await fetch(`${base}/api/torrent?path=file.bin`, { headers: { Cookie: cookie } })
+  const ck = await clientPublicKey()
+  const res = await fetch(`${base}/api/torrent?path=file.bin&ck=${encodeURIComponent(ck)}`, { headers: { Cookie: cookie } })
   assert.equal(res.status, 200)
   const body = await res.json() as any
 

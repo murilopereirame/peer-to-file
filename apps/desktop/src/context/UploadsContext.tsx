@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useState } from 'react'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
-import { encryptFileForUpload, errMessage } from '@p2f/shared'
+import { encryptFileForUpload, errMessage, establishKeyWrap, getServerEcdhPublicKey } from '@p2f/shared'
 import { useApp } from './AppContext'
 
 export interface UploadEntry {
@@ -37,14 +37,19 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
   // uploads the way there is for downloads (see torrentDownloads.ts); this
   // mirrors the same worst-case trade-off the browser client documents for
   // its own Blob fallback. Encrypted client-side (AES-256-CTR, key/IV
-  // generated per upload) so the wire never carries plaintext — see the
-  // doc comment on the /api/upload handler in src/server/app.ts.
+  // generated per upload, then ECDH-wrapped so the wire never carries the
+  // key either) — see the doc comment on the /api/upload handler in
+  // src/server/app.ts and packages/shared/src/browserCrypto.ts.
   const start = useCallback((destDir: string, file: File, onSettled?: () => void) => {
     const client = app.client
     if (!client) return
     const id = `${destDir}/${file.name}#${Date.now()}`
     setUploads(prev => [{ id, name: file.name, status: 'running' }, ...prev])
-    void encryptFileForUpload(file)
+    void (async () => {
+      const serverPublicKey = await getServerEcdhPublicKey(async () => client.info())
+      const keyWrap = await establishKeyWrap(serverPublicKey)
+      return encryptFileForUpload(file, keyWrap)
+    })()
       .then(async ({ body, headers }) => tauriFetch(client.uploadUrl(destDir, file.name), {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream', ...headers },
