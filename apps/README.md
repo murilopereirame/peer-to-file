@@ -127,17 +127,45 @@ Two ad-hoc (`workflow_dispatch`-only) GitHub Actions workflows, neither of
 which runs automatically on push/PR:
 
 - **`.github/workflows/apps-build.yml`** — builds an unsigned Android debug
-  APK, an unsigned iOS Simulator build, and unsigned Tauri desktop bundles
-  for macOS/Windows/Linux, uploaded as workflow artifacts. Trigger it from
-  the Actions tab; toggle which platforms to build. These are dev/sideload
-  builds — real signing (Android keystore, Apple certificates and
-  provisioning profiles, desktop code-signing/notarization) needs your own
-  credentials wired in as repo secrets, which isn't set up here.
+  APK, an unsigned iOS Simulator build, and Tauri desktop bundles for
+  macOS/Windows/Linux, uploaded as workflow artifacts. Trigger it from the
+  Actions tab: pick a **branch** (a text input — branch name, tag, or commit
+  SHA; defaults to `main`) to build from, and toggle which platforms to
+  build. These are dev/sideload builds — real signing (Android keystore,
+  Apple Developer ID + notarization, Windows Authenticode) needs your own
+  credentials wired in as repo secrets, which isn't set up here; macOS
+  bundles are ad-hoc signed (`signingIdentity: "-"` in `tauri.conf.json`)
+  so they at least *open* on Apple Silicon — see "Opening the macOS build"
+  below.
 - **`.github/workflows/apps-version-bump.yml`** — bumps `apps/mobile`,
   `apps/desktop` and `packages/shared` versions together (patch/minor/major,
   your choice at trigger time), plus each platform's own build-number
   fields (iOS `buildNumber`, Android `versionCode`), and pushes a commit +
   `apps-vX.Y.Z` tag. Doesn't touch the root project's own version.
+
+### Opening the macOS build
+
+The `.dmg` from `apps-build.yml` is **ad-hoc signed, not Apple-notarized**
+(that needs a paid Apple Developer account's certificate, which isn't
+configured here) — macOS Gatekeeper will still refuse to open it normally.
+Downloading it through a browser (including GitHub's own artifact download)
+adds a quarantine flag that, combined with no notarization, is exactly what
+produces the misleading **"P2File is damaged and can't be opened"** dialog
+(not an actual corruption — this is Gatekeeper's message for
+"unnotarized + quarantined", regardless of the app being ad-hoc signed).
+
+To open it anyway:
+
+```sh
+xattr -cr /Applications/P2File.app   # after copying it out of the mounted .dmg
+```
+
+or right-click the app → **Open** → **Open** again in the confirmation
+dialog (works on most macOS versions; if you still see "damaged" rather
+than "unidentified developer", use the `xattr` command instead). This is a
+one-time step per download — it's inherent to distributing an unsigned/
+non-notarized app, not something CI can fix without your own Apple
+Developer credentials.
 
 ## Known limitations (v1)
 

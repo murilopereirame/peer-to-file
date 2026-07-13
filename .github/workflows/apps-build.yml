@@ -8,6 +8,10 @@ name: Apps - Build
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: Branch, tag or commit SHA to build
+        type: string
+        default: main
       android:
         description: Build Android (Expo, no EAS)
         type: boolean
@@ -22,7 +26,7 @@ on:
         default: true
 
 concurrency:
-  group: apps-build-${{ github.ref }}
+  group: apps-build-${{ inputs.branch }}
   cancel-in-progress: true
 
 jobs:
@@ -33,6 +37,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -66,6 +72,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -121,6 +129,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -148,12 +158,16 @@ jobs:
           # Unsigned dev bundles by default — see apps/README.md for adding
           # platform code-signing (Apple notarization, Windows Authenticode).
 
+      # Only the formats meant to be opened directly by a user — the
+      # `.app.tar.gz`/`.sig` pair is the updater's format (used by
+      # tauri-plugin-updater, which this app doesn't have), not something
+      # to double-click, and shipping it just invites a confusing "damaged"
+      # open attempt.
       - uses: actions/upload-artifact@v4
         with:
           name: p2file-desktop-${{ matrix.platform }}
           path: |
             apps/desktop/src-tauri/target/release/bundle/**/*.dmg
-            apps/desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
             apps/desktop/src-tauri/target/release/bundle/**/*.msi
             apps/desktop/src-tauri/target/release/bundle/**/*.exe
             apps/desktop/src-tauri/target/release/bundle/**/*.deb

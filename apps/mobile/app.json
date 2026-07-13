@@ -8,6 +8,7 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "backgroundColor": "#14161a",
+    "icon": "./assets/icon.png",
     "assetBundlePatterns": ["**/*"],
     "ios": {
       "bundleIdentifier": "dev.p2file.mobile",
@@ -27,6 +28,7 @@
       "permissions": ["INTERNET"],
       "usesCleartextTraffic": true,
       "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#14161a"
       }
     },
