@@ -9,7 +9,13 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `devtools`: these are ad-hoc/unsigned dev builds (see apps/README.md), not
+# an App Store release, so there's no reason to make right-click → Inspect
+# Element unavailable the way a default release build would — it's the only
+# way to see a JS error when something like the bug fixed in
+# torrentDownloads.ts (an infinite-render crash with no on-screen trace)
+# happens again.
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-http = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"

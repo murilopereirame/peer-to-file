@@ -50,6 +50,13 @@ export class TorrentDownloadManager {
   private readonly snapshots = new Map<string, DownloadSnapshot>()
   private readonly tracked = new Map<string, Tracked>()
   private readonly listeners = new Set<() => void>()
+  // `list()` is used as `useSyncExternalStore`'s getSnapshot, which must
+  // return a referentially-stable result when nothing changed — otherwise
+  // React treats every render as "the store changed", which either spins
+  // in an infinite update loop or throws "Maximum update depth exceeded"
+  // and (with no Error Boundary anywhere) unmounts the whole app to a
+  // blank screen. Cache the array and only rebuild it in notify().
+  private cachedList: DownloadSnapshot[] = []
 
   async init (onError: (msg: string) => void): Promise<void> {
     await loadWebTorrent()
@@ -77,7 +84,10 @@ export class TorrentDownloadManager {
     return () => { this.listeners.delete(listener) }
   }
 
-  private notify (): void { for (const l of this.listeners) l() }
+  private notify (): void {
+    this.cachedList = [...this.snapshots.values()]
+    for (const l of this.listeners) l()
+  }
 
   private set (path: string, patch: Partial<DownloadSnapshot>): void {
     const cur = this.snapshots.get(path) ?? blank(path, patch.name ?? path)
@@ -86,7 +96,7 @@ export class TorrentDownloadManager {
   }
 
   list (): DownloadSnapshot[] {
-    return [...this.snapshots.values()]
+    return this.cachedList
   }
 
   async start (client: P2FClient, path: string, name: string): Promise<void> {
