@@ -452,6 +452,24 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
     res.sendFile(webtorrentSw)
   })
 
+  // WebTorrent's own service worker intercepts requests under
+  // /webtorrent/keepalive/ and /webtorrent/cancel/ as part of its streamed-
+  // save protocol (feature-detection probes and stream-cancellation
+  // signaling — see webtorrent's lib/server.js/sw.js) and normally never
+  // lets them reach here. But the very first time a page loads, there's a
+  // window before the service worker is actually controlling it (see
+  // DownloadManager.registerServiceWorker's wait for 'controllerchange')
+  // during which these same requests can fall through to a real network
+  // fetch — unauthenticated by design (no session exists to attach yet) and
+  // carrying no user data. Answering them the same way the service worker
+  // would keeps that harmless race from surfacing as a 404.
+  app.get('/webtorrent/keepalive/*', (req, res) => {
+    res.status(200).end()
+  })
+  app.get('/webtorrent/cancel/*', (req, res) => {
+    res.status(200).end()
+  })
+
   app.use('/api', (req: Request, res: Response) => {
     res.status(404).json({ error: 'not found' })
   })

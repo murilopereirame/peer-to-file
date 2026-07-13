@@ -40,11 +40,20 @@ export interface KeyWrap {
 /**
  * Fetches (once) and caches the server's stable ECDH public key. `fetchInfo`
  * is injected so this module stays transport-agnostic (plain fetch on web,
- * `@tauri-apps/plugin-http` on desktop) — same pattern as P2FClient.
+ * `@tauri-apps/plugin-http` on desktop) — same pattern as P2FClient. A
+ * failed fetch (a transient network blip, a 401 before the session is
+ * ready, ...) is not cached — same don't-cache-failures rule the server's
+ * own TorrentStore/CipherCache follow — so the next call retries instead of
+ * every future download/upload on the page failing forever against one
+ * bad attempt.
  */
 let serverPublicKeyPromise: Promise<Uint8Array> | null = null
 export function getServerEcdhPublicKey (fetchInfo: () => Promise<{ ecdhPublicKey: string }>): Promise<Uint8Array> {
-  serverPublicKeyPromise ??= fetchInfo().then(info => base64ToBytes(info.ecdhPublicKey))
+  if (!serverPublicKeyPromise) {
+    const fresh = fetchInfo().then(info => base64ToBytes(info.ecdhPublicKey))
+    fresh.catch(() => { if (serverPublicKeyPromise === fresh) serverPublicKeyPromise = null })
+    serverPublicKeyPromise = fresh
+  }
   return serverPublicKeyPromise
 }
 

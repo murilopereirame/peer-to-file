@@ -44,10 +44,19 @@ export interface KeyWrap {
   clientPublicKeyBase64: string
 }
 
-/** Fetches (once) and caches the server's stable ECDH public key — same pattern as browserCrypto.ts. */
+/**
+ * Fetches (once) and caches the server's stable ECDH public key — same
+ * pattern as browserCrypto.ts, including not caching a failed fetch (see
+ * its doc comment) so one transient error doesn't break every future
+ * transfer for the rest of the app's lifetime.
+ */
 let serverPublicKeyPromise: Promise<string> | null = null
 export function getServerEcdhPublicKey (fetchInfo: () => Promise<{ ecdhPublicKey: string }>): Promise<string> {
-  serverPublicKeyPromise ??= fetchInfo().then(info => info.ecdhPublicKey)
+  if (!serverPublicKeyPromise) {
+    const fresh = fetchInfo().then(info => info.ecdhPublicKey)
+    fresh.catch(() => { if (serverPublicKeyPromise === fresh) serverPublicKeyPromise = null })
+    serverPublicKeyPromise = fresh
+  }
   return serverPublicKeyPromise
 }
 

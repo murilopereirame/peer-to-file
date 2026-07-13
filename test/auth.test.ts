@@ -210,3 +210,17 @@ test('web client and bundle stay public (login happens in the app)', async () =>
   assert.equal((await fetch(`${base}/`)).status, 200)
   assert.equal((await fetch(`${base}/vendor/webtorrent.min.js`, { method: 'HEAD' })).status, 200)
 })
+
+// WebTorrent's own service worker intercepts these paths as part of its
+// streamed-save protocol (feature-detection probe + stream-cancellation
+// signaling) and normally never lets them reach the server — but on a
+// page's very first load, before the service worker is actually
+// controlling it, they can fall through to a real request. No session
+// exists to attach at that point, so these must stay public (see the doc
+// comment above these routes in app.ts).
+test('webtorrent keepalive/cancel probes are answered even when unauthenticated', async () => {
+  const keepalive = await fetch(`${base}/webtorrent/keepalive/anything`)
+  assert.equal(keepalive.status, 200)
+  const cancel = await fetch(`${base}/webtorrent/cancel/`)
+  assert.equal(cancel.status, 200)
+})
