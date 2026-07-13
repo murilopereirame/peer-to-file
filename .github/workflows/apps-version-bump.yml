@@ -8,6 +8,10 @@ name: Apps - Version Bump
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: Branch to bump and push the version commit/tag to
+        type: string
+        default: main
       bump:
         description: Version part to bump
         type: choice
@@ -18,17 +22,18 @@ permissions:
   contents: write
 
 concurrency:
-  group: apps-version-bump
+  group: apps-version-bump-${{ inputs.branch }}
   cancel-in-progress: false
 
 jobs:
   bump:
-    name: Bump apps version (${{ inputs.bump }})
+    name: Bump apps version (${{ inputs.bump }}) on ${{ inputs.branch }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -48,7 +53,7 @@ jobs:
           git add apps/mobile/package.json apps/mobile/app.json apps/desktop/package.json packages/shared/package.json
           git commit -m "chore(apps): bump version to v${{ steps.bump.outputs.version }}"
           git tag "apps-v${{ steps.bump.outputs.version }}"
-          git push origin HEAD
+          git push origin "HEAD:${{ inputs.branch }}"
           git push origin "apps-v${{ steps.bump.outputs.version }}"
 
       - name: Summary
