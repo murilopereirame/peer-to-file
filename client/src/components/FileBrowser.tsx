@@ -4,6 +4,7 @@ import { errMessage, formatBytes, HttpError } from '../lib/format'
 import type { DownloadManager } from '../lib/downloadManager'
 import { useUploads } from '../hooks/useUploads'
 import { UploadPanel } from './UploadPanel'
+import { MoveModal } from './MoveModal'
 
 interface DirEntry {
   name: string
@@ -87,64 +88,66 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
   const segments = path === '' ? [] : path.split('/')
 
   return (
-    <section
-      id="browser" className={`card${dragging ? ' drag-active' : ''}`}
-      onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
-    >
-      <div className="browser-toolbar">
-        <nav id="breadcrumb" aria-label="path">
-          <button type="button" onClick={() => load('')}>&#8962; root</button>
-          {segments.map((segment, i) => {
-            const isLast = i === segments.length - 1
-            return (
-              <span key={i} style={{ display: 'contents' }}>
-                <span className="sep">/</span>
-                {isLast
-                  ? <span className="current">{segment}</span>
-                  : <button type="button" onClick={() => load(segments.slice(0, i + 1).join('/'))}>{segment}</button>}
-              </span>
-            )
-          })}
-        </nav>
-        <button type="button" onClick={() => fileInputRef.current?.click()}>Upload</button>
-        <input
-          ref={fileInputRef} type="file" multiple hidden
-          onChange={(e: ChangeEvent<HTMLInputElement>) => {
-            if (e.target.files) uploadFiles(e.target.files)
-            e.target.value = ''
-          }}
-        />
-      </div>
-
-      {dragging && <div className="drop-hint">drop files to upload to {path === '' ? 'root' : path}</div>}
-
-      <ul id="listing">
-        {path !== '' && (
-          <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
-            <span className="entry-icon">⬆️</span>
-            <span className="entry-name">../</span>
-          </li>
-        )}
-        {loading && <li className="empty loading">loading…</li>}
-        {!loading && error && (
-          <li className="empty error">
-            failed to load folder: {error}{' '}
-            <button type="button" onClick={() => load(path)}>retry</button>
-          </li>
-        )}
-        {!loading && !error && listing?.entries.length === 0 && (
-          <li className="empty">empty folder</li>
-        )}
-        {!loading && !error && listing?.entries.map(entry => (
-          <ListingRow
-            key={entry.name} entry={entry} path={path}
-            onOpenDir={load} onChanged={refresh} manager={manager} apiFetch={apiFetch}
+    <>
+      <section
+        id="browser" className={`card${dragging ? ' drag-active' : ''}`}
+        onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
+      >
+        <div className="browser-toolbar">
+          <nav id="breadcrumb" aria-label="path">
+            <button type="button" onClick={() => load('')}>&#8962; root</button>
+            {segments.map((segment, i) => {
+              const isLast = i === segments.length - 1
+              return (
+                <span key={i} style={{ display: 'contents' }}>
+                  <span className="sep">/</span>
+                  {isLast
+                    ? <span className="current">{segment}</span>
+                    : <button type="button" onClick={() => load(segments.slice(0, i + 1).join('/'))}>{segment}</button>}
+                </span>
+              )
+            })}
+          </nav>
+          <button type="button" onClick={() => fileInputRef.current?.click()}>Upload</button>
+          <input
+            ref={fileInputRef} type="file" multiple hidden
+            onChange={(e: ChangeEvent<HTMLInputElement>) => {
+              if (e.target.files) uploadFiles(e.target.files)
+              e.target.value = ''
+            }}
           />
-        ))}
-      </ul>
+        </div>
+
+        {dragging && <div className="drop-hint">drop files to upload to {path === '' ? 'root' : path}</div>}
+
+        <ul id="listing">
+          {path !== '' && (
+            <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
+              <span className="entry-icon">⬆️</span>
+              <span className="entry-name">../</span>
+            </li>
+          )}
+          {loading && <li className="empty loading">loading…</li>}
+          {!loading && error && (
+            <li className="empty error">
+              failed to load folder: {error}{' '}
+              <button type="button" onClick={() => load(path)}>retry</button>
+            </li>
+          )}
+          {!loading && !error && listing?.entries.length === 0 && (
+            <li className="empty">empty folder</li>
+          )}
+          {!loading && !error && listing?.entries.map(entry => (
+            <ListingRow
+              key={entry.name} entry={entry} path={path}
+              onOpenDir={load} onChanged={refresh} manager={manager} apiFetch={apiFetch}
+            />
+          ))}
+        </ul>
+      </section>
 
       <UploadPanel uploads={uploads} onDismiss={dismiss} />
-    </section>
+    </>
   )
 }
 
@@ -165,8 +168,11 @@ function ListingRow ({
 
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState(entry.name)
+  const [moveOpen, setMoveOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [rowError, setRowError] = useState<string | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   // Both Enter (submitRename disables the input via `busy`) and Escape
   // (cancelRename removes the still-focused input) can make the browser
   // fire a native blur as a side effect of the key handler itself — set
@@ -174,8 +180,18 @@ function ListingRow ({
   // genuine click/tab-away) can tell the difference and skip redundant work.
   const keyHandledRef = useRef(false)
 
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDocClick = (e: MouseEvent): void => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('click', onDocClick)
+    return () => { document.removeEventListener('click', onDocClick) }
+  }, [menuOpen])
+
   const startRename = (e: React.MouseEvent): void => {
     e.stopPropagation()
+    setMenuOpen(false)
     keyHandledRef.current = false
     setRenameValue(entry.name)
     setRowError(null)
@@ -235,8 +251,16 @@ function ListingRow ({
     submitRename()
   }
 
+  const startMove = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    setMenuOpen(false)
+    setRowError(null)
+    setMoveOpen(true)
+  }
+
   const deleteEntry = (e: React.MouseEvent): void => {
     e.stopPropagation()
+    setMenuOpen(false)
     const kind = entry.type === 'dir' ? 'folder (and everything inside it)' : 'file'
     if (!window.confirm(`Delete this ${kind}?\n\n${entryPath}`)) return
     setBusy(true)
@@ -257,7 +281,10 @@ function ListingRow ({
   }
 
   return (
-    <li className={entry.type} onClick={!renaming && entry.type === 'dir' ? () => onOpenDir(entryPath) : undefined}>
+    <li
+      className={entry.type}
+      onClick={!renaming && entry.type === 'dir' ? () => onOpenDir(entryPath) : undefined}
+    >
       <span className="entry-icon">{entry.type === 'dir' ? '📁' : '📄'}</span>
       {renaming
         ? (
@@ -280,9 +307,31 @@ function ListingRow ({
             Download
           </button>
         )}
-        {!renaming && <button type="button" disabled={busy} onClick={startRename}>Rename</button>}
-        <button type="button" disabled={busy} onClick={deleteEntry}>Delete</button>
+        <div className="kebab-wrap" ref={menuRef}>
+          <button
+            type="button" className="kebab-btn" disabled={busy} aria-label="more actions" aria-haspopup="true"
+            onClick={e => { e.stopPropagation(); setMenuOpen(v => !v) }}
+          >
+            ⋮
+          </button>
+          {menuOpen && (
+            <div className="kebab-menu" onClick={e => e.stopPropagation()}>
+              <button type="button" onClick={startRename}>Rename</button>
+              <button type="button" onClick={startMove}>Move</button>
+              <button type="button" onClick={deleteEntry}>Delete</button>
+            </div>
+          )}
+        </div>
       </div>
+      {moveOpen && (
+        <MoveModal
+          fromPath={entryPath}
+          entryName={entry.name}
+          startPath={path}
+          onClose={() => setMoveOpen(false)}
+          onMoved={() => { setMoveOpen(false); onChanged() }}
+        />
+      )}
     </li>
   )
 }

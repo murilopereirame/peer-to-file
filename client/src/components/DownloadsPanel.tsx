@@ -70,12 +70,18 @@ function DownloadRow ({ entry, manager }: { entry: DownloadEntry, manager: Downl
   )
 }
 
+function averageSpeed (entry: DownloadEntry): string {
+  if (entry.elapsedMs <= 0 || entry.downloaded <= 0) return '—'
+  return `${formatBytes(entry.downloaded / (entry.elapsedMs / 1000))}/s`
+}
+
 function DownloadDetails ({ entry }: { entry: DownloadEntry }): React.JSX.Element {
   return (
     <div className="dl-details">
       <dl>
         <dt>Info hash</dt><dd>{entry.infoHash ?? '—'}</dd>
         <dt>Elapsed</dt><dd>{formatDuration(entry.elapsedMs)}</dd>
+        <dt>Average speed</dt><dd>{averageSpeed(entry)}</dd>
         <dt>Size</dt><dd>{formatBytes(entry.length)}</dd>
       </dl>
       <div className="peers-title">Peers ({entry.peers.length})</div>

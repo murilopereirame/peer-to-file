@@ -161,9 +161,24 @@ streaming a 0-byte file on Safari with no error anywhere.
 
 ### Download details
 
-Click a download row's **Details** button for its info hash, elapsed time, and the
-active peer list (type, address if known — WebRTC addresses are best-effort, since
-they're not always exposed — and current speed per peer).
+Click a download row's **Details** button for its info hash, elapsed time, average
+speed (total downloaded ÷ elapsed time — a wall-clock average, so it includes any time
+spent paused, same as "Elapsed"), and the active peer list (type, address if known —
+WebRTC addresses are best-effort, since they're not always exposed — and current speed
+per peer).
+
+Downloading a file you've already fully downloaded (still showing **done** in the list)
+re-queues it in place — no need to **Clear** the old row first.
+
+### Download history
+
+A **Download history** card lists every file this browser has finished saving, with its
+size and completion time — a simple "what did I already grab" record, separate from the
+live in-progress **Downloads** list above it. It's server-persisted (`download_history`
+table in the same SQLite database as users/sessions) and scoped to the signed-in user; with
+`P2F_AUTH=off` there's no user identity to scope it by, so it's one shared, unscoped list
+instead. **Clear history** wipes your own entries — it only touches this list, not
+anything on disk or the file's own availability.
 
 ### Activity logs
 
@@ -172,26 +187,30 @@ server activity: connections, tracker announces, torrent metadata requests, and 
 hits, each with a timestamp and, where available, the remote IP. It polls
 `GET /api/logs` (same auth as everything else) and filters by kind. The log is an
 in-memory ring buffer (~500 entries) — a restart clears it; this is for "what's
-happening / just happened", not a persisted audit trail.
+happening / just happened", not a persisted audit trail. **Download logs** exports the
+currently filtered view as a `.txt` file (client-side only — nothing new to fetch).
 
 ### Managing files
 
-Every listing row has **Rename** and **Delete** buttons, and folders/toolbar have an
-**Upload** button (drag-and-drop onto the file listing works too, dropping into whichever
-folder is currently open):
+Every listing row has a **Download** button (files only) and a kebab (**⋮**) menu with
+**Rename**, **Move** and **Delete**. Folders/toolbar have an **Upload** button
+(drag-and-drop onto the file listing works too, dropping into whichever folder is
+currently open) — uploads get their own card below the browser, separate from the file
+listing, so a batch of in-flight uploads doesn't push the listing itself around.
 
-- **Rename** turns the entry's name into an inline text field. Submitting a bare name
-  renames in place; including a `/` (e.g. `archive/report.pdf`) moves the entry into
-  another folder relative to the one currently open — both go through the same
-  `POST /api/move` endpoint, which refuses to overwrite an existing entry or move a
-  folder into its own subtree.
+- **Rename** turns the entry's name into an inline text field; submitting a bare name
+  renames it in place via `POST /api/move`, which refuses to overwrite an existing entry.
+- **Move** opens a small modal with its own folder browser (breadcrumb + subfolder
+  navigation, starting in the entry's current folder) — pick a destination and confirm
+  with **Move here**. Also goes through `POST /api/move`, which refuses to move a folder
+  into its own subtree.
 - **Delete** asks for confirmation, then recursively removes the file or folder via
   `POST /api/delete`. There is no trash/undo — deletion is immediate and permanent.
 - **Upload** streams each selected (or dropped) file straight to disk via
   `POST /api/upload` — never buffered whole in memory, written to a temp file first and
   atomically renamed into place, so an aborted upload can't leave a partial file visible
   in listings or clobber an existing one of the same name. Progress is shown per file in
-  an **Uploads** panel; the listing refreshes automatically as each upload completes.
+  the **Uploads** card; the listing refreshes automatically as each upload completes.
 
 All of these are gated by the same session/token authentication as everything else, and
 every mutation (delete, move, upload) is recorded in the activity log. They also require
@@ -243,7 +262,7 @@ the backend.
 | `P2F_PUBLIC_HOST`  | *(unset)*   | Host override for tracker/webseed URLs handed to clients (only needed behind port remapping; normally derived from each request's `Host` header) |
 | `P2F_PUBLIC_URL`   | *(unset)*   | Public origin when behind a reverse proxy, e.g. `https://files.example.com` — see below |
 | `P2F_AUTH`         | `on`        | `on` requires login/tokens on every endpoint; `off` restores the VPN-only trust model |
-| `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens (`/config/p2f.db` in Docker) |
+| `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens/download history (`/config/p2f.db` in Docker) — opened regardless of `P2F_AUTH` |
 
 ## Behind a reverse proxy (nginx)
 

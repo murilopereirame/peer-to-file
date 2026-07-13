@@ -13,6 +13,7 @@ import { SESSION_COOKIE, SESSION_TTL_MS, parseCookies, type AuthService } from '
 import { createDebouncer, type ActivityLog } from './activity.ts'
 import type { Config } from './config.ts'
 import type { Seeder } from './seeder.ts'
+import type { AuthDb } from './db.ts'
 
 export interface AppDeps {
   config: Config
@@ -20,6 +21,7 @@ export interface AppDeps {
   seeder: Seeder
   auth: AuthService
   activity: ActivityLog
+  db: AuthDb
   version: string
 }
 
@@ -58,7 +60,7 @@ const wrap = (fn: AsyncHandler) =>
     fn(req, res).catch(next)
   }
 
-export function createApp ({ config, store, seeder, auth, activity, version }: AppDeps): Express {
+export function createApp ({ config, store, seeder, auth, activity, db, version }: AppDeps): Express {
   const app = express()
   app.disable('x-powered-by')
   const webseedLogOnce = createDebouncer(30_000)
@@ -210,6 +212,33 @@ export function createApp ({ config, store, seeder, auth, activity, version }: A
         sinceId
       })
     })
+  })
+
+  // Download history: a record of files this browser has actually finished
+  // saving (posted by the client itself once a save completes — there's no
+  // reliable server-side "this peer finished" signal, since transfers can
+  // come entirely over WebRTC with no webseed hit at all). Scoped to the
+  // signed-in user; with auth off there's no user id, so it's one shared,
+  // unscoped list (userId null) rather than per-visitor.
+  const historyUserId = (res: Response): number | null =>
+    ((res.locals as { user?: { id: number } }).user?.id) ?? null
+
+  app.get('/api/downloads/history', (req, res) => {
+    res.json({ entries: db.listDownloadHistory(historyUserId(res)) })
+  })
+
+  app.post('/api/downloads/history', jsonBody, (req, res) => {
+    const { path: relPath, name, length } = (req.body ?? {}) as { path?: unknown, name?: unknown, length?: unknown }
+    if (typeof relPath !== 'string' || typeof name !== 'string' || typeof length !== 'number') {
+      throw new BrowseError(400, 'path, name and length are required')
+    }
+    db.recordDownload(historyUserId(res), relPath, name, length)
+    res.status(201).json({ ok: true })
+  })
+
+  app.post('/api/downloads/history/clear', (req, res) => {
+    db.clearDownloadHistory(historyUserId(res))
+    res.json({ ok: true })
   })
 
   app.get('/api/list', wrap(async (req, res) => {

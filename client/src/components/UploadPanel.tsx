@@ -8,7 +8,7 @@ export function UploadPanel ({
 }): React.JSX.Element | null {
   if (uploads.length === 0) return null
   return (
-    <section id="uploads-panel">
+    <section id="uploads-panel" className="card">
       <h2>Uploads</h2>
       <ul id="uploads">
         {[...uploads].reverse().map(u => (

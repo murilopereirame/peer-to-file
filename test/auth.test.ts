@@ -32,8 +32,8 @@ before(async () => {
   }, silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
 
-  running.db!.createUser('alice', 'correct horse battery')
-  apiToken = running.db!.createApiToken('alice', 'test')
+  running.db.createUser('alice', 'correct horse battery')
+  apiToken = running.db.createApiToken('alice', 'test')
 })
 
 after(async () => {

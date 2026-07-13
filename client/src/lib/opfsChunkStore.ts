@@ -129,10 +129,7 @@ export class OpfsChunkStore {
   }
 
   put (index: number, buf: Uint8Array, cb: StoreCb): void {
-    callWorker({ op: 'put', key: this.key, index, buf }).then(
-      () => cb(null),
-      (err: Error) => cb(err)
-    )
+    callWorker({ op: 'put', key: this.key, index, buf }).then(() => cb(null), (err: Error) => cb(err))
   }
 
   get (index: number, opts: { offset?: number, length?: number } | StoreCb<Uint8Array>, cb?: StoreCb<Uint8Array>): void {
