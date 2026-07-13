@@ -1,0 +1,39 @@
+{
+  "name": "p2file-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run icons",
+    "dev": "tauri dev",
+    "prebuild": "npm run icons",
+    "build": "tauri build",
+    "dev:vite": "npm run copy:vendor && vite",
+    "build:vite": "npm run copy:vendor && tsc -p tsconfig.json && vite build",
+    "copy:vendor": "node scripts/copy-vendor.mjs",
+    "icons": "tauri icon icon-source.png -o src-tauri/icons",
+    "tauri": "tauri",
+    "check": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@p2f/shared": "file:../../packages/shared",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-http": "^2.5.9",
+    "@tauri-apps/plugin-store": "^2.4.3",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "typescript": "^5.7.0",
+    "vite": "^8.1.4",
+    "webtorrent": "^3.0.16"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

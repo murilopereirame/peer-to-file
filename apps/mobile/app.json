@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "P2File",
+    "slug": "p2file-mobile",
+    "scheme": "p2file",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "backgroundColor": "#14161a",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "bundleIdentifier": "dev.p2file.mobile",
+      "supportsTablet": true,
+      "buildNumber": "1",
+      "infoPlist": {
+        "UIFileSharingEnabled": true,
+        "LSSupportsOpeningDocumentsInPlace": true,
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    },
+    "android": {
+      "package": "dev.p2file.mobile",
+      "versionCode": 1,
+      "permissions": ["INTERNET"],
+      "usesCleartextTraffic": true,
+      "adaptiveIcon": {
+        "backgroundColor": "#14161a"
+      }
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
+  }
+}
