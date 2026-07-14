@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol } from 'electron'
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { join } from 'node:path'
+import { createReadStream, existsSync } from 'node:fs'
+import { extname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { pathToFileURL } from 'node:url'
 import { clearCredentials, loadCredentials, saveCredentials } from './credentials.cjs'
@@ -54,6 +54,20 @@ let nextDownloadTicket = 0
 const pendingDownloadQueue: number[] = []
 const downloadTickets = new Map<number, { info?: DownloadCompletedInfo, resolve?: (info: DownloadCompletedInfo) => void }>()
 
+/** Appends "-1", "-2", ... before the extension until an unused name is
+ * found, rather than silently overwriting an existing file — `setSavePath`
+ * (unlike leaving Electron to pick the path itself) writes to exactly the
+ * path given, no built-in collision handling. */
+function uniqueSavePath (dir: string, filename: string): string {
+  const ext = extname(filename)
+  const base = filename.slice(0, filename.length - ext.length)
+  let candidate = join(dir, filename)
+  for (let n = 1; existsSync(candidate); n++) {
+    candidate = join(dir, `${base}-${n}${ext}`)
+  }
+  return candidate
+}
+
 let mainWindow: BrowserWindow | null = null
 
 async function createWindow (): Promise<void> {
@@ -79,7 +93,7 @@ async function createWindow (): Promise<void> {
   // own default Downloads dir / a native Save As prompt.
   mainWindow.webContents.session.on('will-download', (_event, item) => {
     const dir = downloadDir.current
-    if (dir) item.setSavePath(join(dir, item.getFilename()))
+    if (dir) item.setSavePath(uniqueSavePath(dir, item.getFilename()))
     item.once('done', (_evt, state) => {
       const info: DownloadCompletedInfo = { filename: item.getFilename(), path: item.getSavePath(), state }
       const ticketId = pendingDownloadQueue.shift()

@@ -193,7 +193,7 @@ export class TorrentDownloadManager {
     }
   }
 
-  private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string): void {
+  private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string | undefined): void {
     const t: Tracked = {
       torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, finished: false,
       tick: undefined as unknown as ReturnType<typeof setInterval>
@@ -319,11 +319,16 @@ export class TorrentDownloadManager {
    * only proves the *ciphertext* arrived intact, not that this app's own
    * AES-CTR decrypt and save actually reproduced the original bytes.
    */
-  private async save (client: P2FClient, torrent: WTTorrent, path: string, durationMs: number, plainSha256: string): Promise<void> {
+  private async save (client: P2FClient, torrent: WTTorrent, path: string, durationMs: number, plainSha256: string | undefined): Promise<void> {
     this.set(path, { status: 'saving' })
     try {
       const file = torrent.files[0]
       if (!file) throw new Error('torrent has no files')
+
+      // Only present if the server exposes it (see /api/torrent) — an older,
+      // not-yet-upgraded server simply won't send this field, which must
+      // read as "can't verify", not as a mismatch against `undefined`.
+      if (!plainSha256) console.warn('[p2f] server did not provide a plaintext checksum for this file — is it running the latest version?')
 
       const askBeforeSave = await settings.getAskBeforeSave()
       let savedTo: string | undefined
@@ -335,7 +340,7 @@ export class TorrentDownloadManager {
           const handle = await window.showSaveFilePicker({ suggestedName: file.name })
           const writable = await handle.createWritable()
           await file.stream().pipeTo(writable)
-          checksumStatus = await verifyBrowserFile(handle, plainSha256)
+          checksumStatus = plainSha256 ? await verifyBrowserFile(handle, plainSha256) : 'unavailable'
         } catch (err) {
           if (!isUserGestureError(err)) throw err
           pickerFailed = true
@@ -362,7 +367,7 @@ export class TorrentDownloadManager {
    * learn the real final save path (Electron may rename on a collision, so
    * this can differ from the `dir + file.name` guess) and to know when it's
    * safe to hash the result. */
-  private async saveAutomatically (file: WTFile, plainSha256: string): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
+  private async saveAutomatically (file: WTFile, plainSha256: string | undefined): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
     const dir = await currentDownloadDir()
     const guessedPath = dir ? joinNativePath(dir, file.name) : undefined
     const ticketId = await registerPendingDownload()
@@ -388,6 +393,7 @@ export class TorrentDownloadManager {
 
     try {
       const finalPath = await awaitDownloadCompletion(ticketId)
+      if (!plainSha256) return { savedTo: finalPath, checksumStatus: 'unavailable' }
       const actualSha256 = await hashFile(finalPath)
       if (actualSha256 !== null && actualSha256 !== plainSha256) {
         console.warn('[p2f] checksum mismatch', { path: finalPath, expected: plainSha256, actual: actualSha256 })
