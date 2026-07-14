@@ -73,6 +73,12 @@ export class TorrentDownloadManager {
   private readonly snapshots = new Map<string, DownloadSnapshot>()
   private readonly tracked = new Map<string, Tracked>()
   private readonly listeners = new Set<() => void>()
+  // Cached, only rebuilt in notify() — list() is used as useSyncExternalStore's
+  // getSnapshot in DownloadsContext.tsx, which calls it on every render to
+  // check for changes; a fresh array on every call (even when nothing
+  // changed) makes React see a "change" every time and re-render forever
+  // (error #185, "too many re-renders").
+  private listSnapshot: DownloadSnapshot[] = []
 
   async init (onError: (msg: string) => void): Promise<void> {
     await loadWebTorrent()
@@ -100,7 +106,10 @@ export class TorrentDownloadManager {
     return () => { this.listeners.delete(listener) }
   }
 
-  private notify (): void { for (const l of this.listeners) l() }
+  private notify (): void {
+    this.listSnapshot = [...this.snapshots.values()]
+    for (const l of this.listeners) l()
+  }
 
   private set (path: string, patch: Partial<DownloadSnapshot>): void {
     const cur = this.snapshots.get(path) ?? blank(path, patch.name ?? path)
@@ -109,7 +118,7 @@ export class TorrentDownloadManager {
   }
 
   list (): DownloadSnapshot[] {
-    return [...this.snapshots.values()]
+    return this.listSnapshot
   }
 
   async start (client: P2FClient, path: string, name: string): Promise<void> {
