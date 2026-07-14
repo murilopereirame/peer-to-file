@@ -8,8 +8,8 @@ export function Title ({ children }: { children: React.ReactNode }): React.JSX.E
   return <h2 className="title">{children}</h2>
 }
 
-export function Muted ({ children }: { children: React.ReactNode }): React.JSX.Element {
-  return <p className="muted">{children}</p>
+export function Muted ({ children, style }: { children: React.ReactNode, style?: React.CSSProperties }): React.JSX.Element {
+  return <p className="muted" style={style}>{children}</p>
 }
 
 export function ErrorText ({ children }: { children?: string }): React.JSX.Element | null {

@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useState } from 'react'
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { encryptFileForUpload, errMessage, establishKeyWrap, getServerEcdhPublicKey } from '@p2f/shared'
 import { useApp } from './AppContext'
+import { ipcFetch } from '../lib/client'
 
 export interface UploadEntry {
   id: string
@@ -50,7 +50,7 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
       const keyWrap = await establishKeyWrap(serverPublicKey)
       return encryptFileForUpload(file, keyWrap)
     })()
-      .then(async ({ body, headers }) => tauriFetch(client.uploadUrl(destDir, file.name), {
+      .then(async ({ body, headers }) => ipcFetch(client.uploadUrl(destDir, file.name), {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream', ...headers },
         body: await body.arrayBuffer()

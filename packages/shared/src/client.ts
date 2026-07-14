@@ -10,12 +10,12 @@ export interface P2FClientOptions {
   baseUrl: string
   /**
    * Injected so each app can route requests through the right transport:
-   * the global `fetch` on Expo/React Native (native networking keeps its
-   * own persistent cookie jar), or `@tauri-apps/plugin-http`'s `fetch` on
-   * desktop (a Rust `reqwest` client that keeps its own in-process cookie
-   * jar and, unlike the webview's own `fetch`, isn't subject to the
-   * server's `Access-Control-Allow-Origin: *` blocking credentialed
-   * cross-origin cookies).
+   * the browser's own `fetch` (same-origin, cookies work automatically) on
+   * the web client, or a main-process-proxied `fetch` on desktop (see
+   * apps/desktop/electron/netFetch.cts — runs in Electron's main process
+   * with its own in-memory cookie jar, so it isn't subject to the server's
+   * `Access-Control-Allow-Origin: *` blocking credentialed cross-origin
+   * cookies the way the renderer's own `fetch` would be).
    */
   fetchImpl: FetchLike
 }
@@ -29,8 +29,8 @@ export function normalizeServerUrl (raw: string): string {
 
 /**
  * Thin wrapper around the peer-to-file HTTP API. Framework-agnostic: no
- * DOM, no React Native, no Tauri imports here, so it can be shared verbatim
- * by both apps. Session state (cookie) is handled entirely by whatever
+ * DOM, no Electron imports here, so it can be shared verbatim by both apps.
+ * Session state (cookie) is handled entirely by whatever
  * `fetchImpl` is passed in — this class never inspects auth state itself,
  * it just surfaces 401s as `ApiError` for the caller to react to.
  */
@@ -127,17 +127,14 @@ export class P2FClient {
     return await this.requestJson('/api/downloads/history')
   }
 
-  async historyRecord (path: string, name: string, length: number): Promise<void> {
-    await this.request('/api/downloads/history', P2FClient.jsonInit('POST', { path, name, length }))
+  async historyRecord (
+    path: string, name: string, length: number, infoHash?: string, durationMs?: number
+  ): Promise<void> {
+    await this.request('/api/downloads/history', P2FClient.jsonInit('POST', { path, name, length, infoHash, durationMs }))
   }
 
   async historyClear (): Promise<void> {
     await this.request('/api/downloads/history/clear', { method: 'POST' })
-  }
-
-  /** Direct HTTP (webseed) URL for a file — resumable via Range, used by the mobile app's downloader. */
-  rawUrl (path: string): string {
-    return `${this.baseUrl}/api/raw?path=${encodeURIComponent(path)}`
   }
 
   /** URL to POST a file's raw bytes to, to create it at `dirPath/name`. */

@@ -34,10 +34,13 @@ export interface LogEntry {
 }
 
 export interface HistoryEntry {
+  id: number
   path: string
   name: string
   length: number
-  finishedAt: number
+  completed_at: number
+  info_hash: string | null
+  duration_ms: number | null
 }
 
 export interface TorrentMeta {
@@ -55,6 +58,10 @@ export interface TorrentMeta {
    * metadata (see browserCrypto.ts's establishKeyWrap/unwrapKeyMaterial).
    */
   encKeyWrapped: string
+  /** SHA-256 (hex) of the original plaintext — lets a client verify a
+   * finished download decrypted and saved correctly, independent of
+   * BitTorrent's own per-piece hashing of the ciphertext. */
+  plainSha256: string
 }
 
 export interface Credentials {

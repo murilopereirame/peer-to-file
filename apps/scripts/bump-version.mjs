@@ -1,10 +1,7 @@
 #!/usr/bin/env node
-// Bumps the version across every new-app package in lockstep (mobile,
-// desktop, and the shared package they both consume) plus each platform's
-// own build-number fields, which app stores/OSes require to move forward
-// independently of the human-readable version string. Used by
-// .github/workflows/apps-version-bump.yml — does not touch the original
-// web app's root package.json.
+// Bumps the version across the desktop app and the shared package it
+// consumes, in lockstep. Used by .github/workflows/apps-version-bump.yml —
+// does not touch the original web app's root package.json.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,24 +31,12 @@ function writeJson (path, data) {
   writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`)
 }
 
-const mobilePkgPath = join(root, 'apps/mobile/package.json')
-const mobileAppJsonPath = join(root, 'apps/mobile/app.json')
 const desktopPkgPath = join(root, 'apps/desktop/package.json')
 const sharedPkgPath = join(root, 'packages/shared/package.json')
 
-const mobilePkg = readJson(mobilePkgPath)
-const newVersion = bumpSemver(mobilePkg.version, bumpType)
-
-mobilePkg.version = newVersion
-writeJson(mobilePkgPath, mobilePkg)
-
-const mobileAppJson = readJson(mobileAppJsonPath)
-mobileAppJson.expo.version = newVersion
-mobileAppJson.expo.ios.buildNumber = String(Number(mobileAppJson.expo.ios.buildNumber) + 1)
-mobileAppJson.expo.android.versionCode = Number(mobileAppJson.expo.android.versionCode) + 1
-writeJson(mobileAppJsonPath, mobileAppJson)
-
 const desktopPkg = readJson(desktopPkgPath)
+const newVersion = bumpSemver(desktopPkg.version, bumpType)
+
 desktopPkg.version = newVersion
 writeJson(desktopPkgPath, desktopPkg)
 

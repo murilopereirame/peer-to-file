@@ -8,6 +8,8 @@ export interface HistoryEntry {
   name: string
   length: number
   completed_at: number
+  info_hash: string | null
+  duration_ms: number | null
 }
 
 /**

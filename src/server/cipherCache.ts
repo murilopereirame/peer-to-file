@@ -2,12 +2,18 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import crypto from 'node:crypto'
 import path from 'node:path'
+import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 export interface CipherEntry {
   key: Buffer
   iv: Buffer
   cachePath: string
+  /** SHA-256 of the original plaintext (hex) — lets a client verify a
+   * finished download decrypted and saved correctly, independent of
+   * BitTorrent's own per-piece hashing (which only covers the ciphertext
+   * reaching the client intact, not what happens to it after). */
+  plainSha256: string
 }
 
 export interface CipherCache {
@@ -63,6 +69,7 @@ export function createCipherCache (cacheDir: string, masterSecret: Buffer): Ciph
     const idHash = crypto.createHash('sha256').update(identity).digest('hex')
     const dir = path.join(cacheDir, idHash)
     const cachePath = path.join(dir, path.basename(absPath))
+    const hashPath = `${cachePath}.sha256`
 
     // HKDF over the master secret, salted with this exact file identity —
     // deterministic, so the same file (same path/size/mtime) always derives
@@ -75,25 +82,57 @@ export function createCipherCache (cacheDir: string, masterSecret: Buffer): Ciph
 
     // Content-addressed by identity: if it's already on disk (e.g. from
     // before a restart), it's already correct — no need to re-encrypt.
-    if (await fileExists(cachePath)) return { key, iv, cachePath }
+    if (await fileExists(cachePath)) {
+      const plainSha256 = await readOrRebuildHash(hashPath, absPath)
+      return { key, iv, cachePath, plainSha256 }
+    }
 
     await fs.mkdir(dir, { recursive: true })
     const tmpPath = `${cachePath}.tmp-${crypto.randomUUID()}`
     try {
+      const plainHash = crypto.createHash('sha256')
       await pipeline(
         fsSync.createReadStream(absPath),
+        hashingPassthrough(plainHash),
         crypto.createCipheriv('aes-256-ctr', key, iv),
         fsSync.createWriteStream(tmpPath)
       )
       await fs.rename(tmpPath, cachePath)
+      const plainSha256 = plainHash.digest('hex')
+      await fs.writeFile(hashPath, plainSha256, 'utf8')
+      return { key, iv, cachePath, plainSha256 }
     } catch (err) {
       await fs.rm(tmpPath, { force: true })
       throw err
     }
-    return { key, iv, cachePath }
   }
 
   return { getEntry }
+}
+
+/** Transform that passes chunks through unchanged while feeding them into `hash` — lets the plaintext be hashed and encrypted in the same read pass instead of two. */
+function hashingPassthrough (hash: crypto.Hash): Transform {
+  return new Transform({
+    transform (chunk, _enc, cb) {
+      hash.update(chunk as Buffer)
+      cb(null, chunk)
+    }
+  })
+}
+
+/** Cache hits normally just read the sidecar; pre-existing ciphertext cache
+ * entries from before checksums were tracked have none, so hash the
+ * (still-present) plaintext once here and persist it for next time. */
+async function readOrRebuildHash (hashPath: string, absPath: string): Promise<string> {
+  try {
+    return (await fs.readFile(hashPath, 'utf8')).trim()
+  } catch {
+    const hash = crypto.createHash('sha256')
+    await pipeline(fsSync.createReadStream(absPath), hash)
+    const plainSha256 = hash.digest('hex')
+    await fs.writeFile(hashPath, plainSha256, 'utf8')
+    return plainSha256
+  }
 }
 
 async function fileExists (p: string): Promise<boolean> {

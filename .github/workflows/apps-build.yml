@@ -2,9 +2,9 @@ name: Apps - Build
 
 # Ad-hoc only (workflow_dispatch) — these are unsigned/dev builds meant for
 # "does it still compile and run" checks and internal sideloading, not app
-# store releases. Signing (Android keystore, Apple certs/provisioning,
-# desktop code-signing) is intentionally out of scope here; see
-# apps/README.md for how to add it once you have your own credentials.
+# store releases. Real signing (Apple notarization, Windows Authenticode) is
+# intentionally out of scope here; see apps/README.md for how to add it once
+# you have your own credentials.
 on:
   workflow_dispatch:
     inputs:
@@ -12,112 +12,14 @@ on:
         description: Branch, tag or commit SHA to build
         type: string
         default: main
-      android:
-        description: Build Android (Expo, no EAS)
-        type: boolean
-        default: true
-      ios:
-        description: Build iOS simulator app (Expo, no EAS)
-        type: boolean
-        default: true
-      desktop:
-        description: "Build desktop (Tauri: macOS, Windows, Linux)"
-        type: boolean
-        default: true
 
 concurrency:
   group: apps-build-${{ inputs.branch }}
   cancel-in-progress: true
 
 jobs:
-  android:
-    name: Mobile - Android (debug APK)
-    if: ${{ inputs.android }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.branch }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install dependencies
-        working-directory: apps/mobile
-        run: npm ci
-
-      - name: Expo prebuild (generates ./android, no EAS)
-        working-directory: apps/mobile
-        run: npx expo prebuild --platform android --non-interactive
-
-      - name: Assemble debug APK
-        working-directory: apps/mobile/android
-        run: ./gradlew assembleDebug --no-daemon
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: p2file-android-debug
-          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-
-  ios:
-    name: Mobile - iOS (simulator build)
-    if: ${{ inputs.ios }}
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.branch }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install dependencies
-        working-directory: apps/mobile
-        run: npm ci
-
-      - name: Expo prebuild (generates ./ios, no EAS)
-        working-directory: apps/mobile
-        run: npx expo prebuild --platform ios --non-interactive
-
-      # No Apple signing credentials are set up for this repo, so this
-      # targets the iOS Simulator (unsigned) — proof the app still compiles
-      # cleanly via a plain Xcode build, not a device/App Store artifact.
-      # See apps/README.md for adding a real signing identity later.
-      - name: Build for iOS Simulator
-        working-directory: apps/mobile/ios
-        run: |
-          WORKSPACE=$(ls *.xcworkspace | head -n1)
-          SCHEME="${WORKSPACE%.xcworkspace}"
-          xcodebuild \
-            -workspace "$WORKSPACE" \
-            -scheme "$SCHEME" \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            build
-          echo "APP_NAME=$SCHEME" >> "$GITHUB_ENV"
-
-      - name: Zip .app bundle
-        working-directory: apps/mobile/ios/build/Build/Products/Debug-iphonesimulator
-        run: zip -r P2File-simulator.zip "${APP_NAME}.app"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: p2file-ios-simulator
-          path: apps/mobile/ios/build/Build/Products/Debug-iphonesimulator/P2File-simulator.zip
-          if-no-files-found: error
-
   desktop:
-    name: Desktop - Tauri (${{ matrix.platform }})
-    if: ${{ inputs.desktop }}
+    name: Desktop - Electron (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -126,7 +28,7 @@ jobs:
           - platform: ubuntu-latest
           - platform: windows-latest
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -134,42 +36,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Linux webview dependencies
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - name: Install frontend dependencies
+      - name: Install dependencies
         working-directory: apps/desktop
         run: npm ci
 
-      - name: Generate app icons
+      - name: Build (electron-builder)
         working-directory: apps/desktop
-        run: npm run icons
+        run: npm run build
+        # electron-builder ad-hoc signs macOS builds automatically when no
+        # signing identity is configured (needed for arm64 to launch at
+        # all) — see "Opening the macOS build" in apps/README.md.
 
-      - uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop
-          # Unsigned dev bundles by default — see apps/README.md for adding
-          # platform code-signing (Apple notarization, Windows Authenticode).
-
-      # Only the formats meant to be opened directly by a user — the
-      # `.app.tar.gz`/`.sig` pair is the updater's format (used by
-      # tauri-plugin-updater, which this app doesn't have), not something
-      # to double-click, and shipping it just invites a confusing "damaged"
-      # open attempt.
       - uses: actions/upload-artifact@v4
         with:
           name: p2file-desktop-${{ matrix.platform }}
           path: |
-            apps/desktop/src-tauri/target/release/bundle/**/*.dmg
-            apps/desktop/src-tauri/target/release/bundle/**/*.msi
-            apps/desktop/src-tauri/target/release/bundle/**/*.exe
-            apps/desktop/src-tauri/target/release/bundle/**/*.deb
-            apps/desktop/src-tauri/target/release/bundle/**/*.AppImage
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.AppImage
           if-no-files-found: warn

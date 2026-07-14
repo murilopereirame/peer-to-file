@@ -16,6 +16,7 @@ declare global {
   interface WTWire {
     type?: string
     remoteAddress?: string
+    remotePort?: number
     downloadSpeed: () => number
   }
 
@@ -48,6 +49,14 @@ declare global {
       opts: Record<string, unknown>,
       cb: (torrent: WTTorrent) => void
     ) => void
+    /** Resolves the existing torrent for this id (matched by infoHash), or
+     * null — used to clear out a leftover from a previous attempt (done,
+     * cancelled, or failed) before re-adding, since `add()` otherwise hands
+     * back that same stale torrent instead of a fresh one for a duplicate
+     * infoHash (see Client.prototype.add's onInfoHash dedup check). */
+    get: (torrentId: string) => Promise<WTTorrent | null>
+    /** Removes and destroys the torrent for this id; rejects if none exists. */
+    remove: (torrentId: string, opts?: { destroyStore?: boolean }) => Promise<void>
     createServer: (opts: { controller: ServiceWorkerRegistration }, kind: 'browser') => WTServer
     on: (event: 'error', cb: (err: unknown) => void) => void
   }
@@ -60,6 +69,7 @@ declare global {
     WebTorrent: WebTorrentConstructor
     showSaveFilePicker?: (opts?: { suggestedName?: string }) => Promise<{
       createWritable: () => Promise<WritableStream<Uint8Array>>
+      getFile: () => Promise<File>
     }>
   }
 }

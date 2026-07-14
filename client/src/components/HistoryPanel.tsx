@@ -1,5 +1,10 @@
 import { useDownloadHistory } from '../hooks/useDownloadHistory'
-import { formatBytes } from '../lib/format'
+import { formatBytes, formatDuration } from '../lib/format'
+
+function averageSpeed (length: number, durationMs: number | null): string | null {
+  if (!durationMs || durationMs <= 0) return null
+  return `${formatBytes(length / (durationMs / 1000))}/s`
+}
 
 export function HistoryPanel ({ refreshSignal }: { refreshSignal: unknown }): React.JSX.Element {
   const { entries, loading, error, clear } = useDownloadHistory(refreshSignal)
@@ -20,15 +25,21 @@ export function HistoryPanel ({ refreshSignal }: { refreshSignal: unknown }): Re
       {!loading && !error && entries.length === 0 && <div className="empty">no downloads yet</div>}
       {entries.length > 0 && (
         <ul id="history-list">
-          {entries.map(entry => (
-            <li key={entry.id}>
-              <span className="entry-icon">📄</span>
-              <span className="entry-name">{entry.name}</span>
-              <span className="entry-meta">
-                {formatBytes(entry.length)} · {new Date(entry.completed_at).toLocaleString()}
-              </span>
-            </li>
-          ))}
+          {entries.map(entry => {
+            const avgSpeed = averageSpeed(entry.length, entry.duration_ms)
+            return (
+              <li key={entry.id}>
+                <span className="entry-icon">📄</span>
+                <span className="entry-name">{entry.name}</span>
+                <span className="entry-meta">
+                  {formatBytes(entry.length)} · {new Date(entry.completed_at).toLocaleString()}
+                  {entry.duration_ms ? ` · took ${formatDuration(entry.duration_ms)}` : ''}
+                  {avgSpeed ? ` · ${avgSpeed} avg` : ''}
+                  {entry.info_hash ? ` · ${entry.info_hash}` : ''}
+                </span>
+              </li>
+            )
+          })}
         </ul>
       )}
     </section>

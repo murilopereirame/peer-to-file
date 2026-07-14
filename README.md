@@ -47,9 +47,7 @@ files, same as today.
   produces the same ciphertext (and BitTorrent infohash) across server restarts, keeping
   the existing resume behavior intact. Both the HTTP webseed and WebRTC peers serve this
   ciphertext; BitTorrent's own per-piece SHA-1 verification runs against it unchanged. The
-  web/desktop clients decrypt transparently as they save; the mobile app decrypts the whole
-  file once a download finishes (it has no WebTorrent/streaming hook to decrypt piece by
-  piece).
+  web and desktop clients decrypt transparently as they save.
 - **Uploads**: the client generates a fresh one-time key per upload and encrypts the file
   before it leaves the device, plus a plaintext SHA-256 the server verifies after
   decrypting — closing the integrity gap CTR alone doesn't cover (uploads had no integrity
