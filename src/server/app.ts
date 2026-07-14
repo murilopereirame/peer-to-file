@@ -450,7 +450,8 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       // carries, ECDH-wrapped for `clientKey` (keyExchange.ts) — the client
       // unwraps this, then decrypts transparently after WebTorrent's own
       // piece verification passes (see packages/shared/src/browserCrypto.ts).
-      encKeyWrapped: wrapOrBadRequest(clientKey, Buffer.concat([cipherEntry.key, cipherEntry.iv]))
+      encKeyWrapped: wrapOrBadRequest(clientKey, Buffer.concat([cipherEntry.key, cipherEntry.iv])),
+      plainSha256: cipherEntry.plainSha256
     })
   }))
 

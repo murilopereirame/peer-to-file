@@ -22,6 +22,15 @@ function averageSpeed (entry: DownloadSnapshot): string {
   return `${formatBytes(entry.downloaded / (entry.elapsedMs / 1000))}/s`
 }
 
+function checksumLabel (status: DownloadSnapshot['checksumStatus']): string {
+  switch (status) {
+    case 'ok': return '✓ verified against the server'
+    case 'mismatch': return '⚠ mismatch — the saved file may be corrupt, try again'
+    case 'verifying': return 'verifying…'
+    default: return 'not verified'
+  }
+}
+
 function DownloadDetails ({ entry }: { entry: DownloadSnapshot }): React.JSX.Element {
   return (
     <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--color-border)', fontSize: 13 }}>
@@ -31,6 +40,14 @@ function DownloadDetails ({ entry }: { entry: DownloadSnapshot }): React.JSX.Ele
         <dt className="muted">Average speed</dt><dd>{averageSpeed(entry)}</dd>
         <dt className="muted">Size</dt><dd>{formatBytes(entry.length)}</dd>
         {entry.savedTo && (<><dt className="muted">Saved to</dt><dd style={{ wordBreak: 'break-all' }}>{entry.savedTo}</dd></>)}
+        {entry.status === 'done' && (
+          <>
+            <dt className="muted">Checksum</dt>
+            <dd style={{ color: entry.checksumStatus === 'mismatch' ? 'var(--color-danger)' : undefined }}>
+              {checksumLabel(entry.checksumStatus)}
+            </dd>
+          </>
+        )}
       </dl>
       <div className="muted" style={{ marginTop: 8 }}>Peers ({entry.peers.length})</div>
       {entry.peers.length === 0
@@ -80,6 +97,8 @@ export function DownloadsScreen (): React.JSX.Element {
           <Muted>
             {statusLabel(d.status)} · {formatBytes(d.downloaded)}{d.length > 0 ? ` / ${formatBytes(d.length)}` : ''}
             {d.status === 'downloading' && d.numPeers > 0 ? ` · ${d.numPeers} peer${d.numPeers === 1 ? '' : 's'} · ${formatBytes(d.speedBytesPerSec)}/s` : ''}
+            {d.status === 'done' && d.checksumStatus === 'ok' ? ' · ✓ verified' : ''}
+            {d.status === 'done' && d.checksumStatus === 'mismatch' ? ' · ⚠ checksum mismatch' : ''}
           </Muted>
           <ErrorText>{d.message}</ErrorText>
           {(d.status === 'downloading' || d.status === 'paused') && (

@@ -58,6 +58,10 @@ export interface TorrentMeta {
    * metadata (see browserCrypto.ts's establishKeyWrap/unwrapKeyMaterial).
    */
   encKeyWrapped: string
+  /** SHA-256 (hex) of the original plaintext — lets a client verify a
+   * finished download decrypted and saved correctly, independent of
+   * BitTorrent's own per-piece hashing of the ciphertext. */
+  plainSha256: string
 }
 
 export interface Credentials {

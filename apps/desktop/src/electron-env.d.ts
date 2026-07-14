@@ -29,6 +29,12 @@ export interface FetchFailure {
 
 export type FetchResult = FetchSuccess | FetchFailure
 
+export interface DownloadCompletedInfo {
+  filename: string
+  path: string
+  state: 'completed' | 'cancelled' | 'interrupted'
+}
+
 export interface P2FBridge {
   fetch: (req: FetchRequest) => Promise<FetchResult>
   saveCredentials: (server: string, username: string, password: string) => Promise<void>
@@ -37,6 +43,8 @@ export interface P2FBridge {
   defaultDownloadsDir: () => Promise<string | null>
   pickDownloadFolder: () => Promise<string | null>
   setDownloadDir: (path: string | null) => Promise<void>
+  hashFile: (path: string) => Promise<string | null>
+  onDownloadCompleted: (cb: (info: DownloadCompletedInfo) => void) => () => void
   getSetting: <T>(key: string) => Promise<T | undefined>
   setSetting: (key: string, value: unknown) => Promise<void>
   deleteSetting: (key: string) => Promise<void>

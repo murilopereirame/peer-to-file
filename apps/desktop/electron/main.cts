@@ -1,5 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol } from 'electron'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { join } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import { pathToFileURL } from 'node:url'
 import { clearCredentials, loadCredentials, saveCredentials } from './credentials.cjs'
 import { clearCookiesForOrigin, performFetch, type FetchRequest } from './netFetch.cjs'
@@ -56,6 +59,16 @@ async function createWindow (): Promise<void> {
   mainWindow.webContents.session.on('will-download', (_event, item) => {
     const dir = downloadDir.current
     if (dir) item.setSavePath(join(dir, item.getFilename()))
+    const filename = item.getFilename()
+    // Broadcast every completed/failed/cancelled download by filename so the
+    // renderer (which has no other completion signal for this path — the
+    // click that started it is a one-way navigation) can await its own
+    // download finishing, e.g. to then checksum-verify it. The listener on
+    // the renderer side is registered before it triggers the download, so
+    // there's no race with this firing first.
+    item.once('done', (_evt, state) => {
+      mainWindow?.webContents.send('download-completed', { filename, path: item.getSavePath(), state })
+    })
   })
 
   if (RENDERER_DEV_URL) {
@@ -109,3 +122,18 @@ ipcMain.handle('settings:set', (_e, key: string, value: unknown) => { settingsSt
 ipcMain.handle('settings:delete', (_e, key: string) => { settingsStore.delete(key) })
 
 ipcMain.handle('net:fetch', (_e, req: FetchRequest) => performFetch(req))
+
+// Streamed (constant-memory) SHA-256 of a saved download, for the renderer
+// to compare against the server's plaintext hash — the renderer itself has
+// no way to re-read an auto-saved file (only the main process has real
+// filesystem access), and a streamed hash here scales to arbitrarily large
+// files the same way the download/decrypt path already does.
+ipcMain.handle('downloads:hashFile', async (_e, filePath: string) => {
+  try {
+    const hash = createHash('sha256')
+    await pipeline(createReadStream(filePath), hash)
+    return hash.digest('hex')
+  } catch {
+    return null
+  }
+})

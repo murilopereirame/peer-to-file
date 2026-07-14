@@ -3,9 +3,10 @@ import {
   unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
-import { currentDownloadDir, settings } from './electronApi'
+import { currentDownloadDir, hashFile, settings, waitForDownloadCompletion } from './electronApi'
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
+export type ChecksumStatus = 'verifying' | 'ok' | 'mismatch' | 'unavailable'
 
 export interface PeerInfo {
   type: string
@@ -31,6 +32,11 @@ export interface DownloadSnapshot {
    * Save As pick leaves this unset since the OS doesn't hand the resulting
    * path back to the page. */
   savedTo?: string
+  /** Compares the server's plaintext SHA-256 (independent of BitTorrent's
+   * own per-piece hashing, which only covers the ciphertext) against the
+   * saved file — catches decrypt bugs or a truncated/corrupted save that
+   * piece verification alone wouldn't. */
+  checksumStatus?: ChecksumStatus
 }
 
 interface Tracked {
@@ -159,14 +165,14 @@ export class TorrentDownloadManager {
 
       this.client.add(torrentFile, { maxWebConns: 8 }, torrent => {
         if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
-        this.track(client, torrent, meta.webseed, path)
+        this.track(client, torrent, meta.webseed, path, meta.plainSha256)
       })
     } catch (err) {
       this.set(path, { status: 'error', message: errMessage(err) })
     }
   }
 
-  private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string): void {
+  private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string): void {
     const t: Tracked = {
       torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, finished: false,
       tick: undefined as unknown as ReturnType<typeof setInterval>
@@ -201,7 +207,12 @@ export class TorrentDownloadManager {
       if (t.finished) return
       t.finished = true
       clearInterval(t.tick)
-      void this.save(client, torrent, path, Date.now() - t.startedAt)
+      // The final tick can land slightly before WebTorrent's own 'done'
+      // fires, so `downloaded` may be a few KB/MB short of `length` right
+      // up until this point — set both explicitly rather than trusting
+      // whatever the last tick happened to capture.
+      this.set(path, { progress: 1, downloaded: torrent.length, length: torrent.length })
+      void this.save(client, torrent, path, Date.now() - t.startedAt, plainSha256)
     })
     torrent.on('error', (err) => {
       if (t.finished) return
@@ -256,8 +267,14 @@ export class TorrentDownloadManager {
    * the transfer itself finishes and this method actually runs. When that
    * window has closed, fall back to the automatic path instead of
    * surfacing an error for something the user can't control the timing of.
+   *
+   * Either way, once the file is on disk it's checksummed against the
+   * server's plaintext SHA-256 (`plainSha256`, from /api/torrent) — this is
+   * deliberately separate from BitTorrent's own per-piece hashing, which
+   * only proves the *ciphertext* arrived intact, not that this app's own
+   * AES-CTR decrypt and save actually reproduced the original bytes.
    */
-  private async save (client: P2FClient, torrent: WTTorrent, path: string, durationMs: number): Promise<void> {
+  private async save (client: P2FClient, torrent: WTTorrent, path: string, durationMs: number, plainSha256: string): Promise<void> {
     this.set(path, { status: 'saving' })
     try {
       const file = torrent.files[0]
@@ -265,6 +282,7 @@ export class TorrentDownloadManager {
 
       const askBeforeSave = await settings.getAskBeforeSave()
       let savedTo: string | undefined
+      let checksumStatus: ChecksumStatus = 'unavailable'
       let pickerFailed = false
 
       if (askBeforeSave && window.showSaveFilePicker) {
@@ -272,6 +290,7 @@ export class TorrentDownloadManager {
           const handle = await window.showSaveFilePicker({ suggestedName: file.name })
           const writable = await handle.createWritable()
           await file.stream().pipeTo(writable)
+          checksumStatus = await verifyBrowserFile(handle, plainSha256)
         } catch (err) {
           if (!isUserGestureError(err)) throw err
           pickerFailed = true
@@ -279,10 +298,12 @@ export class TorrentDownloadManager {
       }
 
       if (!askBeforeSave || pickerFailed) {
-        savedTo = await this.saveAutomatically(file)
+        const result = await this.saveAutomatically(file, plainSha256)
+        savedTo = result.savedTo
+        checksumStatus = result.checksumStatus
       }
 
-      this.set(path, { status: 'done', progress: 1, savedTo })
+      this.set(path, { status: 'done', progress: 1, downloaded: file.length, length: file.length, savedTo, checksumStatus })
       await client.historyRecord(path, file.name, file.length, torrent.infoHash, durationMs).catch(() => {})
     } catch (err) {
       this.set(path, { status: 'error', message: `save failed: ${errMessage(err)}` })
@@ -291,9 +312,16 @@ export class TorrentDownloadManager {
 
   /** Streams into the configured default download folder — see the
    * `will-download` session hook in electron/main.cts, which is what
-   * actually redirects the resulting native "download" there. */
-  private async saveAutomatically (file: WTFile): Promise<string | undefined> {
+   * actually redirects the resulting native "download" there. Registers for
+   * that hook's completion signal *before* triggering the download, both to
+   * learn the real final save path (Electron may rename on a collision, so
+   * this can differ from the `dir + file.name` guess) and to know when it's
+   * safe to hash the result. */
+  private async saveAutomatically (file: WTFile, plainSha256: string): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
     const dir = await currentDownloadDir()
+    const guessedPath = dir ? joinNativePath(dir, file.name) : undefined
+    const completion = waitForDownloadCompletion(file.name)
+
     if (this.streamServer) {
       // No `download` attribute: the service worker's response already
       // sets Content-Disposition: attachment, and setting the HTML
@@ -312,6 +340,33 @@ export class TorrentDownloadManager {
       clickDownloadLink(url, file.name)
       setTimeout(() => URL.revokeObjectURL(url), 60_000)
     }
-    return dir ? joinNativePath(dir, file.name) : undefined
+
+    try {
+      const finalPath = await completion
+      const actualSha256 = await hashFile(finalPath)
+      return { savedTo: finalPath, checksumStatus: actualSha256 === null ? 'unavailable' : actualSha256 === plainSha256 ? 'ok' : 'mismatch' }
+    } catch {
+      // No completion signal within the timeout — still likely saved fine
+      // (this only means we couldn't confirm it), so keep the best-guess
+      // path rather than losing "where did this go" entirely.
+      return { savedTo: guessedPath, checksumStatus: 'unavailable' }
+    }
+  }
+}
+
+/** SHA-256 of a File System Access API handle's on-disk contents, computed
+ * in the renderer (no main-process round trip needed — the handle already
+ * gives direct read access to what was just written). Loads the whole file
+ * into memory for the digest, same trade-off the Blob-fallback save tier
+ * already accepts. */
+async function verifyBrowserFile (handle: { getFile: () => Promise<File> }, expectedSha256: string): Promise<ChecksumStatus> {
+  try {
+    const savedFile = await handle.getFile()
+    const buf = await savedFile.arrayBuffer()
+    const digest = await crypto.subtle.digest('SHA-256', buf)
+    const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+    return hex === expectedSha256 ? 'ok' : 'mismatch'
+  } catch {
+    return 'unavailable'
   }
 }

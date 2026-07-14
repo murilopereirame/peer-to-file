@@ -61,6 +61,7 @@ declare global {
     WebTorrent: WebTorrentConstructor
     showSaveFilePicker?: (opts?: { suggestedName?: string }) => Promise<{
       createWritable: () => Promise<WritableStream<Uint8Array>>
+      getFile: () => Promise<File>
     }>
   }
 }

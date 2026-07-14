@@ -44,6 +44,35 @@ async function syncDownloadDirToMain (path: string | null): Promise<void> {
   await window.p2f.setDownloadDir(path)
 }
 
+// --- Post-save integrity check ----------------------------------------------
+// The renderer has no way to re-read a file Electron's own download manager
+// just wrote (only the main process has real filesystem access) — this
+// streams the hash there so it works for arbitrarily large files.
+
+export async function hashFile (path: string): Promise<string | null> {
+  return await window.p2f.hashFile(path)
+}
+
+/** Resolves with the finished download's actual save path once Electron's
+ * download manager reports it done — call this *before* triggering the
+ * download (a click/navigation), not after, so the listener is live before
+ * the completion event can fire. */
+export function waitForDownloadCompletion (filename: string, timeoutMs = 10 * 60_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      unsubscribe()
+      reject(new Error('timed out waiting for the download to finish'))
+    }, timeoutMs)
+    const unsubscribe = window.p2f.onDownloadCompleted(info => {
+      if (info.filename !== filename) return
+      clearTimeout(timer)
+      unsubscribe()
+      if (info.state === 'completed') resolve(info.path)
+      else reject(new Error(`download ${info.state}`))
+    })
+  })
+}
+
 // --- Plain settings (server URL, download folder, theme) -------------------
 
 export const settings = {
