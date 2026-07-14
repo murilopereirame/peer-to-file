@@ -163,6 +163,18 @@ export class TorrentDownloadManager {
         iv: keyMaterial.subarray(32, 48)
       })
 
+      // A previous attempt at this exact file (completed or otherwise) may
+      // still be registered under this infoHash. WebTorrent's own add()
+      // doesn't refuse a duplicate by throwing to *us* — it silently hands
+      // the *old* torrent back to the callback below instead of creating a
+      // new one. For an already-finished old torrent that means attaching a
+      // fresh 'done' listener to a torrent that already emitted 'done' once
+      // in the past — which never fires again, so the UI gets stuck showing
+      // 100% progress with a 'downloading' status forever. Clearing any
+      // leftover first guarantees add() always creates a genuinely new
+      // torrent.
+      await this.forgetExisting(meta.infoHash)
+
       this.client.add(torrentFile, { maxWebConns: 8 }, torrent => {
         if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
         this.track(client, torrent, meta.webseed, path, meta.plainSha256)
@@ -172,11 +184,50 @@ export class TorrentDownloadManager {
     }
   }
 
+  private async forgetExisting (infoHash: string): Promise<void> {
+    if (!this.client) return
+    try {
+      await this.client.remove(infoHash, { destroyStore: true })
+    } catch {
+      // nothing registered under this infoHash — nothing to clear
+    }
+  }
+
   private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string): void {
     const t: Tracked = {
       torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, finished: false,
       tick: undefined as unknown as ReturnType<typeof setInterval>
     }
+    this.tracked.set(path, t)
+
+    const onDone = (): void => {
+      if (t.finished) return
+      t.finished = true
+      clearInterval(t.tick)
+      // The final tick can land slightly before WebTorrent's own 'done'
+      // fires, so `downloaded` may be a few KB/MB short of `length` right
+      // up until this point — set both explicitly rather than trusting
+      // whatever the last tick happened to capture.
+      this.set(path, { progress: 1, downloaded: torrent.length, length: torrent.length })
+      void this.save(client, torrent, path, Date.now() - t.startedAt, plainSha256)
+        .finally(() => { this.forgetTracked(path, torrent) })
+    }
+    const onError = (err: unknown): void => {
+      if (t.finished) return
+      t.finished = true
+      clearInterval(t.tick)
+      this.set(path, { status: 'error', message: errMessage(err) })
+      this.forgetTracked(path, torrent)
+    }
+
+    // forgetExisting() in start() should mean add() always hands back a
+    // genuinely new torrent, but as a safety net: a torrent that's already
+    // done by the time it gets here would never fire 'done' again (it's a
+    // one-time event, already emitted in its past), which is exactly the
+    // "stuck at 100%, status stays 'downloading'" bug this class of issue
+    // produces — handle it as immediately complete instead of waiting.
+    if (torrent.progress >= 1 && !torrent.destroyed) { onDone(); return }
+
     t.tick = setInterval(() => {
       if (t.finished || torrent.destroyed) { clearInterval(t.tick); return }
       if (torrent.numPeers === 0 && Date.now() - t.lastWebseedRetry > 5000) {
@@ -201,25 +252,19 @@ export class TorrentDownloadManager {
         this.set(path, { elapsedMs })
       }
     }, 500)
-    this.tracked.set(path, t)
 
-    torrent.on('done', () => {
-      if (t.finished) return
-      t.finished = true
-      clearInterval(t.tick)
-      // The final tick can land slightly before WebTorrent's own 'done'
-      // fires, so `downloaded` may be a few KB/MB short of `length` right
-      // up until this point — set both explicitly rather than trusting
-      // whatever the last tick happened to capture.
-      this.set(path, { progress: 1, downloaded: torrent.length, length: torrent.length })
-      void this.save(client, torrent, path, Date.now() - t.startedAt, plainSha256)
-    })
-    torrent.on('error', (err) => {
-      if (t.finished) return
-      t.finished = true
-      clearInterval(t.tick)
-      this.set(path, { status: 'error', message: errMessage(err) })
-    })
+    torrent.on('done', onDone)
+    torrent.on('error', onError)
+  }
+
+  /** Once a download is truly finished (saved or failed), drop it from both
+   * our own tracking and WebTorrent's client registry — otherwise it lingers
+   * forever and a later re-download of the same file hits the stale-torrent
+   * bug forgetExisting()/the progress>=1 guard above exist to work around. */
+  private forgetTracked (path: string, torrent: WTTorrent): void {
+    this.tracked.delete(path)
+    transferKeys.delete(torrent.infoHash)
+    if (!torrent.destroyed) torrent.destroy()
   }
 
   pause (path: string): void {
@@ -344,6 +389,9 @@ export class TorrentDownloadManager {
     try {
       const finalPath = await awaitDownloadCompletion(ticketId)
       const actualSha256 = await hashFile(finalPath)
+      if (actualSha256 !== null && actualSha256 !== plainSha256) {
+        console.warn('[p2f] checksum mismatch', { path: finalPath, expected: plainSha256, actual: actualSha256 })
+      }
       return { savedTo: finalPath, checksumStatus: actualSha256 === null ? 'unavailable' : actualSha256 === plainSha256 ? 'ok' : 'mismatch' }
     } catch {
       // No completion signal within the timeout — still likely saved fine
@@ -365,6 +413,9 @@ async function verifyBrowserFile (handle: { getFile: () => Promise<File> }, expe
     const buf = await savedFile.arrayBuffer()
     const digest = await crypto.subtle.digest('SHA-256', buf)
     const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+    if (hex !== expectedSha256) {
+      console.warn('[p2f] checksum mismatch', { expected: expectedSha256, actual: hex, bytes: buf.byteLength })
+    }
     return hex === expectedSha256 ? 'ok' : 'mismatch'
   } catch {
     return 'unavailable'
