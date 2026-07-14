@@ -5,6 +5,8 @@ import { WebSocketServer } from 'ws'
 import TrackerServer from 'bittorrent-tracker/server'
 import { loadConfig, type Config } from './config.ts'
 import { createTorrentStore } from './torrents.ts'
+import { createCipherCache } from './cipherCache.ts'
+import { createKeyExchange } from './keyExchange.ts'
 import { createSeeder } from './seeder.ts'
 import { createApp, bracketHost } from './app.ts'
 import { createAuthService } from './auth.ts'
@@ -113,8 +115,10 @@ export async function startServer (
     }
   }
 
-  const store = createTorrentStore()
-  const app = createApp({ config, store, seeder, auth, activity, db, version })
+  const cipherCache = createCipherCache(config.cacheDir, db.cipherMasterSecret())
+  const keyExchange = createKeyExchange(db.ecdhPrivateKey())
+  const store = createTorrentStore(cipherCache)
+  const app = createApp({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version })
   const server = http.createServer(app)
 
   // Serve the tracker WebSocket on the main HTTP port too (at /tracker), so

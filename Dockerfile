@@ -2,6 +2,9 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
+# packages/shared (@p2f/shared) is a `file:` dependency — npm needs the real
+# directory present before `npm ci` can resolve/symlink it into node_modules.
+COPY packages ./packages
 RUN npm ci
 COPY tsconfig.json tsconfig.client.json tsconfig.worker.json vite.config.ts ./
 COPY src ./src
@@ -20,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
+COPY packages ./packages
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
 COPY --from=build /app/client/dist ./client/dist
@@ -35,7 +39,8 @@ ENV P2F_ROOT=/data \
     P2F_HOST=0.0.0.0 \
     P2F_PORT=8000 \
     P2F_TRACKER_PORT=8001 \
-    P2F_DB=/config/p2f.db
+    P2F_DB=/config/p2f.db \
+    P2F_CACHE_DIR=/config/cache
 
 EXPOSE 8000 8001
 VOLUME /config

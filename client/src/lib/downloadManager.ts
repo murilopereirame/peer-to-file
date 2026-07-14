@@ -7,6 +7,10 @@
 import type { WTTorrent, WTServer } from './webtorrent-types'
 import { OpfsChunkStore } from './opfsChunkStore'
 import { errMessage } from './format'
+import {
+  establishKeyWrap, ensureFileDecryptionPatched, getServerEcdhPublicKey, importCtrKey, transferDrainCallbacks,
+  transferKeys, unwrapKeyMaterial
+} from '@p2f/shared'
 
 export type DownloadStatus =
   | 'preparing' | 'downloading' | 'waiting' | 'paused' | 'saving' | 'done' | 'error'
@@ -50,17 +54,51 @@ interface SavedDownload {
 
 const STALE_DOWNLOAD_MS = 14 * 24 * 60 * 60 * 1000
 const TOUCH_INTERVAL_MS = 30_000
-// Grace period after the OPFS store reports every piece has been read back
-// out at least once (see OpfsChunkStore.onAllRead) — the real completion
-// signal for a save with no other one, giving the OS/browser a moment to
-// finish flushing the last bytes to disk before pieces are reclaimed.
+// Grace period after the patched file iterator reports every decrypted byte
+// has drained (see transferDrainCallbacks in browserCrypto.ts) — the real
+// completion signal for a save with no other one, giving the OS/browser a
+// moment to finish flushing the last bytes to disk before pieces are
+// reclaimed. This must be measured from *decrypted* drain, not just "every
+// piece read back out of the store": store reads happen before this app's
+// per-chunk AES-CTR decrypt, so on a large/slow save "store reads done" can
+// land well before "decrypted bytes actually reached the browser". Using the
+// store-read signal for this once caused exactly that: cleanup destroyed the
+// torrent (removing it from client.torrents) while the streamed save was
+// still draining, and a later request for it found no torrent and got
+// WebTorrent's own 404 page instead of file bytes — surfacing as a real 404
+// page navigation on the slower/heavier-crypto-cost end of that gap.
 const POST_READ_CLEANUP_DELAY_MS = 15_000
-// Safety-net fallback only, for when the read-completion signal never
-// fires at all (OPFS unavailable, so no store to track, or something else
-// went wrong): long enough that it should never legitimately still be
-// mid-stream, since real completion is normally caught by the delay above
-// regardless of file size or transfer speed.
-const MAX_PENDING_CLEANUP_DELAY_MS = 30 * 60_000
+// Safety-net fallback only, for when the drain signal never fires at all
+// (an error mid-stream, an abandoned tab, or some other genuine failure) —
+// NOT a bound on how long a legitimate save can take. Every chunk of a
+// streamed save goes through an async AES-CTR decrypt plus a
+// structured-clone postMessage round trip to the service worker (see
+// transferDrainCallbacks in browserCrypto.ts and BrowserServer.wrapRequest
+// in webtorrent's worker-server.js) — real per-chunk overhead that scales
+// with file size, not a fixed cost. A flat ceiling here once assumed that
+// overhead was negligible "regardless of file size"; for a large enough
+// file (an overnight download) it wasn't, and this timer firing early
+// destroyed the torrent while a still-legitimately-in-progress save was
+// streaming, producing the same 404 the drain signal was added to fix.
+// Scaled by file size below instead of a fixed number, so a bigger file
+// gets a proportionally bigger window — the drain signal above is what
+// drives normal cleanup; this only guards against genuinely stuck
+// transfers, so erring generous here costs nothing but a slower reclaim
+// in that already-rare failure case.
+const MIN_PENDING_CLEANUP_DELAY_MS = 30 * 60_000
+// Deliberately pessimistic sustained-throughput floor for the whole
+// decrypt-and-relay pipeline, used only to size the safety net above — real
+// throughput is normally much higher, but a slow device/browser combined
+// with the per-chunk crypto + postMessage overhead could plausibly sink
+// this low on a very large file, and the safety net has to stay clear of
+// that worst case, not the typical one.
+const ASSUMED_MIN_DRAIN_THROUGHPUT_BYTES_PER_SEC = 2 * 1024 * 1024 // 2 MB/s
+const PENDING_CLEANUP_SAFETY_FACTOR = 3
+
+function pendingCleanupSafetyNetMs (fileLength: number): number {
+  const estimated = (fileLength / ASSUMED_MIN_DRAIN_THROUGHPUT_BYTES_PER_SEC) * 1000 * PENDING_CLEANUP_SAFETY_FACTOR
+  return Math.max(MIN_PENDING_CLEANUP_DELAY_MS, estimated)
+}
 
 function savedDownloads (): SavedDownload[] {
   try {
@@ -252,17 +290,29 @@ export class DownloadManager {
     this.notify()
 
     try {
+      // ECDH key wrap (fresh ephemeral keypair per download) so the
+      // transfer key below never crosses the wire in the clear — see
+      // src/server/keyExchange.ts and packages/shared/src/browserCrypto.ts.
+      const serverPublicKey = await getServerEcdhPublicKey(async () => {
+        const res = await apiFetch('/api/info')
+        return await res.json() as { ecdhPublicKey: string }
+      })
+      const keyWrap = await establishKeyWrap(serverPublicKey)
+
       // The server hashes the file on first request — may take a while for
       // large files, hence the "preparing" state. Re-fetched on every start
       // so restored downloads get fresh transfer tokens (the infohash — and
       // with it the OPFS piece store — stays the same for unchanged files).
-      const res = await apiFetch(`/api/torrent?path=${encodeURIComponent(entryPath)}`)
+      const res = await apiFetch(
+        `/api/torrent?path=${encodeURIComponent(entryPath)}&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`
+      )
       const meta = await res.json() as {
         infoHash: string
         length: number
         magnet: string
         webseed: string
         torrentBase64: string
+        encKeyWrapped: string
       }
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       persistDownload({
@@ -271,6 +321,15 @@ export class DownloadManager {
       })
       this.setEntry(entryPath, { infoHash: meta.infoHash, length: meta.length })
 
+      // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
+      // torrents.ts server-side) — register the key so the patched File
+      // iterator (below) can decrypt transparently once a torrent comes back.
+      const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+      transferKeys.set(meta.infoHash, {
+        key: await importCtrKey(keyMaterial.subarray(0, 32)),
+        iv: keyMaterial.subarray(32, 48)
+      })
+
       const opfsAvailable = typeof navigator.storage?.getDirectory === 'function'
       this.client.add(torrentFile, {
         // more parallel webseed connections: smoother, higher throughput
@@ -278,6 +337,7 @@ export class DownloadManager {
         // persist verified pieces so a refreshed tab resumes, not restarts
         ...(opfsAvailable ? { store: OpfsChunkStore } : {})
       }, torrent => {
+        if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
         this.track(torrent, meta.webseed, entryPath, startPaused)
       })
     } catch (err) {
@@ -419,6 +479,7 @@ export class DownloadManager {
     if (t) {
       t.finished = true
       clearInterval(t.tick)
+      transferKeys.delete(t.torrent.infoHash)
       if (!t.torrent.destroyed) {
         destroyed = new Promise(resolve => {
           t.torrent.destroy({ destroyStore: true }, () => resolve()) // free bandwidth AND stored pieces
@@ -437,6 +498,7 @@ export class DownloadManager {
     if (t && !t.finished) {
       t.finished = true
       clearInterval(t.tick)
+      transferKeys.delete(t.torrent.infoHash)
       t.torrent.destroy({ destroyStore: true }) // free bandwidth AND stored pieces
     }
     forgetDownload(path)
@@ -479,13 +541,6 @@ export class DownloadManager {
         this.completeSave(torrent, entryPath, true)
       } else if (this.streamServer) {
         console.debug('[p2f] save tier 2: service worker stream, url =', file.streamURL)
-        // Reads from here on are the service worker actually streaming the
-        // file to the browser's download manager — start tracking now, not
-        // from construction, or piece-verification reads already made
-        // during the download itself (every piece is read back out and
-        // hashed right after it's written) would make it look like the
-        // save already finished before the browser has read a single byte.
-        OpfsChunkStore.instances.get(torrent.infoHash)?.beginTrackingReads()
         // No `download` attribute here: the service worker's response
         // already carries Content-Disposition: attachment, so setting the
         // HTML attribute too makes Chromium cancel the download outright —
@@ -516,10 +571,19 @@ export class DownloadManager {
     if (!entry || !apiFetch) return
     // Best-effort: history is a convenience list, not load-bearing for the
     // download itself, so a failure here doesn't surface as a save error.
-    void apiFetch('/api/downloads/history', {
+    // Fired right as this download's own WebSeed connections and the
+    // tracker WebSocket are winding down, which can trip a transient
+    // per-origin connection-pool error in some browsers — one retry after a
+    // short delay clears that without needing to touch the connection
+    // count itself.
+    const post = (): Promise<Response> => apiFetch('/api/downloads/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: entryPath, name: entry.name, length: entry.length })
+    })
+    void post().catch(async () => {
+      await new Promise(resolve => setTimeout(resolve, 800))
+      await post()
     }).catch(() => {})
   }
 
@@ -528,6 +592,7 @@ export class DownloadManager {
     this.recordHistory(entryPath)
     if (immediateCleanup) {
       forgetDownload(entryPath)
+      transferKeys.delete(torrent.infoHash)
       torrent.destroy({ destroyStore: true })
       return
     }
@@ -539,29 +604,34 @@ export class DownloadManager {
       if (cleaned) return
       cleaned = true
       clearTimeout(safetyNet)
+      transferDrainCallbacks.delete(torrent.infoHash)
       if (!torrent.destroyed) torrent.destroy({ destroyStore: true })
+      transferKeys.delete(torrent.infoHash)
       forgetDownload(entryPath)
     }
 
     // The service-worker-streamed save (the no-completion-signal path this
-    // branch handles) reads every piece back out of the store as it streams
-    // the file to the browser's native download — previously this store was
-    // reclaimed on a flat 2-minute timer regardless of file size, which for
-    // a large/slow download destroyed the pieces (and broke the still-in-
-    // flight stream, which Safari surfaces as a "stopped" download) well
-    // before the browser had actually finished saving it. Real completion,
-    // when available, now drives cleanup instead of a guessed timeout.
-    const store = OpfsChunkStore.instances.get(torrent.infoHash)
-    if (store) {
-      // guard against the (unlikely, only possible for a very small/fast
-      // file) race where every piece was already read back out before this
-      // listener could be attached
-      if (store.readComplete) {
-        setTimeout(cleanup, POST_READ_CLEANUP_DELAY_MS)
-      } else {
-        store.onAllRead = () => { setTimeout(cleanup, POST_READ_CLEANUP_DELAY_MS) }
-      }
-    }
-    safetyNet = setTimeout(cleanup, MAX_PENDING_CLEANUP_DELAY_MS)
+    // branch handles) has no JS-visible "finished" event of its own —
+    // previously this store was reclaimed on a flat 2-minute timer
+    // regardless of file size, which for a large/slow download destroyed the
+    // pieces (and broke the still-in-flight stream, which Safari surfaces as
+    // a "stopped" download, or worse a 404 if the torrent itself was already
+    // destroyed) well before the browser had actually finished saving it.
+    //
+    // The real completion signal used here is the *decrypted* file
+    // iterator's own drain (see ensureFileDecryptionPatched/
+    // transferDrainCallbacks in browserCrypto.ts) — not just "every piece
+    // read back out of the store". Store reads happen before the per-chunk
+    // AES-CTR decrypt this app inserts into the stream; on a large file, or
+    // a browser/device with slower crypto.subtle throughput, "every piece
+    // read from the store" can be reached well before "every decrypted byte
+    // has actually reached the browser's download manager" — exactly the gap
+    // that made a store-read-based signal an unreliable proxy for real
+    // completion once decryption sat in the middle of this pipe.
+    transferDrainCallbacks.set(torrent.infoHash, () => {
+      transferDrainCallbacks.delete(torrent.infoHash)
+      setTimeout(cleanup, POST_READ_CLEANUP_DELAY_MS)
+    })
+    safetyNet = setTimeout(cleanup, pendingCleanupSafetyNetMs(torrent.length))
   }
 }

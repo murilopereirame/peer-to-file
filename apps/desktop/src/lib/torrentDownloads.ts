@@ -1,4 +1,7 @@
-import { errMessage, type P2FClient } from '@p2f/shared'
+import {
+  establishKeyWrap, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, transferKeys,
+  unwrapKeyMaterial, type P2FClient
+} from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
@@ -95,10 +98,27 @@ export class TorrentDownloadManager {
     if (existing && existing.status !== 'done' && existing.status !== 'error') return
     this.set(path, blank(path, name))
     try {
-      const meta = await client.torrentMeta(path)
+      // ECDH key wrap (fresh ephemeral keypair per download) so the
+      // transfer key below never crosses the wire in the clear — see
+      // src/server/keyExchange.ts and packages/shared/src/browserCrypto.ts.
+      const serverPublicKey = await getServerEcdhPublicKey(async () => client.info())
+      const keyWrap = await establishKeyWrap(serverPublicKey)
+
+      const meta = await client.torrentMeta(path, keyWrap.clientPublicKeyBase64)
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length })
+
+      // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
+      // torrents.ts server-side) — register the key so the patched File
+      // iterator (below) decrypts transparently, same as the web client.
+      const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+      transferKeys.set(meta.infoHash, {
+        key: await importCtrKey(keyMaterial.subarray(0, 32)),
+        iv: keyMaterial.subarray(32, 48)
+      })
+
       this.client.add(torrentFile, { maxWebConns: 8 }, torrent => {
+        if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
         this.track(client, torrent, meta.webseed, path)
       })
     } catch (err) {
@@ -148,7 +168,10 @@ export class TorrentDownloadManager {
 
   cancel (path: string): void {
     const t = this.tracked.get(path)
-    if (t) t.torrent.destroy({ destroyStore: true })
+    if (t) {
+      transferKeys.delete(t.torrent.infoHash)
+      t.torrent.destroy({ destroyStore: true })
+    }
     this.tracked.delete(path)
     this.snapshots.delete(path)
     this.notify()

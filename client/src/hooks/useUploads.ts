@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApi } from '../context/ApiContext'
+import { encryptFileForUpload, establishKeyWrap, getServerEcdhPublicKey } from '@p2f/shared'
 
 export type UploadStatus = 'uploading' | 'done' | 'error'
 
@@ -21,7 +22,7 @@ export function useUploads (onUploaded: () => void): {
   upload: (file: File, destPath: string) => void
   dismiss: (id: string) => void
 } {
-  const { apiBase } = useApi()
+  const { apiBase, apiFetch } = useApi()
   const [uploads, setUploads] = useState<UploadEntry[]>([])
   const inFlight = useRef(new Map<string, XMLHttpRequest>())
 
@@ -42,31 +43,48 @@ export function useUploads (onUploaded: () => void): {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     setUploads(list => [...list, { id, name: file.name, progress: 0, status: 'uploading' }])
 
-    const url = `${apiBase}/api/upload?path=${encodeURIComponent(destPath)}&name=${encodeURIComponent(file.name)}`
-    const xhr = new XMLHttpRequest()
-    inFlight.current.set(id, xhr)
-    xhr.open('POST', url)
-    xhr.withCredentials = true
-    xhr.upload.addEventListener('progress', e => {
-      if (e.lengthComputable) patch(id, { progress: e.loaded / e.total })
+    // Encrypted client-side (AES-256-CTR, key/IV generated per upload, then
+    // ECDH-wrapped so the wire never carries the key either) — see the doc
+    // comment on the /api/upload handler in src/server/app.ts and
+    // packages/shared/src/browserCrypto.ts.
+    void (async () => {
+      const serverPublicKey = await getServerEcdhPublicKey(async () => {
+        const res = await apiFetch('/api/info')
+        return await res.json() as { ecdhPublicKey: string }
+      })
+      const keyWrap = await establishKeyWrap(serverPublicKey)
+      return encryptFileForUpload(file, keyWrap)
+    })().then(({ body, headers }) => {
+      const url = `${apiBase}/api/upload?path=${encodeURIComponent(destPath)}&name=${encodeURIComponent(file.name)}`
+      const xhr = new XMLHttpRequest()
+      inFlight.current.set(id, xhr)
+      xhr.open('POST', url)
+      xhr.withCredentials = true
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+      for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value)
+      xhr.upload.addEventListener('progress', e => {
+        if (e.lengthComputable) patch(id, { progress: e.loaded / e.total })
+      })
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          patch(id, { progress: 1, status: 'done' })
+          onUploaded()
+        } else {
+          let message = `HTTP ${xhr.status}`
+          try {
+            const responseBody = JSON.parse(xhr.responseText) as { error?: string }
+            if (responseBody.error) message = responseBody.error
+          } catch { /* non-JSON error body */ }
+          patch(id, { status: 'error', message })
+        }
+      })
+      xhr.addEventListener('error', () => patch(id, { status: 'error', message: 'network error' }))
+      xhr.addEventListener('loadend', () => { inFlight.current.delete(id) })
+      xhr.send(body)
+    }, err => {
+      patch(id, { status: 'error', message: err instanceof Error ? err.message : 'encryption failed' })
     })
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        patch(id, { progress: 1, status: 'done' })
-        onUploaded()
-      } else {
-        let message = `HTTP ${xhr.status}`
-        try {
-          const body = JSON.parse(xhr.responseText) as { error?: string }
-          if (body.error) message = body.error
-        } catch { /* non-JSON error body */ }
-        patch(id, { status: 'error', message })
-      }
-    })
-    xhr.addEventListener('error', () => patch(id, { status: 'error', message: 'network error' }))
-    xhr.addEventListener('loadend', () => { inFlight.current.delete(id) })
-    xhr.send(file)
-  }, [apiBase, patch, onUploaded])
+  }, [apiBase, apiFetch, patch, onUploaded])
 
   const dismiss = useCallback((id: string) => {
     setUploads(list => list.filter(u => u.id !== id))

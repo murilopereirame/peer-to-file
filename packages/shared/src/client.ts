@@ -109,8 +109,11 @@ export class P2FClient {
     return await this.requestJson('/api/move', P2FClient.jsonInit('POST', { from, to }))
   }
 
-  async torrentMeta (path: string): Promise<TorrentMeta> {
-    return await this.requestJson(`/api/torrent?path=${encodeURIComponent(path)}`)
+  /** `clientPublicKeyBase64` is this session's ephemeral ECDH public key — see browserCrypto.ts's establishKeyWrap. */
+  async torrentMeta (path: string, clientPublicKeyBase64: string): Promise<TorrentMeta> {
+    return await this.requestJson(
+      `/api/torrent?path=${encodeURIComponent(path)}&ck=${encodeURIComponent(clientPublicKeyBase64)}`
+    )
   }
 
   async logs (opts: { limit?: number, sinceId?: number } = {}): Promise<{ entries: LogEntry[] }> {

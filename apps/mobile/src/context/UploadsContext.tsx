@@ -40,19 +40,23 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
     if (!client) return
     const id = `${destDir}/${name}#${Date.now()}`
     setUploads(prev => [{ id, destDir, name, status: 'running', bytesSent: 0, totalBytes: 0 }, ...prev])
-    const { run } = beginUpload(client, destDir, fileUri, name, (sent, total) => {
-      patch(id, { bytesSent: sent, totalBytes: total })
-    })
-    void run()
-      .then((result) => {
+    void (async () => {
+      try {
+        const { run } = await beginUpload(client, destDir, fileUri, name, (sent, total) => {
+          patch(id, { bytesSent: sent, totalBytes: total })
+        })
+        const result = await run()
         if (result.status >= 200 && result.status < 300) {
           patch(id, { status: 'done' })
         } else {
           patch(id, { status: 'error', error: `server rejected the upload (HTTP ${result.status})` })
         }
-      })
-      .catch((err) => { patch(id, { status: 'error', error: errMessage(err) }) })
-      .finally(() => { onSettled?.() })
+      } catch (err) {
+        patch(id, { status: 'error', error: errMessage(err) })
+      } finally {
+        onSettled?.()
+      }
+    })()
   }, [app, patch])
 
   const remove = useCallback((id: string) => {

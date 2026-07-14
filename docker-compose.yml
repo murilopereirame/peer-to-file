@@ -21,7 +21,7 @@ services:
       # need write access — drop the ":ro" (mount read-write) to enable them.
       # See "Managing files" and the security note in the README first.
       - /srv/files:/data:ro # <-- change to the directory you want to share
-      - p2f-config:/config # SQLite auth database (users, sessions, tokens)
+      - p2f-config:/config # SQLite auth database + the transfer-encryption ciphertext cache
     restart: unless-stopped
 
     # Alternative without host networking: delete network_mode above, set

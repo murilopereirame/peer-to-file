@@ -17,6 +17,7 @@
     "node": ">=22.18"
   },
   "dependencies": {
+    "@p2f/shared": "file:./packages/shared",
     "bittorrent-tracker": "^11.2.2",
     "create-torrent": "^6.1.2",
     "express": "^4.21.2",

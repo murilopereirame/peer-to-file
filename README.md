@@ -28,8 +28,44 @@ transfer token. Defense in depth still applies:
   anything under the shared root.
 - `P2F_AUTH=off` restores the original no-auth mode for pure-VPN setups — then the VPN is
   the only trust boundary.
-- Traffic is plain HTTP unless you terminate TLS in front (see the nginx section); on a
-  WireGuard tunnel the transport is already encrypted.
+- HTTP traffic itself is plain unless you terminate TLS in front (see the nginx section);
+  on a WireGuard tunnel the transport is already encrypted. **File content is encrypted
+  regardless**, independent of TLS/VPN — see "Transfer encryption" below.
+
+### Transfer encryption
+
+File contents are encrypted end-to-end between the server and the app doing the transfer
+(AES-256-CTR), so the wire never carries plaintext even on a deployment with no TLS and no
+VPN — a defense-in-depth layer on top of, not a replacement for, the network boundary
+above. The server can still read files (it already does, to hash and serve them), so this
+is not zero-knowledge storage: an operator with access to the server can read the shared
+files, same as today.
+
+- **Downloads**: the server encrypts each shared file once per version into a ciphertext
+  cache (`P2F_CACHE_DIR`, default `./p2f-cache`) with a key deterministically derived from
+  a per-server secret plus the file's identity — deterministic so an unchanged file
+  produces the same ciphertext (and BitTorrent infohash) across server restarts, keeping
+  the existing resume behavior intact. Both the HTTP webseed and WebRTC peers serve this
+  ciphertext; BitTorrent's own per-piece SHA-1 verification runs against it unchanged. The
+  web/desktop clients decrypt transparently as they save; the mobile app decrypts the whole
+  file once a download finishes (it has no WebTorrent/streaming hook to decrypt piece by
+  piece).
+- **Uploads**: the client generates a fresh one-time key per upload and encrypts the file
+  before it leaves the device, plus a plaintext SHA-256 the server verifies after
+  decrypting — closing the integrity gap CTR alone doesn't cover (uploads had no integrity
+  check at all before this).
+- **The transfer key itself never crosses the wire in the clear.** Sending it as plain
+  JSON/headers alongside the ciphertext would let anyone who can merely observe the wire
+  (the exact case this feature targets on a no-TLS deployment) recover it trivially,
+  defeating the point. Instead, each transfer wraps the key under a secret derived from
+  ECDH (P-256) between the server's stable keypair and a fresh, per-transfer ephemeral
+  keypair the client generates — recovering the key from captured traffic alone would
+  require solving the discrete-log problem, not just reading bytes off the wire. This
+  protects against a passive observer; it isn't a substitute for authenticating the network
+  path itself (that's what TLS/VPN are for) against an *active* attacker who can tamper
+  with traffic in real time.
+- `P2F_CACHE_DIR` is deliberately outside `P2F_ROOT`, so it stays writable even when the
+  shared root is mounted read-only.
 
 ### Setting up users and tokens
 
@@ -263,6 +299,7 @@ the backend.
 | `P2F_PUBLIC_URL`   | *(unset)*   | Public origin when behind a reverse proxy, e.g. `https://files.example.com` — see below |
 | `P2F_AUTH`         | `on`        | `on` requires login/tokens on every endpoint; `off` restores the VPN-only trust model |
 | `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens/download history (`/config/p2f.db` in Docker) — opened regardless of `P2F_AUTH` |
+| `P2F_CACHE_DIR`    | `./p2f-cache` | Ciphertext cache for transfer encryption (`/config/cache` in Docker) — see "Transfer encryption" below |
 
 ## Behind a reverse proxy (nginx)
 

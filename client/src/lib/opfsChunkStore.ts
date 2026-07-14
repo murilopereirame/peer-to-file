@@ -49,41 +49,12 @@ export class OpfsChunkStore {
   length: number
   private readonly lastChunkIndex: number
   private readonly lastChunkLength: number
-  private readonly totalChunks: number
   private readonly key: string
 
   // Instances keyed by infoHash, so code elsewhere (downloadManager.ts) can
   // find the store WebTorrent created internally for a given torrent — it
   // only ever hands us the *class*, not a reference to what it constructs.
   static readonly instances = new Map<string, OpfsChunkStore>()
-
-  // WebTorrent reads every piece back out via get() during normal download
-  // too — each piece is hashed to verify it right after it's written (see
-  // Torrent.prototype._verifyPiece upstream) — so tracking reads from the
-  // start would make readComplete true as soon as the download itself
-  // finishes, nowhere near when a save has actually streamed the file
-  // through. Tracking only starts once beginTrackingReads() is called,
-  // which downloadManager.ts does right as the save-time read-through
-  // begins, so only *that* pass over the pieces is ever counted.
-  private armed = false
-  private readonly readIndices = new Set<number>()
-  /** True once every piece has been read back out at least once since beginTrackingReads() — check this before subscribing via onAllRead, in case it's already happened (a very small/fast file). */
-  readComplete = false
-  /**
-   * Fires once every piece has been read back out at least once since
-   * beginTrackingReads() — i.e. a consumer (the service worker streaming a
-   * completed download) has pulled the whole file through. Used to detect
-   * *real* completion of a save that has no other completion signal,
-   * instead of guessing at a fixed timeout — see downloadManager.ts.
-   */
-  onAllRead: (() => void) | null = null
-
-  /** Start tracking reads from this point on — call right before the actual save-time read-through begins (see downloadManager.ts). */
-  beginTrackingReads (): void {
-    this.armed = true
-    this.readIndices.clear()
-    this.readComplete = false
-  }
 
   constructor (
     chunkLength: number,
@@ -93,7 +64,6 @@ export class OpfsChunkStore {
     this.length = opts.length ?? 0
     this.lastChunkIndex = Math.max(0, Math.ceil(this.length / chunkLength) - 1)
     this.lastChunkLength = this.length - this.lastChunkIndex * chunkLength
-    this.totalChunks = this.lastChunkIndex + 1
     this.key = opts.torrent?.infoHash ?? opts.name ?? 'unknown'
     OpfsChunkStore.instances.set(this.key, this)
   }
@@ -148,13 +118,6 @@ export class OpfsChunkStore {
       length: options.length,
       expectedLength: this.expectedLength(index)
     }).then(data => {
-      if (this.armed) {
-        this.readIndices.add(index)
-        if (!this.readComplete && this.readIndices.size >= this.totalChunks) {
-          this.readComplete = true
-          this.onAllRead?.()
-        }
-      }
       done(null, data as Uint8Array)
     }, (err: Error) => done(err))
   }

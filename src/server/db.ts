@@ -255,6 +255,45 @@ export class AuthDb {
     return secret
   }
 
+  /**
+   * Stable random master secret the ciphertext cache (cipherCache.ts) derives
+   * per-file transfer-encryption keys from, created on first use. Must be
+   * stable across restarts — deriving a *different* key per process would
+   * re-encrypt unchanged files to different ciphertext, and with it a
+   * different infohash, breaking the "resume after a server restart"
+   * property the whole torrent-metadata cache depends on.
+   */
+  cipherMasterSecret (): Buffer {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?')
+      .get('cipher_secret') as ({ value: string } | undefined)
+    if (row) return Buffer.from(row.value, 'hex')
+    const secret = crypto.randomBytes(32)
+    this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
+      .run('cipher_secret', secret.toString('hex'))
+    return secret
+  }
+
+  /**
+   * Stable ECDH (P-256) private key the server uses to receive transfer
+   * keys wrapped by a client's ephemeral keypair (keyExchange.ts) — this is
+   * what keeps the AES-256-CTR key/IV for a transfer from ever crossing the
+   * wire in the clear, independent of TLS: a passive observer of the
+   * ciphertext and the wrapped-key blob still can't derive the shared
+   * secret without solving ECDH. Stable across restarts so the server's
+   * public key (handed out via /api/info) doesn't change under clients.
+   */
+  ecdhPrivateKey (): Buffer {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?')
+      .get('ecdh_private_key') as ({ value: string } | undefined)
+    if (row) return Buffer.from(row.value, 'hex')
+    const ecdh = crypto.createECDH('prime256v1')
+    ecdh.generateKeys()
+    const privateKey = ecdh.getPrivateKey()
+    this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
+      .run('ecdh_private_key', privateKey.toString('hex'))
+    return privateKey
+  }
+
   // --- download history -------------------------------------------------
   // Scoped by user_id when auth is on; NULL (a single shared, unscoped
   // history) when it's off, since there's no user identity to key it by.

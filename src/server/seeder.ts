@@ -4,7 +4,7 @@ import type { Logger } from './log.ts'
 
 export interface Seeder {
   enabled: boolean
-  ensureSeeding (absPath: string, meta: ParsedTorrent): void
+  ensureSeeding (cipherPath: string, meta: ParsedTorrent): void
   destroy (): Promise<void>
 }
 
@@ -45,14 +45,16 @@ export async function createSeeder (
 
   const seeding = new Set<string>() // infohashes added to the client
 
-  function ensureSeeding (absPath: string, meta: ParsedTorrent): void {
+  function ensureSeeding (cipherPath: string, meta: ParsedTorrent): void {
     if (seeding.has(meta.infoHash)) return
     seeding.add(meta.infoHash)
 
     // Re-use the exact metadata served to clients (same infohash) and point
-    // the store at the existing file: WebTorrent verifies pieces, then seeds.
+    // the store at the ciphertext cache file (same basename as the source,
+    // see cipherCache.ts): WebTorrent verifies pieces, then seeds — peers get
+    // ciphertext over the wire, matching what /api/raw serves.
     const torrentFile = toTorrentFile({ ...meta, announce: announce() })
-    const torrent = client.add(torrentFile, { path: path.dirname(absPath) })
+    const torrent = client.add(torrentFile, { path: path.dirname(cipherPath) })
     torrent.on('ready', () => {
       log.info(`seeding ${meta.name} (${meta.infoHash})`)
     })
