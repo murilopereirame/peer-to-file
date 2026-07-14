@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, P2FClient, colorsFor, type ThemeColors, type ThemeMode } from '@p2f/shared'
 import { createClient } from '../lib/client'
-import { loadCredentials, saveCredentials, clearCredentials, settings } from '../lib/tauriApi'
+import { loadCredentials, saveCredentials, clearCredentials, settings } from '../lib/electronApi'
 
 export type Phase = 'loading' | 'server' | 'setup' | 'login' | 'main'
 

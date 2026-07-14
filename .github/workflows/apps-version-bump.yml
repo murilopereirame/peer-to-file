@@ -1,10 +1,9 @@
 name: Apps - Version Bump
 
 # Ad-hoc only: a version bump is a deliberate release decision, not
-# something that should fire on every push. Bumps apps/mobile,
-# apps/desktop and packages/shared in lockstep (plus each platform's own
-# build-number fields) and pushes the result as a commit + tag. Does not
-# touch the original web app's root package.json/version.
+# something that should fire on every push. Bumps apps/desktop and
+# packages/shared in lockstep and pushes the result as a commit + tag. Does
+# not touch the original web app's root package.json/version.
 on:
   workflow_dispatch:
     inputs:
@@ -50,7 +49,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add apps/mobile/package.json apps/mobile/app.json apps/desktop/package.json packages/shared/package.json
+          git add apps/desktop/package.json packages/shared/package.json
           git commit -m "chore(apps): bump version to v${{ steps.bump.outputs.version }}"
           git tag "apps-v${{ steps.bump.outputs.version }}"
           git push origin "HEAD:${{ inputs.branch }}"

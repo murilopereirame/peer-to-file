@@ -16,6 +16,7 @@ declare global {
   interface WTWire {
     type?: string
     remoteAddress?: string
+    remotePort?: number
     downloadSpeed: () => number
   }
 

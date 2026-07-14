@@ -3,8 +3,15 @@ import {
   unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
+import { currentDownloadDir } from './electronApi'
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
+
+export interface PeerInfo {
+  type: string
+  addr: string
+  speedBytesPerSec: number
+}
 
 export interface DownloadSnapshot {
   path: string
@@ -16,17 +23,26 @@ export interface DownloadSnapshot {
   speedBytesPerSec: number
   numPeers: number
   message?: string
+  infoHash?: string
+  elapsedMs: number
+  peers: PeerInfo[]
+  /** Where the finished file landed — only known when saved via the
+   * configured download folder (the `will-download` redirect); a manual
+   * Save As pick leaves this unset since the OS doesn't hand the resulting
+   * path back to the page. */
+  savedTo?: string
 }
 
 interface Tracked {
   torrent: WTTorrent
   webseed: string
   tick: ReturnType<typeof setInterval>
+  startedAt: number
   lastWebseedRetry: number
 }
 
 function blank (path: string, name: string): DownloadSnapshot {
-  return { path, name, status: 'preparing', progress: 0, downloaded: 0, length: 0, speedBytesPerSec: 0, numPeers: 0 }
+  return { path, name, status: 'preparing', progress: 0, downloaded: 0, length: 0, speedBytesPerSec: 0, numPeers: 0, elapsedMs: 0, peers: [] }
 }
 
 function clickDownloadLink (href: string, filename?: string): void {
@@ -38,14 +54,18 @@ function clickDownloadLink (href: string, filename?: string): void {
   a.remove()
 }
 
+function joinNativePath (dir: string, name: string): string {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`
+}
+
 /**
  * Real P2P transfers, same engine and transport as the browser web client
  * (WebTorrent over WebRTC, HTTP webseed fallback) — this is what
- * distinguishes the desktop app from the mobile one, whose native runtime
- * has no WebRTC/service-worker/OPFS to build this on. Deliberately trimmed
- * relative to the browser client: no OPFS chunk store, so pause/resume/
- * cancel work for the lifetime of the app but a download doesn't survive
- * quitting the app entirely — see apps/desktop/README.md.
+ * distinguishes the desktop app from a plain HTTP client. Deliberately
+ * trimmed relative to the browser client: no OPFS chunk store, so pause/
+ * resume/cancel work for the lifetime of the app but a download doesn't
+ * survive quitting the app entirely — see apps/README.md.
  */
 export class TorrentDownloadManager {
   private client: InstanceType<typeof window.WebTorrent> | null = null
@@ -106,7 +126,7 @@ export class TorrentDownloadManager {
 
       const meta = await client.torrentMeta(path, keyWrap.clientPublicKeyBase64)
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
-      this.set(path, { length: meta.length })
+      this.set(path, { length: meta.length, infoHash: meta.infoHash })
 
       // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
       // torrents.ts server-side) — register the key so the patched File
@@ -127,20 +147,31 @@ export class TorrentDownloadManager {
   }
 
   private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string): void {
-    const tick = setInterval(() => {
-      if (torrent.destroyed) { clearInterval(tick); return }
+    const t: Tracked = { torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, tick: undefined as unknown as ReturnType<typeof setInterval> }
+    t.tick = setInterval(() => {
+      if (torrent.destroyed) { clearInterval(t.tick); return }
       if (torrent.numPeers === 0 && Date.now() - t.lastWebseedRetry > 5000) {
         t.lastWebseedRetry = Date.now()
         try { torrent.addWebSeed(webseed) } catch { /* already attached */ }
       }
+      const elapsedMs = Date.now() - t.startedAt
       if (!torrent.paused) {
+        const peers: PeerInfo[] = torrent.wires.map(wire => ({
+          type: wire.type === 'webSeed' ? 'webseed' : (wire.type ?? 'unknown'),
+          addr: wire.remoteAddress
+            ? `${wire.remoteAddress}${wire.remotePort ? ':' + wire.remotePort : ''}`
+            : wire.type === 'webSeed' ? 'server' : 'address unavailable',
+          speedBytesPerSec: wire.downloadSpeed()
+        }))
         this.set(path, {
           status: 'downloading', progress: torrent.progress, downloaded: torrent.downloaded,
-          length: torrent.length, speedBytesPerSec: torrent.downloadSpeed, numPeers: torrent.numPeers
+          length: torrent.length, speedBytesPerSec: torrent.downloadSpeed, numPeers: torrent.numPeers,
+          elapsedMs, peers
         })
+      } else {
+        this.set(path, { elapsedMs })
       }
     }, 500)
-    const t: Tracked = { torrent, webseed, tick, lastWebseedRetry: 0 }
     this.tracked.set(path, t)
 
     torrent.on('done', () => {
@@ -195,12 +226,15 @@ export class TorrentDownloadManager {
         const handle = await window.showSaveFilePicker({ suggestedName: file.name })
         const writable = await handle.createWritable()
         await file.stream().pipeTo(writable)
+        this.set(path, { status: 'done', progress: 1 })
       } else if (this.streamServer) {
         // No `download` attribute: the service worker's response already
-        // sets Content-Disposition: attachment, and Tauri's on_download
-        // hook (src-tauri/src/main.rs) redirects this into the user's
-        // configured default download folder.
+        // sets Content-Disposition: attachment, and the main process's
+        // `will-download` hook (electron/main.cts) redirects this into the
+        // user's configured default download folder.
         clickDownloadLink(file.streamURL)
+        const dir = await currentDownloadDir()
+        this.set(path, { status: 'done', progress: 1, savedTo: dir ? joinNativePath(dir, file.name) : undefined })
       } else {
         const chunks: Uint8Array[] = []
         const reader = file.stream().getReader()
@@ -212,8 +246,9 @@ export class TorrentDownloadManager {
         const url = URL.createObjectURL(new Blob(chunks as BlobPart[], { type: file.type }))
         clickDownloadLink(url, file.name)
         setTimeout(() => URL.revokeObjectURL(url), 60_000)
+        const dir = await currentDownloadDir()
+        this.set(path, { status: 'done', progress: 1, savedTo: dir ? joinNativePath(dir, file.name) : undefined })
       }
-      this.set(path, { status: 'done', progress: 1 })
       await client.historyRecord(path, file.name, file.length).catch(() => {})
     } catch (err) {
       this.set(path, { status: 'error', message: `save failed: ${errMessage(err)}` })

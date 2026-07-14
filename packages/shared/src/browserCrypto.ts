@@ -1,5 +1,5 @@
 // AES-256-CTR transfer encryption for browser-engine WebTorrent clients (the
-// web app and the Tauri desktop app both load the same prebuilt WebTorrent
+// web app and the Electron desktop app both load the same prebuilt WebTorrent
 // browser bundle — see loadWebTorrent.ts in each). Keeps the wire from ever
 // carrying plaintext, independent of whatever TLS/VPN the deployment does or
 // doesn't have — see src/server/cipherCache.ts for the server-side half.
@@ -40,7 +40,8 @@ export interface KeyWrap {
 /**
  * Fetches (once) and caches the server's stable ECDH public key. `fetchInfo`
  * is injected so this module stays transport-agnostic (plain fetch on web,
- * `@tauri-apps/plugin-http` on desktop) — same pattern as P2FClient. A
+ * a main-process-proxied fetch on desktop — see apps/desktop/electron/
+ * netFetch.cts) — same pattern as P2FClient. A
  * failed fetch (a transient network blip, a 401 before the session is
  * ready, ...) is not cached — same don't-cache-failures rule the server's
  * own TorrentStore/CipherCache follow — so the next call retries instead of

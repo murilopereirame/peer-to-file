@@ -1,20 +1,16 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Tauri-specific tuning per https://v2.tauri.app/start/frontend/vite/ —
-// fixed dev port matching tauri.conf.json's devUrl, and don't let Vite's
-// own error overlay/HMR fight with the webview.
+// Relative asset base so the built `dist/index.html` works when served from
+// the custom `p2file://app/` scheme in production (see electron/main.cts) —
+// an absolute `/assets/...` base would resolve against the scheme's root
+// fine too, but relative keeps this buildable as a plain static site for
+// local inspection as well.
 export default defineConfig({
   plugins: [react()],
-  clearScreen: false,
+  base: './',
   server: {
     port: 1420,
     strictPort: true
-  },
-  envPrefix: ['VITE_', 'TAURI_'],
-  build: {
-    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
-    minify: !process.env.TAURI_ENV_DEBUG,
-    sourcemap: !!process.env.TAURI_ENV_DEBUG
   }
 })

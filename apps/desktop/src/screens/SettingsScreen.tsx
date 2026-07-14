@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { errMessage } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
-import { pickDownloadFolder } from '../lib/tauriApi'
+import { pickDownloadFolder } from '../lib/electronApi'
 import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
 import { ConnectionBadge } from '../components/ConnectionBadge'
 

@@ -1,10 +1,10 @@
 import crypto from 'node:crypto'
 
-const CURVE = 'prime256v1' // NIST P-256 — matches Web Crypto's 'P-256' and
-                            // react-native-quick-crypto's ECDH, so raw
+const CURVE = 'prime256v1' // NIST P-256 — matches Web Crypto's 'P-256', so raw
                             // uncompressed-point public keys and derived
-                            // shared secrets are byte-identical across
-                            // Node, browsers, and the mobile app.
+                            // shared secrets are byte-identical between
+                            // Node and every browser-engine client (web,
+                            // desktop).
 const HKDF_INFO = 'p2f-key-wrap'
 const NONCE_LEN = 12
 const TAG_LEN = 16
