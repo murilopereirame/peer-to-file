@@ -71,18 +71,34 @@ const POST_READ_CLEANUP_DELAY_MS = 15_000
 // Safety-net fallback only, for when the drain signal never fires at all
 // (an error mid-stream, an abandoned tab, or some other genuine failure) —
 // NOT a bound on how long a legitimate save can take. Every chunk of a
-// streamed save now goes through an async AES-CTR decrypt plus a
+// streamed save goes through an async AES-CTR decrypt plus a
 // structured-clone postMessage round trip to the service worker (see
 // transferDrainCallbacks in browserCrypto.ts and BrowserServer.wrapRequest
 // in webtorrent's worker-server.js) — real per-chunk overhead that scales
-// with file size, not a fixed cost. A 30-minute ceiling here once assumed
-// that overhead was negligible "regardless of file size"; for a
-// sufficiently large file it wasn't, and this timer firing early destroyed
-// the torrent while a still-legitimately-in-progress save was streaming,
-// producing the same 404 the drain signal was added to fix. This is
-// deliberately generous — the drain signal above is what drives normal
-// cleanup; this only guards against genuinely stuck transfers.
-const MAX_PENDING_CLEANUP_DELAY_MS = 6 * 60 * 60_000
+// with file size, not a fixed cost. A flat ceiling here once assumed that
+// overhead was negligible "regardless of file size"; for a large enough
+// file (an overnight download) it wasn't, and this timer firing early
+// destroyed the torrent while a still-legitimately-in-progress save was
+// streaming, producing the same 404 the drain signal was added to fix.
+// Scaled by file size below instead of a fixed number, so a bigger file
+// gets a proportionally bigger window — the drain signal above is what
+// drives normal cleanup; this only guards against genuinely stuck
+// transfers, so erring generous here costs nothing but a slower reclaim
+// in that already-rare failure case.
+const MIN_PENDING_CLEANUP_DELAY_MS = 30 * 60_000
+// Deliberately pessimistic sustained-throughput floor for the whole
+// decrypt-and-relay pipeline, used only to size the safety net above — real
+// throughput is normally much higher, but a slow device/browser combined
+// with the per-chunk crypto + postMessage overhead could plausibly sink
+// this low on a very large file, and the safety net has to stay clear of
+// that worst case, not the typical one.
+const ASSUMED_MIN_DRAIN_THROUGHPUT_BYTES_PER_SEC = 2 * 1024 * 1024 // 2 MB/s
+const PENDING_CLEANUP_SAFETY_FACTOR = 3
+
+function pendingCleanupSafetyNetMs (fileLength: number): number {
+  const estimated = (fileLength / ASSUMED_MIN_DRAIN_THROUGHPUT_BYTES_PER_SEC) * 1000 * PENDING_CLEANUP_SAFETY_FACTOR
+  return Math.max(MIN_PENDING_CLEANUP_DELAY_MS, estimated)
+}
 
 function savedDownloads (): SavedDownload[] {
   try {
@@ -616,6 +632,6 @@ export class DownloadManager {
       transferDrainCallbacks.delete(torrent.infoHash)
       setTimeout(cleanup, POST_READ_CLEANUP_DELAY_MS)
     })
-    safetyNet = setTimeout(cleanup, MAX_PENDING_CLEANUP_DELAY_MS)
+    safetyNet = setTimeout(cleanup, pendingCleanupSafetyNetMs(torrent.length))
   }
 }
