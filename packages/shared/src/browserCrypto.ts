@@ -127,8 +127,15 @@ export async function ctrXor (
   const padded = new Uint8Array(blockOffset + chunk.length)
   padded.set(chunk, blockOffset)
 
+  // length: 64 only tells WebCrypto how many low-order counter bits it's
+  // allowed to increment *within this one call*; the actual 128-bit value
+  // passed in `counter` is still computed to match Node's full-width
+  // increment via addToCounter above. Chunks never span anywhere near 2^64
+  // blocks, so this is equivalent to length: 128 for any real file — chosen
+  // over 128 because it's the far more common/battle-tested WebCrypto
+  // AES-CTR parameterization across browser engines.
   const out = await crypto.subtle.encrypt(
-    { name: 'AES-CTR', counter: counter.buffer, length: 128 },
+    { name: 'AES-CTR', counter: counter.buffer, length: 64 },
     key,
     padded
   )
