@@ -25,15 +25,12 @@ const api = {
   pickDownloadFolder: (): Promise<string | null> => ipcRenderer.invoke('downloads:pickFolder'),
   setDownloadDir: (path: string | null): Promise<void> => ipcRenderer.invoke('downloads:setDir', path),
   hashFile: (path: string): Promise<string | null> => ipcRenderer.invoke('downloads:hashFile', path),
-  /** Fires once for every Electron-managed download as it finishes (see the
-   * `will-download` hook in main.cts) — register the listener before
-   * triggering a download to avoid racing its completion. Returns an
-   * unsubscribe function. */
-  onDownloadCompleted: (cb: (info: DownloadCompletedInfo) => void): () => void => {
-    const listener = (_event: unknown, info: DownloadCompletedInfo): void => cb(info)
-    ipcRenderer.on('download-completed', listener)
-    return () => { ipcRenderer.removeListener('download-completed', listener) }
-  },
+  /** Call before triggering a download, then pass the returned ticket to
+   * awaitDownloadCompletion — see the doc comment on pendingDownloadQueue in
+   * main.cts for why this is ticket-based rather than matched by filename. */
+  registerPendingDownload: (): Promise<number> => ipcRenderer.invoke('downloads:registerPending'),
+  awaitDownloadCompletion: (ticketId: number): Promise<DownloadCompletedInfo> =>
+    ipcRenderer.invoke('downloads:awaitCompletion', ticketId),
 
   getSetting: <T, >(key: string): Promise<T | undefined> => ipcRenderer.invoke('settings:get', key),
   setSetting: (key: string, value: unknown): Promise<void> => ipcRenderer.invoke('settings:set', key, value),

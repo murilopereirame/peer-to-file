@@ -33,6 +33,27 @@ const settingsStore = new JsonStore('settings.json')
  * changes it. Same role as the Tauri build's `DownloadDirState`. */
 const downloadDir = { current: null as string | null }
 
+interface DownloadCompletedInfo {
+  filename: string
+  path: string
+  state: 'completed' | 'cancelled' | 'interrupted'
+}
+
+/**
+ * Lets the renderer await its *own* download finishing (the click that
+ * starts one is a one-way navigation with no other completion signal) —
+ * matched by arrival order (a ticket per `registerPendingDownload` call,
+ * consumed FIFO by `will-download`'s `done` events below), not by filename.
+ * Filename matching was tried first and is exactly what broke: retrying the
+ * same file (a very normal thing to do) reuses the same name, and an old,
+ * already-finished download's broadcast could satisfy a brand new listener
+ * waiting on that same name — resolving with the wrong path (and, via the
+ * checksum feature, hashing the wrong file entirely).
+ */
+let nextDownloadTicket = 0
+const pendingDownloadQueue: number[] = []
+const downloadTickets = new Map<number, { info?: DownloadCompletedInfo, resolve?: (info: DownloadCompletedInfo) => void }>()
+
 let mainWindow: BrowserWindow | null = null
 
 async function createWindow (): Promise<void> {
@@ -59,15 +80,13 @@ async function createWindow (): Promise<void> {
   mainWindow.webContents.session.on('will-download', (_event, item) => {
     const dir = downloadDir.current
     if (dir) item.setSavePath(join(dir, item.getFilename()))
-    const filename = item.getFilename()
-    // Broadcast every completed/failed/cancelled download by filename so the
-    // renderer (which has no other completion signal for this path — the
-    // click that started it is a one-way navigation) can await its own
-    // download finishing, e.g. to then checksum-verify it. The listener on
-    // the renderer side is registered before it triggers the download, so
-    // there's no race with this firing first.
     item.once('done', (_evt, state) => {
-      mainWindow?.webContents.send('download-completed', { filename, path: item.getSavePath(), state })
+      const info: DownloadCompletedInfo = { filename: item.getFilename(), path: item.getSavePath(), state }
+      const ticketId = pendingDownloadQueue.shift()
+      if (ticketId === undefined) return
+      const ticket = downloadTickets.get(ticketId)
+      if (!ticket) return
+      if (ticket.resolve) { ticket.resolve(info); downloadTickets.delete(ticketId) } else { ticket.info = info }
     })
   })
 
@@ -122,6 +141,22 @@ ipcMain.handle('settings:set', (_e, key: string, value: unknown) => { settingsSt
 ipcMain.handle('settings:delete', (_e, key: string) => { settingsStore.delete(key) })
 
 ipcMain.handle('net:fetch', (_e, req: FetchRequest) => performFetch(req))
+
+// See the DownloadCompletedInfo/pendingDownloadQueue doc comment above —
+// call registerPendingDownload() and only *then* trigger the download, so
+// this ticket is queued before its `will-download` can possibly fire.
+ipcMain.handle('downloads:registerPending', () => {
+  const id = nextDownloadTicket++
+  downloadTickets.set(id, {})
+  pendingDownloadQueue.push(id)
+  return id
+})
+ipcMain.handle('downloads:awaitCompletion', async (_e, ticketId: number) => {
+  const ticket = downloadTickets.get(ticketId)
+  if (!ticket) throw new Error('unknown download ticket')
+  if (ticket.info) { downloadTickets.delete(ticketId); return ticket.info }
+  return await new Promise<DownloadCompletedInfo>((resolve) => { ticket.resolve = resolve })
+})
 
 // Streamed (constant-memory) SHA-256 of a saved download, for the renderer
 // to compare against the server's plaintext hash — the renderer itself has

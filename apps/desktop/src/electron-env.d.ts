@@ -44,7 +44,8 @@ export interface P2FBridge {
   pickDownloadFolder: () => Promise<string | null>
   setDownloadDir: (path: string | null) => Promise<void>
   hashFile: (path: string) => Promise<string | null>
-  onDownloadCompleted: (cb: (info: DownloadCompletedInfo) => void) => () => void
+  registerPendingDownload: () => Promise<number>
+  awaitDownloadCompletion: (ticketId: number) => Promise<DownloadCompletedInfo>
   getSetting: <T>(key: string) => Promise<T | undefined>
   setSetting: (key: string, value: unknown) => Promise<void>
   deleteSetting: (key: string) => Promise<void>

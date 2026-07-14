@@ -3,7 +3,7 @@ import {
   unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
-import { currentDownloadDir, hashFile, settings, waitForDownloadCompletion } from './electronApi'
+import { awaitDownloadCompletion, currentDownloadDir, hashFile, registerPendingDownload, settings } from './electronApi'
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
 export type ChecksumStatus = 'verifying' | 'ok' | 'mismatch' | 'unavailable'
@@ -320,7 +320,7 @@ export class TorrentDownloadManager {
   private async saveAutomatically (file: WTFile, plainSha256: string): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
     const dir = await currentDownloadDir()
     const guessedPath = dir ? joinNativePath(dir, file.name) : undefined
-    const completion = waitForDownloadCompletion(file.name)
+    const ticketId = await registerPendingDownload()
 
     if (this.streamServer) {
       // No `download` attribute: the service worker's response already
@@ -342,7 +342,7 @@ export class TorrentDownloadManager {
     }
 
     try {
-      const finalPath = await completion
+      const finalPath = await awaitDownloadCompletion(ticketId)
       const actualSha256 = await hashFile(finalPath)
       return { savedTo: finalPath, checksumStatus: actualSha256 === null ? 'unavailable' : actualSha256 === plainSha256 ? 'ok' : 'mismatch' }
     } catch {
