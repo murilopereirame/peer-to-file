@@ -2,6 +2,13 @@
   "name": "p2file-desktop",
   "version": "1.0.0",
   "private": true,
+  "description": "peer-to-file desktop client",
+  "homepage": "https://github.com/murilopereirame/peer-to-file",
+  "author": {
+    "name": "peer-to-file",
+    "email": "murilopereirame@users.noreply.github.com"
+  },
+  "license": "MIT",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
