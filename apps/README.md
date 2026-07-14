@@ -99,9 +99,9 @@ which runs automatically on push/PR:
   or commit SHA; defaults to `main`) to build from. These are dev/sideload
   builds — real signing (Apple Developer ID + notarization, Windows
   Authenticode) needs your own credentials wired in as repo secrets, which
-  isn't set up here; macOS bundles are ad-hoc signed automatically by
-  `electron-builder` when no signing identity is configured, so they at
-  least *open* on Apple Silicon — see "Opening the macOS build" below.
+  isn't set up here; macOS bundles instead get a *deep* ad-hoc signature via
+  an `afterPack` hook (`electron/afterpack.mjs`) — see "Opening the macOS
+  build" below for exactly what that does and doesn't fix.
 - **`.github/workflows/apps-version-bump.yml`** — bumps `apps/desktop` and
   `packages/shared` versions together (patch/minor/major, your choice at
   trigger time), and pushes a commit + `apps-vX.Y.Z` tag. Doesn't touch the
@@ -109,27 +109,40 @@ which runs automatically on push/PR:
 
 ### Opening the macOS build
 
-The `.dmg` from `apps-build.yml` is **ad-hoc signed, not Apple-notarized**
-(that needs a paid Apple Developer account's certificate, which isn't
-configured here) — macOS Gatekeeper will still refuse to open it normally.
-Downloading it through a browser (including GitHub's own artifact download)
-adds a quarantine flag that, combined with no notarization, is exactly what
-produces the misleading **"P2File is damaged and can't be opened"** dialog
-(not an actual corruption — this is Gatekeeper's message for
-"unnotarized + quarantined", regardless of the app being ad-hoc signed).
+Two separate Gatekeeper checks apply to a downloaded macOS app, and it's
+worth telling them apart:
 
-To open it anyway:
+1. **"Is the code signature internally consistent?"** electron-builder's own
+   automatic signing only covers the outer `.app` bundle, leaving nested
+   frameworks/helpers (the Electron Framework, helper processes, ...)
+   inconsistently signed relative to it — and *that* mismatch, not simply
+   "unsigned", is what produces the harsh, unrecoverable **"P2File is
+   damaged and can't be opened"** dialog (not an actual corrupted download).
+   `electron/afterpack.mjs` fixes this specifically, by re-signing the whole
+   bundle as one unit with `codesign --deep --force --sign -` (ad-hoc — no
+   certificate needed) after electron-builder packs it.
+2. **"Was this quarantined download notarized by Apple?"** Downloading a
+   file through a browser (including GitHub's own artifact download) adds a
+   quarantine flag, and *no* ad-hoc signature — deep or otherwise — satisfies
+   Apple's notarization requirement for a quarantined app. This is real
+   notarization territory, which needs a paid Apple Developer account's
+   certificate that isn't configured here. It shows as the milder
+   **"P2File" can't be opened because Apple cannot check it for malicious
+   software** dialog, which — unlike "damaged" — has a normal **Open
+   Anyway** path.
+
+So after the `afterPack` fix, opening the build is a right-click → **Open**
+→ **Open** again in the confirmation dialog (works on most macOS versions).
+If you still see "damaged" rather than "unidentified developer"/"cannot be
+checked", fall back to:
 
 ```sh
 xattr -cr /Applications/P2File.app   # after copying it out of the mounted .dmg
 ```
 
-or right-click the app → **Open** → **Open** again in the confirmation
-dialog (works on most macOS versions; if you still see "damaged" rather
-than "unidentified developer", use the `xattr` command instead). This is a
-one-time step per download — it's inherent to distributing an unsigned/
-non-notarized app, not something CI can fix without your own Apple
-Developer credentials.
+Real notarization (removing the prompt entirely) needs your own Apple
+Developer credentials wired in as repo secrets — not something CI can do
+without them.
 
 ## Known limitations (v1)
 

@@ -37,6 +37,7 @@
   "build": {
     "appId": "dev.p2file.desktop",
     "productName": "P2File",
+    "afterPack": "electron/afterpack.mjs",
     "directories": {
       "output": "release"
     },
@@ -46,7 +47,9 @@
     ],
     "mac": {
       "icon": "icon-source.png",
-      "target": ["dmg"]
+      "target": ["dmg"],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     },
     "win": {
       "icon": "icon-source.png",
