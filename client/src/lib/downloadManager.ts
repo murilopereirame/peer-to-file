@@ -165,26 +165,7 @@ export class DownloadManager {
   // be materialized as one in-memory Blob first — the fix for OOM on huge
   // files and for Safari's much smaller Blob size limit. This needs a secure
   // context; on plain HTTP we fall back to a chunked Blob (see saveFile).
-  //
-  // Safari specifically has been observed failing this path in production:
-  // the service worker's page-relay protocol (WebTorrent's own vendored
-  // worker-server.js, not our code) sometimes forwards the streamed request
-  // to a page context that reports the torrent as gone, which WebTorrent
-  // itself renders as a literal "404 - Not Found" page navigation instead of
-  // triggering a native download. Widening our own post-download cleanup
-  // grace period didn't resolve it, pointing at the relay protocol itself
-  // rather than a plain timing race on our side — something not practical to
-  // fix from here without a real Safari/WebKit environment to debug against.
-  // Skipping tier 2 entirely for Safari and falling back to tier 3 (a plain
-  // Blob) trades away the OOM protection tier 2 gives on very large files,
-  // but tier 3 is otherwise reliable there, unlike this broken relay.
-  private isSafari (): boolean {
-    const ua = navigator.userAgent
-    return /Safari/.test(ua) && !/Chrome|Chromium|Android|CriOS|FxiOS|EdgiOS/.test(ua)
-  }
-
   private registerServiceWorker (): void {
-    if (this.isSafari()) return
     if (!(window.isSecureContext && 'serviceWorker' in navigator)) return
     navigator.serviceWorker.register('/sw.js')
       .then(() => navigator.serviceWorker.ready)
