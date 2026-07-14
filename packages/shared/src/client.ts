@@ -127,8 +127,10 @@ export class P2FClient {
     return await this.requestJson('/api/downloads/history')
   }
 
-  async historyRecord (path: string, name: string, length: number): Promise<void> {
-    await this.request('/api/downloads/history', P2FClient.jsonInit('POST', { path, name, length }))
+  async historyRecord (
+    path: string, name: string, length: number, infoHash?: string, durationMs?: number
+  ): Promise<void> {
+    await this.request('/api/downloads/history', P2FClient.jsonInit('POST', { path, name, length, infoHash, durationMs }))
   }
 
   async historyClear (): Promise<void> {

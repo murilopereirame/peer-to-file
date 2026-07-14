@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { errMessage } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
-import { pickDownloadFolder } from '../lib/electronApi'
+import { pickDownloadFolder, settings } from '../lib/electronApi'
 import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
 import { ConnectionBadge } from '../components/ConnectionBadge'
 
@@ -10,8 +10,15 @@ export function SettingsScreen (): React.JSX.Element {
   const [serverInput, setServerInput] = useState(app.serverUrl)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [askBeforeSave, setAskBeforeSave] = useState(false)
 
   useEffect(() => { setServerInput(app.serverUrl) }, [app.serverUrl])
+  useEffect(() => { void settings.getAskBeforeSave().then(setAskBeforeSave) }, [])
+
+  const onSetAskBeforeSave = async (value: boolean): Promise<void> => {
+    setAskBeforeSave(value)
+    await settings.setAskBeforeSave(value)
+  }
 
   const onSaveServer = async (): Promise<void> => {
     if (serverInput.trim() === app.serverUrl) return
@@ -58,6 +65,19 @@ export function SettingsScreen (): React.JSX.Element {
         <Muted>{app.downloadDir ?? 'Not set'}</Muted>
         <div className="btn-row">
           <Button variant="secondary" onClick={() => { void onPickFolder() }}>Choose folder…</Button>
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 14 }}>
+        <strong>Saving downloads</strong>
+        <Muted>Where finished downloads go — automatically into the folder above, or ask each time.</Muted>
+        <div className="btn-row">
+          <Button variant={!askBeforeSave ? 'primary' : 'secondary'} onClick={() => { void onSetAskBeforeSave(false) }}>
+            Save automatically
+          </Button>
+          <Button variant={askBeforeSave ? 'primary' : 'secondary'} onClick={() => { void onSetAskBeforeSave(true) }}>
+            Ask each time
+          </Button>
         </div>
       </Card>
 

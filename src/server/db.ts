@@ -32,6 +32,8 @@ export interface DownloadHistoryEntry {
   name: string
   length: number
   completed_at: number
+  info_hash: string | null
+  duration_ms: number | null
 }
 
 const SCRYPT_N = 16384
@@ -110,6 +112,17 @@ export class AuthDb {
       CREATE INDEX IF NOT EXISTS idx_download_history_user
         ON download_history(user_id, completed_at DESC);
     `)
+    // Added after the initial release — CREATE TABLE IF NOT EXISTS above
+    // leaves an existing table's columns untouched, so a pre-existing
+    // database needs these added explicitly. Nullable: rows recorded before
+    // this migration (and any future caller that omits them) just have no
+    // hash/duration to show.
+    for (const stmt of [
+      'ALTER TABLE download_history ADD COLUMN info_hash TEXT',
+      'ALTER TABLE download_history ADD COLUMN duration_ms INTEGER'
+    ]) {
+      try { this.db.exec(stmt) } catch { /* column already exists */ }
+    }
   }
 
   close (): void {
@@ -298,15 +311,18 @@ export class AuthDb {
   // Scoped by user_id when auth is on; NULL (a single shared, unscoped
   // history) when it's off, since there's no user identity to key it by.
 
-  recordDownload (userId: number | null, path: string, name: string, length: number): void {
+  recordDownload (
+    userId: number | null, path: string, name: string, length: number,
+    infoHash: string | null = null, durationMs: number | null = null
+  ): void {
     this.db.prepare(
-      'INSERT INTO download_history (user_id, path, name, length, completed_at) VALUES (?, ?, ?, ?, ?)'
-    ).run(userId, path, name, length, Date.now())
+      'INSERT INTO download_history (user_id, path, name, length, completed_at, info_hash, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(userId, path, name, length, Date.now(), infoHash, durationMs)
   }
 
   listDownloadHistory (userId: number | null, limit = 200): DownloadHistoryEntry[] {
     const sql = `
-      SELECT id, path, name, length, completed_at FROM download_history
+      SELECT id, path, name, length, completed_at, info_hash, duration_ms FROM download_history
       WHERE user_id ${userId === null ? 'IS NULL' : '= ?'}
       ORDER BY completed_at DESC LIMIT ?
     `

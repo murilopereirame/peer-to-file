@@ -579,7 +579,10 @@ export class DownloadManager {
     const post = (): Promise<Response> => apiFetch('/api/downloads/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: entryPath, name: entry.name, length: entry.length })
+      body: JSON.stringify({
+        path: entryPath, name: entry.name, length: entry.length,
+        infoHash: entry.infoHash, durationMs: entry.elapsedMs
+      })
     })
     void post().catch(async () => {
       await new Promise(resolve => setTimeout(resolve, 800))

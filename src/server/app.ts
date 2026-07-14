@@ -263,11 +263,17 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   })
 
   app.post('/api/downloads/history', jsonBody, (req, res) => {
-    const { path: relPath, name, length } = (req.body ?? {}) as { path?: unknown, name?: unknown, length?: unknown }
+    const { path: relPath, name, length, infoHash, durationMs } = (req.body ?? {}) as {
+      path?: unknown, name?: unknown, length?: unknown, infoHash?: unknown, durationMs?: unknown
+    }
     if (typeof relPath !== 'string' || typeof name !== 'string' || typeof length !== 'number') {
       throw new BrowseError(400, 'path, name and length are required')
     }
-    db.recordDownload(historyUserId(res), relPath, name, length)
+    db.recordDownload(
+      historyUserId(res), relPath, name, length,
+      typeof infoHash === 'string' ? infoHash : null,
+      typeof durationMs === 'number' ? durationMs : null
+    )
     res.status(201).json({ ok: true })
   })
 

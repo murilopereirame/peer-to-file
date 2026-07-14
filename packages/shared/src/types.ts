@@ -34,10 +34,13 @@ export interface LogEntry {
 }
 
 export interface HistoryEntry {
+  id: number
   path: string
   name: string
   length: number
-  finishedAt: number
+  completed_at: number
+  info_hash: string | null
+  duration_ms: number | null
 }
 
 export interface TorrentMeta {

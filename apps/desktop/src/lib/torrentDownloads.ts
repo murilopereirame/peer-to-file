@@ -3,7 +3,7 @@ import {
   unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
-import { currentDownloadDir } from './electronApi'
+import { currentDownloadDir, settings } from './electronApi'
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
 
@@ -39,6 +39,17 @@ interface Tracked {
   tick: ReturnType<typeof setInterval>
   startedAt: number
   lastWebseedRetry: number
+  /** Set as soon as 'done'/'error' fires, so the tick (below) stops
+   * overwriting status/elapsedMs/speed after that — without this, a
+   * still-running tick flips a finished download's status back to
+   * 'downloading' every 500ms (torrent.paused stays false after done) and
+   * keeps advancing elapsedMs against a now-static byte count, making the
+   * displayed average speed drift for no reason. */
+  finished: boolean
+}
+
+function isUserGestureError (err: unknown): boolean {
+  return err instanceof Error && /user gesture/i.test(err.message)
 }
 
 function blank (path: string, name: string): DownloadSnapshot {
@@ -156,9 +167,12 @@ export class TorrentDownloadManager {
   }
 
   private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string): void {
-    const t: Tracked = { torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, tick: undefined as unknown as ReturnType<typeof setInterval> }
+    const t: Tracked = {
+      torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, finished: false,
+      tick: undefined as unknown as ReturnType<typeof setInterval>
+    }
     t.tick = setInterval(() => {
-      if (torrent.destroyed) { clearInterval(t.tick); return }
+      if (t.finished || torrent.destroyed) { clearInterval(t.tick); return }
       if (torrent.numPeers === 0 && Date.now() - t.lastWebseedRetry > 5000) {
         t.lastWebseedRetry = Date.now()
         try { torrent.addWebSeed(webseed) } catch { /* already attached */ }
@@ -184,9 +198,15 @@ export class TorrentDownloadManager {
     this.tracked.set(path, t)
 
     torrent.on('done', () => {
-      void this.save(client, torrent, path)
+      if (t.finished) return
+      t.finished = true
+      clearInterval(t.tick)
+      void this.save(client, torrent, path, Date.now() - t.startedAt)
     })
     torrent.on('error', (err) => {
+      if (t.finished) return
+      t.finished = true
+      clearInterval(t.tick)
       this.set(path, { status: 'error', message: errMessage(err) })
     })
   }
@@ -222,45 +242,76 @@ export class TorrentDownloadManager {
     this.notify()
   }
 
-  /** Same three-tier save strategy as the browser client — see its
-   * downloadManager.ts for the full rationale; reproduced independently
-   * here since this is a separate app bundle. */
-  private async save (client: P2FClient, torrent: WTTorrent, path: string): Promise<void> {
+  /**
+   * Two ways to land the finished file on disk:
+   *  - Automatic (default): stream into the configured default download
+   *    folder with no dialog, via the `will-download` main-process hook
+   *    (electron/main.cts) — same path whether or not a streamed service
+   *    worker is available (falls back to an in-memory Blob otherwise).
+   *  - Ask each time: the native Save dialog (`showSaveFilePicker`).
+   *
+   * `showSaveFilePicker` only works while still "handling a user gesture" —
+   * a window that expires a few seconds after the click that started the
+   * download, long before a slow key-exchange + torrent-metadata fetch +
+   * the transfer itself finishes and this method actually runs. When that
+   * window has closed, fall back to the automatic path instead of
+   * surfacing an error for something the user can't control the timing of.
+   */
+  private async save (client: P2FClient, torrent: WTTorrent, path: string, durationMs: number): Promise<void> {
     this.set(path, { status: 'saving' })
     try {
       const file = torrent.files[0]
       if (!file) throw new Error('torrent has no files')
 
-      if (window.showSaveFilePicker) {
-        const handle = await window.showSaveFilePicker({ suggestedName: file.name })
-        const writable = await handle.createWritable()
-        await file.stream().pipeTo(writable)
-        this.set(path, { status: 'done', progress: 1 })
-      } else if (this.streamServer) {
-        // No `download` attribute: the service worker's response already
-        // sets Content-Disposition: attachment, and the main process's
-        // `will-download` hook (electron/main.cts) redirects this into the
-        // user's configured default download folder.
-        clickDownloadLink(file.streamURL)
-        const dir = await currentDownloadDir()
-        this.set(path, { status: 'done', progress: 1, savedTo: dir ? joinNativePath(dir, file.name) : undefined })
-      } else {
-        const chunks: Uint8Array[] = []
-        const reader = file.stream().getReader()
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          if (value) chunks.push(value)
+      const askBeforeSave = await settings.getAskBeforeSave()
+      let savedTo: string | undefined
+      let pickerFailed = false
+
+      if (askBeforeSave && window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({ suggestedName: file.name })
+          const writable = await handle.createWritable()
+          await file.stream().pipeTo(writable)
+        } catch (err) {
+          if (!isUserGestureError(err)) throw err
+          pickerFailed = true
         }
-        const url = URL.createObjectURL(new Blob(chunks as BlobPart[], { type: file.type }))
-        clickDownloadLink(url, file.name)
-        setTimeout(() => URL.revokeObjectURL(url), 60_000)
-        const dir = await currentDownloadDir()
-        this.set(path, { status: 'done', progress: 1, savedTo: dir ? joinNativePath(dir, file.name) : undefined })
       }
-      await client.historyRecord(path, file.name, file.length).catch(() => {})
+
+      if (!askBeforeSave || pickerFailed) {
+        savedTo = await this.saveAutomatically(file)
+      }
+
+      this.set(path, { status: 'done', progress: 1, savedTo })
+      await client.historyRecord(path, file.name, file.length, torrent.infoHash, durationMs).catch(() => {})
     } catch (err) {
       this.set(path, { status: 'error', message: `save failed: ${errMessage(err)}` })
     }
+  }
+
+  /** Streams into the configured default download folder — see the
+   * `will-download` session hook in electron/main.cts, which is what
+   * actually redirects the resulting native "download" there. */
+  private async saveAutomatically (file: WTFile): Promise<string | undefined> {
+    const dir = await currentDownloadDir()
+    if (this.streamServer) {
+      // No `download` attribute: the service worker's response already
+      // sets Content-Disposition: attachment, and setting the HTML
+      // attribute too makes Chromium cancel the download outright — two
+      // competing "force download" signals on the same navigation.
+      clickDownloadLink(file.streamURL)
+    } else {
+      const chunks: Uint8Array[] = []
+      const reader = file.stream().getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value) chunks.push(value)
+      }
+      const url = URL.createObjectURL(new Blob(chunks as BlobPart[], { type: file.type }))
+      clickDownloadLink(url, file.name)
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    }
+    return dir ? joinNativePath(dir, file.name) : undefined
   }
 }

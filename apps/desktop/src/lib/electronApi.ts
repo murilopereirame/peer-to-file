@@ -72,6 +72,16 @@ export const settings = {
     if (mode) await window.p2f.setSetting('theme', mode); else await window.p2f.deleteSetting('theme')
   },
 
+  /** false (default): save straight to the default download folder, no
+   * dialog. true: prompt for a location on every download via the native
+   * Save dialog. */
+  async getAskBeforeSave (): Promise<boolean> {
+    return (await window.p2f.getSetting<boolean>('askBeforeSave')) ?? false
+  },
+  async setAskBeforeSave (value: boolean): Promise<void> {
+    await window.p2f.setSetting('askBeforeSave', value)
+  },
+
   async clearServerScoped (): Promise<void> {
     await window.p2f.deleteSetting('serverUrl')
   }
