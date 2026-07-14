@@ -68,12 +68,21 @@ const TOUCH_INTERVAL_MS = 30_000
 // WebTorrent's own 404 page instead of file bytes — surfacing as a real 404
 // page navigation on the slower/heavier-crypto-cost end of that gap.
 const POST_READ_CLEANUP_DELAY_MS = 15_000
-// Safety-net fallback only, for when the read-completion signal never
-// fires at all (OPFS unavailable, so no store to track, or something else
-// went wrong): long enough that it should never legitimately still be
-// mid-stream, since real completion is normally caught by the delay above
-// regardless of file size or transfer speed.
-const MAX_PENDING_CLEANUP_DELAY_MS = 30 * 60_000
+// Safety-net fallback only, for when the drain signal never fires at all
+// (an error mid-stream, an abandoned tab, or some other genuine failure) —
+// NOT a bound on how long a legitimate save can take. Every chunk of a
+// streamed save now goes through an async AES-CTR decrypt plus a
+// structured-clone postMessage round trip to the service worker (see
+// transferDrainCallbacks in browserCrypto.ts and BrowserServer.wrapRequest
+// in webtorrent's worker-server.js) — real per-chunk overhead that scales
+// with file size, not a fixed cost. A 30-minute ceiling here once assumed
+// that overhead was negligible "regardless of file size"; for a
+// sufficiently large file it wasn't, and this timer firing early destroyed
+// the torrent while a still-legitimately-in-progress save was streaming,
+// producing the same 404 the drain signal was added to fix. This is
+// deliberately generous — the drain signal above is what drives normal
+// cleanup; this only guards against genuinely stuck transfers.
+const MAX_PENDING_CLEANUP_DELAY_MS = 6 * 60 * 60_000
 
 function savedDownloads (): SavedDownload[] {
   try {
