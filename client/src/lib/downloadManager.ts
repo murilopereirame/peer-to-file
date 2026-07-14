@@ -57,8 +57,17 @@ const TOUCH_INTERVAL_MS = 30_000
 // Grace period after the OPFS store reports every piece has been read back
 // out at least once (see OpfsChunkStore.onAllRead) — the real completion
 // signal for a save with no other one, giving the OS/browser a moment to
-// finish flushing the last bytes to disk before pieces are reclaimed.
-const POST_READ_CLEANUP_DELAY_MS = 15_000
+// finish flushing the last bytes to disk before pieces are reclaimed. "Read
+// back out of the store" only means the page-context WebTorrent server has
+// read+piped the bytes into the response stream to the service worker — it
+// is not proof the browser's own download manager has actually finished
+// consuming them. If cleanup destroys the torrent (removing it from
+// client.torrents) before that finishes, a still-in-flight streamed
+// download's later range request finds no torrent and gets WebTorrent's own
+// 404 page instead of file bytes — surfacing as a real 404 navigation. 15s
+// was cutting it close for slower browsers/large files; widened to reduce
+// that race window.
+const POST_READ_CLEANUP_DELAY_MS = 60_000
 // Safety-net fallback only, for when the read-completion signal never
 // fires at all (OPFS unavailable, so no store to track, or something else
 // went wrong): long enough that it should never legitimately still be

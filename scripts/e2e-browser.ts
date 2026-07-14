@@ -304,7 +304,7 @@ try {
   // destroyed the store while a large/slow save was still streaming: this
   // must clear out well within the short post-read grace period, not stay
   // around waiting for a long fallback timer.
-  const reapDeadline = Date.now() + 25_000
+  const reapDeadline = Date.now() + 70_000
   let stillPresent = true
   while (Date.now() < reapDeadline) {
     const keys: string[] = await page.evaluate(async () => {
