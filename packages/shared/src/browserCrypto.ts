@@ -222,6 +222,22 @@ export interface EncKeyEntry {
  */
 export const transferKeys = new Map<string, EncKeyEntry>()
 
+/**
+ * infoHash -> callback, fired when a patched file iterator (below) fully
+ * drains — every chunk read from the underlying store *and* decrypted *and*
+ * yielded to whatever is consuming the file. A caller with no other
+ * completion signal for a consumer (e.g. downloadManager.ts's
+ * service-worker-streamed save, triggered by an anchor click with no
+ * JS-visible "finished" event of its own) can use this instead of guessing
+ * at when the underlying chunk store finishes serving reads: the AES-CTR
+ * decrypt this patch inserts is itself async (a crypto.subtle call per
+ * chunk), so "every piece has been read from the store" can be reached
+ * measurably *before* "every decrypted byte has actually been handed to the
+ * consumer" — the gap that made a store-read-based completion signal
+ * unreliable once decryption sat in the middle of that pipe.
+ */
+export const transferDrainCallbacks = new Map<string, () => void>()
+
 // WebTorrent's browser `File` class isn't exposed as a static export on the
 // `WebTorrent` client constructor — the only way to reach its prototype is
 // through an actual File instance (`torrent.files[0]`), so patching happens
@@ -255,12 +271,16 @@ export function ensureFileDecryptionPatched (file: { constructor: unknown }): vo
     const iterator = original.call(this, opts)
     if (!entry) return iterator
 
+    const hash = infoHash as string
     let offset = opts?.start ?? 0
     const { key, iv } = entry
     return {
       async next (): Promise<IteratorResult<Uint8Array>> {
         const result = await iterator.next()
-        if (result.done) return result
+        if (result.done) {
+          transferDrainCallbacks.get(hash)?.()
+          return result
+        }
         const plain = await ctrXor(result.value, offset, key, iv)
         offset += result.value.length
         return { done: false, value: plain }
