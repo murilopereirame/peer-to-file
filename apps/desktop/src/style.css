@@ -124,8 +124,9 @@ button, input {
 .badge { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-text-muted); }
 .badge .dot { width: 8px; height: 8px; border-radius: 50%; }
 
-table.listing { width: 100%; border-collapse: collapse; }
-table.listing td { padding: 8px 6px; border-bottom: 1px solid var(--color-border); }
+table.listing { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table.listing td { padding: 8px 6px; border-bottom: 1px solid var(--color-border); overflow-wrap: break-word; }
+table.listing td a { overflow-wrap: break-word; }
 table.listing tr:hover { background: var(--color-surface-alt); }
 
 .breadcrumbs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; font-size: 14px; }

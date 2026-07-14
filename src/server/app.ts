@@ -102,7 +102,13 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   app.use('/api', (req, res, next) => {
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
-    res.set('Access-Control-Allow-Headers', 'Range, Authorization, Content-Type')
+    // Reflect back whatever headers the preflight actually asked for, rather
+    // than a fixed list — WebTorrent's own webseed HTTP client (used by
+    // cross-origin native clients; same-origin browser clients never hit
+    // preflight at all) adds headers like Cache-Control that a static list
+    // would need to be kept in lockstep with by hand.
+    const requestedHeaders = req.headers['access-control-request-headers']
+    res.set('Access-Control-Allow-Headers', requestedHeaders ?? 'Range, Authorization, Content-Type')
     res.set('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges')
     if (req.method === 'OPTIONS') {
       res.sendStatus(204)

@@ -36,7 +36,7 @@ export function LogsScreen (): React.JSX.Element {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <Title>Activity logs</Title>
         <Button variant="secondary" onClick={() => { void load() }}>Refresh</Button>
       </div>
