@@ -544,10 +544,19 @@ export class DownloadManager {
     if (!entry || !apiFetch) return
     // Best-effort: history is a convenience list, not load-bearing for the
     // download itself, so a failure here doesn't surface as a save error.
-    void apiFetch('/api/downloads/history', {
+    // Fired right as this download's own WebSeed connections and the
+    // tracker WebSocket are winding down, which can trip a transient
+    // per-origin connection-pool error in some browsers — one retry after a
+    // short delay clears that without needing to touch the connection
+    // count itself.
+    const post = (): Promise<Response> => apiFetch('/api/downloads/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: entryPath, name: entry.name, length: entry.length })
+    })
+    void post().catch(async () => {
+      await new Promise(resolve => setTimeout(resolve, 800))
+      await post()
     }).catch(() => {})
   }
 
