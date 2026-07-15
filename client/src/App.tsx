@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiContext } from './context/ApiContext'
+import { ToastProvider } from './context/ToastContext'
 import { HttpError, errMessage } from './lib/format'
 import { useDownloadManager, useDownloads } from './hooks/useDownloads'
 import { SetupScreen } from './components/SetupScreen'
@@ -7,6 +8,7 @@ import { LoginScreen } from './components/LoginScreen'
 import { FileBrowser } from './components/FileBrowser'
 import { DownloadsPanel } from './components/DownloadsPanel'
 import { HistoryPanel } from './components/HistoryPanel'
+import { LogsPanel } from './components/LogsPanel'
 
 // The client is always served by the same origin as the API it talks to, so
 // there's nothing for a user to type in — see the "Managing files"/CORS
@@ -15,6 +17,7 @@ import { HistoryPanel } from './components/HistoryPanel'
 const API_BASE = `${location.protocol}//${location.host}`
 
 type View = 'loading' | 'setup' | 'login' | 'browser'
+type Subview = 'browser' | 'logs'
 
 interface AuthInfo {
   required: boolean
@@ -25,6 +28,7 @@ interface AuthInfo {
 export function App (): React.JSX.Element {
   const [status, setStatusState] = useState<{ msg: string, kind: '' | 'ok' | 'error' }>({ msg: '', kind: '' })
   const [view, setView] = useState<View>('loading')
+  const [subview, setSubview] = useState<Subview>('browser')
   const [authed, setAuthed] = useState(false)
 
   const setStatus = useCallback((msg: string, kind: '' | 'ok' | 'error' = '') => {
@@ -91,60 +95,67 @@ export function App (): React.JSX.Element {
   const handleAuthenticated = useCallback(() => {
     setAuthed(true)
     setView('browser')
+    setSubview('browser')
   }, [])
 
   const handleLogout = useCallback(() => {
     void (async () => {
       try { await apiFetch('/api/logout', { method: 'POST' }) } catch { /* session gone anyway */ }
       setView('login')
+      setSubview('browser')
     })()
   }, [apiFetch])
 
   return (
     <ApiContext.Provider value={{ apiBase: API_BASE, apiFetch }}>
-      <div className="app-shell">
-        <header className="app-header">
-          <div className="header-row">
-            <div className="brand">
-              <span className="logo">🧲</span>
-              <div>
-                <h1>P2File</h1>
-                <span className="tagline">self-hosted P2P file browser</span>
+      <ToastProvider>
+        <div className="app-shell">
+          <header className="app-header">
+            <div className="header-row">
+              <div className="brand">
+                <img src="/icon.png" className="logo" alt="P2File" />
+                <div>
+                  <h1>P2File</h1>
+                  <span className="tagline">self-hosted P2P file browser</span>
+                </div>
               </div>
-            </div>
-            {view === 'browser' && (
-              <div className="header-actions">
-                <a id="logs-link" href="/logs.html" target="_blank" rel="noopener">View logs</a>
-                {authed && <button id="logout" type="button" onClick={handleLogout}>Log out</button>}
-              </div>
-            )}
-          </div>
-          {status.msg && (
-            <div id="conn-status" className={`status ${status.kind}`}>
-              {status.msg}
-              {status.kind === 'error' && (
-                <button type="button" onClick={() => { void checkSession() }}>retry</button>
+              {view === 'browser' && (
+                <div className="header-actions">
+                  {subview === 'browser'
+                    ? <button id="logs-link" type="button" className="link-like" onClick={() => setSubview('logs')}>View logs</button>
+                    : <button id="back-link" type="button" className="link-like" onClick={() => setSubview('browser')}>&larr; back to browser</button>}
+                  {authed && <button id="logout" type="button" onClick={handleLogout}>Log out</button>}
+                </div>
               )}
             </div>
-          )}
-        </header>
+            {status.msg && (
+              <div id="conn-status" className={`status ${status.kind}`}>
+                {status.msg}
+                {status.kind === 'error' && (
+                  <button type="button" onClick={() => { void checkSession() }}>retry</button>
+                )}
+              </div>
+            )}
+          </header>
 
-        <main>
-          {view === 'setup' && <SetupScreen onDone={handleAuthenticated} />}
-          {view === 'login' && <LoginScreen onDone={handleAuthenticated} />}
-          {view === 'browser' && (
-            <>
-              <FileBrowser manager={manager} />
-              <DownloadsPanel entries={downloads} manager={manager} />
-              <HistoryPanel refreshSignal={doneCount} />
-            </>
-          )}
-        </main>
+          <main>
+            {view === 'setup' && <SetupScreen onDone={handleAuthenticated} />}
+            {view === 'login' && <LoginScreen onDone={handleAuthenticated} />}
+            {view === 'browser' && subview === 'browser' && (
+              <>
+                <FileBrowser manager={manager} />
+                <DownloadsPanel entries={downloads} manager={manager} />
+                <HistoryPanel refreshSignal={doneCount} />
+              </>
+            )}
+            {view === 'browser' && subview === 'logs' && <LogsPanel />}
+          </main>
 
-        <footer>
-          <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a></p>
-        </footer>
-      </div>
+          <footer>
+            <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a></p>
+          </footer>
+        </div>
+      </ToastProvider>
     </ApiContext.Provider>
   )
 }

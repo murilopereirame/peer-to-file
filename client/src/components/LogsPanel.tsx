@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useToast } from '../context/ToastContext'
 
 interface LogEntry {
   id: number
@@ -12,7 +13,19 @@ const POLL_INTERVAL_MS = 4000
 // Same origin as the main app — see App.tsx.
 const API_BASE = `${location.protocol}//${location.host}`
 
-export function LogsApp (): React.JSX.Element {
+const KIND_OPTIONS: Array<{ value: string, label: string }> = [
+  { value: '', label: 'all' },
+  { value: 'connection', label: 'connections' },
+  { value: 'tracker', label: 'tracker' },
+  { value: 'torrent', label: 'torrent requests' },
+  { value: 'webseed', label: 'webseed' },
+  { value: 'browse', label: 'browse' },
+  { value: 'auth', label: 'auth' },
+  { value: 'server', label: 'server' }
+]
+
+export function LogsPanel (): React.JSX.Element {
+  const notify = useToast()
   const [status, setStatus] = useState<{ msg: string, kind: '' | 'ok' | 'error' }>({ msg: '', kind: '' })
   const [entries, setEntries] = useState<LogEntry[]>([])
   const [kindFilter, setKindFilter] = useState('')
@@ -31,7 +44,7 @@ export function LogsApp (): React.JSX.Element {
       if (sinceIdRef.current !== undefined) url.searchParams.set('sinceId', String(sinceIdRef.current))
       const res = await fetch(url, { credentials: 'include' })
       if (res.status === 401) {
-        setStatus({ msg: 'signed out — sign in on the main tab, then reload this page', kind: 'error' })
+        setStatus({ msg: 'signed out — sign in again to keep viewing logs', kind: 'error' })
         return
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -63,7 +76,7 @@ export function LogsApp (): React.JSX.Element {
 
   const visible = kindFilter ? entries.filter(e => e.kind === kindFilter) : entries
 
-  const downloadLogs = (): void => {
+  const onExport = (): void => {
     const lines = visible.map(e => `[${new Date(e.ts).toISOString()}] ${e.kind.toUpperCase()}: ${e.message}`)
     const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
@@ -74,66 +87,44 @@ export function LogsApp (): React.JSX.Element {
     a.click()
     a.remove()
     setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    notify('Logs exported to your downloads folder')
   }
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div className="header-row logs-header">
-          <div className="brand">
-            <span className="logo">🧲</span>
-            <div>
-              <h1>P2File — Logs</h1>
-              <span className="tagline">server activity</span>
-            </div>
-          </div>
-          <a href="/">&larr; back to browser</a>
-        </div>
-        <div id="conn-status" className={`status ${status.kind}`}>{status.msg}</div>
-      </header>
+    <section className="card">
+      {status.msg && <div id="conn-status" className={`status ${status.kind}`}>{status.msg}</div>}
+      <section id="logs-controls">
+        <label>
+          kind
+          <select id="kind-filter" value={kindFilter} onChange={e => setKindFilter(e.target.value)}>
+            {KIND_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+          </select>
+        </label>
+        <label>
+          <input
+            type="checkbox" id="auto-refresh" checked={autoRefresh}
+            onChange={e => setAutoRefresh(e.target.checked)}
+          />
+          auto-refresh
+        </label>
+        <button id="clear-view" type="button" onClick={() => setEntries([])}>Clear view</button>
+        <button id="export-logs" type="button" disabled={visible.length === 0} onClick={onExport}>
+          Export logs
+        </button>
+      </section>
 
-      <main>
-        <section className="card">
-          <section id="logs-controls">
-            <label>
-              kind
-              <select id="kind-filter" value={kindFilter} onChange={e => setKindFilter(e.target.value)}>
-                <option value="">all</option>
-                <option value="connection">connections</option>
-                <option value="tracker">tracker</option>
-                <option value="torrent">torrent requests</option>
-                <option value="webseed">webseed</option>
-                <option value="auth">auth</option>
-                <option value="server">server</option>
-              </select>
-            </label>
-            <label>
-              <input
-                type="checkbox" id="auto-refresh" checked={autoRefresh}
-                onChange={e => setAutoRefresh(e.target.checked)}
-              />
-              auto-refresh
-            </label>
-            <button id="clear-view" type="button" onClick={() => setEntries([])}>Clear view</button>
-            <button id="download-logs" type="button" disabled={visible.length === 0} onClick={downloadLogs}>
-              Download logs
-            </button>
-          </section>
-
-          <ul id="log-list">
-            {visible.length === 0 && (
-              <li className="empty">{entries.length === 0 ? 'no activity yet' : 'no entries match this filter'}</li>
-            )}
-            {visible.map(entry => (
-              <li key={entry.id}>
-                <span className="log-time">{new Date(entry.ts).toLocaleTimeString()}</span>
-                <span className="log-kind">{entry.kind}</span>
-                <span className="log-msg">{entry.message}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      </main>
-    </div>
+      <ul id="log-list">
+        {visible.length === 0 && (
+          <li className="empty">{entries.length === 0 ? 'no activity yet' : 'no entries match this filter'}</li>
+        )}
+        {visible.map(entry => (
+          <li key={entry.id}>
+            <span className="log-time">{new Date(entry.ts).toLocaleTimeString()}</span>
+            <span className="log-kind">{entry.kind}</span>
+            <span className="log-msg">{entry.message}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }

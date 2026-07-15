@@ -3,6 +3,7 @@ import { errMessage, formatBytes, formatDateTime, joinPath, parentPath, type Dir
 import { useApp, withUnauthorizedRetry } from '../context/AppContext'
 import { useDownloads } from '../context/DownloadsContext'
 import { useUploads } from '../context/UploadsContext'
+import { useToast } from '../context/ToastContext'
 import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
 
 function Breadcrumbs ({ path, onNavigate }: { path: string, onNavigate: (p: string) => void }): React.JSX.Element {
@@ -134,6 +135,7 @@ export function BrowserScreen (): React.JSX.Element {
   const app = useApp()
   const downloads = useDownloads()
   const uploads = useUploads()
+  const notify = useToast()
   const [path, setPath] = useState('')
   const [listing, setListing] = useState<Listing | null>(null)
   const [error, setError] = useState('')
@@ -142,16 +144,26 @@ export function BrowserScreen (): React.JSX.Element {
   const [moving, setMoving] = useState<DirEntry | null>(null)
   const [deleting, setDeleting] = useState<DirEntry | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Per-path listing cache so revisiting a folder (breadcrumb, "../") paints
+  // instantly from the last-known listing while a background refetch keeps
+  // it fresh, instead of flashing empty/loading on every navigation.
+  const cacheRef = useRef(new Map<string, Listing>())
 
   const load = useCallback(async (p: string): Promise<void> => {
     if (!app.client) return
     setError('')
+    const cached = cacheRef.current.get(p)
+    if (cached) {
+      setListing(cached)
+      setPath(p)
+    }
     try {
       const l = await withUnauthorizedRetry(app, () => app.client!.list(p))
+      cacheRef.current.set(p, l)
       setListing(l)
       setPath(p)
     } catch (err) {
-      setError(errMessage(err))
+      if (!cached) setError(errMessage(err))
     }
   }, [app])
 
@@ -161,17 +173,30 @@ export function BrowserScreen (): React.JSX.Element {
 
   const onFilesPicked = (files: FileList | null): void => {
     if (!files) return
-    for (const file of files) uploads.start(path, file, () => { void load(path) })
+    for (const file of files) {
+      notify(`Uploading "${file.name}"…`)
+      uploads.start(path, file, () => { void load(path) })
+    }
   }
 
   return (
     <div>
       <Title>Browse</Title>
-      <Breadcrumbs path={path} onNavigate={p => { void load(p) }} />
+      <div className="browser-toolbar">
+        <Breadcrumbs path={path} onNavigate={p => { void load(p) }} />
+        <Button onClick={() => fileInputRef.current?.click()}>Upload files</Button>
+        <input ref={fileInputRef} type="file" multiple hidden onChange={e => { onFilesPicked(e.target.files); e.target.value = '' }} />
+      </div>
       <ErrorText>{error}</ErrorText>
       <Card>
         <table className="listing">
           <tbody>
+            {path !== '' && (
+              <tr className="up" onClick={() => { void load(parentPath(path)) }}>
+                <td style={{ width: 24 }}>⬆️</td>
+                <td colSpan={3}><Muted>../</Muted></td>
+              </tr>
+            )}
             {entries.length === 0 && <tr><td><Muted>This folder is empty.</Muted></td></tr>}
             {entries.map(entry => (
               <tr key={entry.name}>
@@ -187,7 +212,12 @@ export function BrowserScreen (): React.JSX.Element {
                 </td>
                 <td style={{ width: 90, textAlign: 'right' }}>
                   {entry.type === 'file' && (
-                    <button className="link-btn" onClick={() => downloads.start(joinPath(path, entry.name), entry.name)}>Download</button>
+                    <button
+                      className="link-btn"
+                      onClick={() => { downloads.start(joinPath(path, entry.name), entry.name); notify(`Added "${entry.name}" to the download queue`) }}
+                    >
+                      Download
+                    </button>
                   )}
                 </td>
                 <td style={{ width: 30, position: 'relative' }}>
@@ -208,11 +238,6 @@ export function BrowserScreen (): React.JSX.Element {
           </tbody>
         </table>
       </Card>
-      <div className="btn-row">
-        {path !== '' && <Button variant="secondary" onClick={() => { void load(parentPath(path)) }}>Up one level</Button>}
-        <Button onClick={() => fileInputRef.current?.click()}>Upload files</Button>
-        <input ref={fileInputRef} type="file" multiple hidden onChange={e => { onFilesPicked(e.target.files); e.target.value = '' }} />
-      </div>
 
       <RenameModal
         entry={renaming}
@@ -221,6 +246,7 @@ export function BrowserScreen (): React.JSX.Element {
           if (!renaming || !app.client) return
           await withUnauthorizedRetry(app, () => app.client!.move(joinPath(path, renaming.name), joinPath(path, name)))
           setRenaming(null)
+          notify(`Renamed to "${name}"`)
           await load(path)
         }}
       />
@@ -232,6 +258,7 @@ export function BrowserScreen (): React.JSX.Element {
           if (!moving || !app.client) return
           await withUnauthorizedRetry(app, () => app.client!.move(joinPath(path, moving.name), joinPath(destDir, moving.name)))
           setMoving(null)
+          notify(`Moved "${moving.name}"`)
           await load(path)
         }}
       />
@@ -242,6 +269,7 @@ export function BrowserScreen (): React.JSX.Element {
           if (!deleting || !app.client) return
           await withUnauthorizedRetry(app, () => app.client!.deleteEntry(joinPath(path, deleting.name)))
           setDeleting(null)
+          notify(`Deleted "${deleting.name}"`)
           await load(path)
         }}
       />

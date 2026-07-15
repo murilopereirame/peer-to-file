@@ -3,6 +3,7 @@ import { useApi } from '../context/ApiContext'
 import { errMessage, formatBytes, HttpError } from '../lib/format'
 import type { DownloadManager } from '../lib/downloadManager'
 import { useUploads } from '../hooks/useUploads'
+import { useToast } from '../context/ToastContext'
 import { UploadPanel } from './UploadPanel'
 import { MoveModal } from './MoveModal'
 
@@ -20,6 +21,7 @@ interface Listing {
 
 export function FileBrowser ({ manager }: { manager: DownloadManager }): React.JSX.Element {
   const { apiFetch } = useApi()
+  const notify = useToast()
   const [path, setPath] = useState('')
   const [listing, setListing] = useState<Listing | null>(null)
   const [loading, setLoading] = useState(true)
@@ -27,24 +29,34 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
   const requestedPath = useRef('')
   const pathRef = useRef('')
   pathRef.current = path
+  // Per-path listing cache: a revisited folder paints instantly from the
+  // last-known listing (stale-while-revalidate) instead of flashing back to
+  // "loading…" on every navigation.
+  const cacheRef = useRef(new Map<string, Listing>())
 
   const load = useCallback((target: string): void => {
-    // optimistic: show the target location and a loading state right away
     requestedPath.current = target
     setPath(target)
-    setLoading(true)
     setError(null)
+    const cached = cacheRef.current.get(target)
+    if (cached) {
+      setListing(cached)
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
     void (async () => {
       try {
         const res = await apiFetch(`/api/list?path=${encodeURIComponent(target)}`)
         const body = await res.json() as Listing
         if (requestedPath.current !== target) return // user already navigated elsewhere
+        cacheRef.current.set(body.path, body)
         setListing(body)
         setPath(body.path)
         setLoading(false)
       } catch (err) {
         if (requestedPath.current !== target) return
-        setError(errMessage(err))
+        if (!cached) setError(errMessage(err))
         setLoading(false)
       }
     })()
@@ -60,7 +72,10 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
   const { uploads, upload, dismiss } = useUploads(refresh)
 
   const uploadFiles = (files: FileList | File[]): void => {
-    for (const file of files) upload(file, pathRef.current)
+    for (const file of files) {
+      notify(`Uploading "${file.name}"…`)
+      upload(file, pathRef.current)
+    }
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -161,6 +176,7 @@ function ListingRow ({
   manager: DownloadManager
   apiFetch: ReturnType<typeof useApi>['apiFetch']
 }): React.JSX.Element {
+  const notify = useToast()
   const entryPath = path === '' ? entry.name : `${path}/${entry.name}`
   const meta = entry.type === 'file'
     ? `${formatBytes(entry.size ?? 0)} · ${new Date(entry.mtime).toLocaleDateString()}`
@@ -222,6 +238,7 @@ function ListingRow ({
           body: JSON.stringify({ from: entryPath, to })
         })
         setRenaming(false)
+        notify(`Renamed to "${trimmed}"`)
         onChanged()
       } catch (err) {
         setRowError(err instanceof HttpError && err.status === 409
@@ -272,6 +289,7 @@ function ListingRow ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: entryPath })
         })
+        notify(`Deleted "${entry.name}"`)
         onChanged()
       } catch (err) {
         setRowError(errMessage(err))
@@ -302,7 +320,11 @@ function ListingRow ({
         {entry.type === 'file' && (
           <button
             type="button" className="primary"
-            onClick={(e) => { e.stopPropagation(); void manager.start(entryPath, entry.name, apiFetch) }}
+            onClick={(e) => {
+              e.stopPropagation()
+              void manager.start(entryPath, entry.name, apiFetch)
+              notify(`Added "${entry.name}" to the download queue`)
+            }}
           >
             Download
           </button>
@@ -329,7 +351,7 @@ function ListingRow ({
           entryName={entry.name}
           startPath={path}
           onClose={() => setMoveOpen(false)}
-          onMoved={() => { setMoveOpen(false); onChanged() }}
+          onMoved={() => { setMoveOpen(false); notify(`Moved "${entry.name}"`); onChanged() }}
         />
       )}
     </li>

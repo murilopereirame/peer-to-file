@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { errMessage, formatBytes, formatDateTime, formatDuration, type HistoryEntry } from '@p2f/shared'
 import { useApp, withUnauthorizedRetry } from '../context/AppContext'
 import { useDownloads } from '../context/DownloadsContext'
+import { useToast } from '../context/ToastContext'
 import { Button, Card, ErrorText, Muted, Title } from '../components/Primitives'
 
 function averageSpeed (length: number, durationMs: number | null): string | null {
@@ -12,6 +13,7 @@ function averageSpeed (length: number, durationMs: number | null): string | null
 export function HistoryScreen (): React.JSX.Element {
   const app = useApp()
   const { downloads } = useDownloads()
+  const notify = useToast()
   const doneCount = downloads.filter(d => d.status === 'done').length
   const [entries, setEntries] = useState<HistoryEntry[]>([])
   const [error, setError] = useState('')
@@ -33,11 +35,15 @@ export function HistoryScreen (): React.JSX.Element {
     if (!app.client) return
     await withUnauthorizedRetry(app, () => app.client!.historyClear())
     await load()
+    notify('Download history cleared')
   }
 
   return (
     <div>
-      <Title>Download history</Title>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <Title>Download history</Title>
+        {entries.length > 0 && <Button variant="secondary" onClick={() => { void onClear() }}>Clear history</Button>}
+      </div>
       <ErrorText>{error}</ErrorText>
       {entries.length === 0 && <Muted>No finished downloads yet.</Muted>}
       {entries.map(e => {
@@ -54,7 +60,6 @@ export function HistoryScreen (): React.JSX.Element {
           </Card>
         )
       })}
-      {entries.length > 0 && <Button variant="secondary" onClick={() => { void onClear() }}>Clear history</Button>}
     </div>
   )
 }

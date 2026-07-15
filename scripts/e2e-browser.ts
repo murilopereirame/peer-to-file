@@ -354,23 +354,23 @@ try {
   )
   console.log('✓ clear history empties the download history list')
 
-  // 9. logs page — opened as its own tab, shares the session cookie
-  const logsPage = await context.newPage()
-  await logsPage.goto(`http://127.0.0.1:${PORT}/logs.html`)
-  await logsPage.waitForSelector('#conn-status.ok', { timeout: 10_000 })
-  await logsPage.waitForFunction(
+  // 9. logs view — switched to in-page (SPA), no separate tab/reload, shares
+  // all in-memory state (session, toasts) with the main view.
+  await page.click('#logs-link')
+  await page.waitForSelector('#conn-status.ok', { timeout: 10_000 })
+  await page.waitForFunction(
     () => (document.querySelector('#log-list')?.textContent ?? '').includes('payload.bin'),
     undefined,
     { timeout: 10_000 }
   )
-  const logsText = await logsPage.locator('#log-list').innerText()
-  if (!/torrent/i.test(logsText)) fail(`logs page missing a torrent-kind entry: ${logsText}`)
+  const logsText = await page.locator('#log-list').innerText()
+  if (!/torrent/i.test(logsText)) fail(`logs view missing a torrent-kind entry: ${logsText}`)
   // filter by a kind guaranteed to be recent (the ring buffer only keeps the
   // latest ~500/200-per-fetch entries, so anything from early in this long
   // test — like the sign-in — may have already scrolled out, same as it
   // would for a real admin watching a busy server)
-  await logsPage.selectOption('#kind-filter', 'torrent')
-  await logsPage.waitForFunction(
+  await page.selectOption('#kind-filter', 'torrent')
+  await page.waitForFunction(
     () => {
       const kinds = [...document.querySelectorAll('#log-list .log-kind')]
       return kinds.length > 0 && kinds.every(el => el.textContent === 'torrent')
@@ -378,10 +378,10 @@ try {
     undefined,
     { timeout: 5_000 }
   )
-  console.log('✓ logs page shows server activity and filters by kind')
+  console.log('✓ logs view shows server activity and filters by kind')
 
-  const logsDownloadPromise = logsPage.waitForEvent('download', { timeout: 10_000 })
-  await logsPage.click('#download-logs')
+  const logsDownloadPromise = page.waitForEvent('download', { timeout: 10_000 })
+  await page.click('#export-logs')
   const logsDownload = await logsDownloadPromise
   if (!/^p2file-logs-.*\.txt$/.test(logsDownload.suggestedFilename())) {
     fail(`unexpected logs download filename: ${logsDownload.suggestedFilename()}`)
@@ -391,9 +391,11 @@ try {
   const logsFileText = await fs.readFile(logsSavedPath, 'utf8')
   if (!/torrent/i.test(logsFileText)) fail(`downloaded logs file missing a torrent-kind entry: ${logsFileText}`)
   await fs.rm(logsSavedPath, { force: true })
-  console.log('✓ download logs button exports the filtered log as a file')
+  console.log('✓ export logs button exports the filtered log as a file')
 
-  await logsPage.close()
+  await page.click('#back-link')
+  await page.waitForSelector('#browser', { timeout: 5_000 })
+  console.log('✓ back-to-browser link returns to the file browser without a reload')
 
   // 10. stale-download reconciliation: a synthetic orphaned OPFS store (no
   // matching localStorage entry) and a pendingCleanup entry must both be

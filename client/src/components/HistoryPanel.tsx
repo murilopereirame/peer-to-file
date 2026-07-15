@@ -1,5 +1,6 @@
 import { useDownloadHistory } from '../hooks/useDownloadHistory'
 import { formatBytes, formatDuration } from '../lib/format'
+import { useToast } from '../context/ToastContext'
 
 function averageSpeed (length: number, durationMs: number | null): string | null {
   if (!durationMs || durationMs <= 0) return null
@@ -8,10 +9,11 @@ function averageSpeed (length: number, durationMs: number | null): string | null
 
 export function HistoryPanel ({ refreshSignal }: { refreshSignal: unknown }): React.JSX.Element {
   const { entries, loading, error, clear } = useDownloadHistory(refreshSignal)
+  const notify = useToast()
 
   const onClear = (): void => {
     if (!window.confirm('Clear your download history? This only affects the history list — nothing on disk is touched.')) return
-    void clear()
+    void clear().then(() => notify('Download history cleared'))
   }
 
   return (
@@ -29,14 +31,13 @@ export function HistoryPanel ({ refreshSignal }: { refreshSignal: unknown }): Re
             const avgSpeed = averageSpeed(entry.length, entry.duration_ms)
             return (
               <li key={entry.id}>
-                <span className="entry-icon">📄</span>
-                <span className="entry-name">{entry.name}</span>
-                <span className="entry-meta">
+                <div className="history-name">{entry.name}</div>
+                <div className="history-meta">
                   {formatBytes(entry.length)} · {new Date(entry.completed_at).toLocaleString()}
                   {entry.duration_ms ? ` · took ${formatDuration(entry.duration_ms)}` : ''}
                   {avgSpeed ? ` · ${avgSpeed} avg` : ''}
-                  {entry.info_hash ? ` · ${entry.info_hash}` : ''}
-                </span>
+                </div>
+                {entry.info_hash && <div className="history-hash">{entry.info_hash}</div>}
               </li>
             )
           })}

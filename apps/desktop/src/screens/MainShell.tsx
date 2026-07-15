@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useApp } from '../context/AppContext'
 import { DownloadsProvider, useDownloads } from '../context/DownloadsContext'
 import { UploadsProvider } from '../context/UploadsContext'
+import { ToastProvider } from '../context/ToastContext'
 import { ConnectionBadge } from '../components/ConnectionBadge'
 import { BrowserScreen } from './BrowserScreen'
 import { DownloadsScreen } from './DownloadsScreen'
@@ -55,10 +56,12 @@ function Shell (): React.JSX.Element {
 
 export function MainShell (): React.JSX.Element {
   return (
-    <DownloadsProvider>
-      <UploadsProvider>
-        <Shell />
-      </UploadsProvider>
-    </DownloadsProvider>
+    <ToastProvider>
+      <DownloadsProvider>
+        <UploadsProvider>
+          <Shell />
+        </UploadsProvider>
+      </DownloadsProvider>
+    </ToastProvider>
   )
 }
