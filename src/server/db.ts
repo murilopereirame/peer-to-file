@@ -119,7 +119,8 @@ export class AuthDb {
     // hash/duration to show.
     for (const stmt of [
       'ALTER TABLE download_history ADD COLUMN info_hash TEXT',
-      'ALTER TABLE download_history ADD COLUMN duration_ms INTEGER'
+      'ALTER TABLE download_history ADD COLUMN duration_ms INTEGER',
+      "ALTER TABLE download_history ADD COLUMN kind TEXT NOT NULL DEFAULT 'download'"
     ]) {
       try { this.db.exec(stmt) } catch { /* column already exists */ }
     }
@@ -307,34 +308,67 @@ export class AuthDb {
     return privateKey
   }
 
-  // --- download history -------------------------------------------------
+  // --- transfer history ---------------------------------------------------
   // Scoped by user_id when auth is on; NULL (a single shared, unscoped
   // history) when it's off, since there's no user identity to key it by.
+  // Downloads and uploads share one table, distinguished by `kind` — kept
+  // as separate public methods/endpoints per transfer type rather than one
+  // generic API, since download entries carry an info_hash and upload
+  // entries never do.
+
+  private recordTransfer (
+    kind: 'download' | 'upload', userId: number | null, path: string, name: string, length: number,
+    infoHash: string | null, durationMs: number | null
+  ): void {
+    this.db.prepare(
+      'INSERT INTO download_history (user_id, kind, path, name, length, completed_at, info_hash, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(userId, kind, path, name, length, Date.now(), infoHash, durationMs)
+  }
+
+  private listTransferHistory (kind: 'download' | 'upload', userId: number | null, limit: number): DownloadHistoryEntry[] {
+    const sql = `
+      SELECT id, path, name, length, completed_at, info_hash, duration_ms FROM download_history
+      WHERE kind = ? AND user_id ${userId === null ? 'IS NULL' : '= ?'}
+      ORDER BY completed_at DESC LIMIT ?
+    `
+    const stmt = this.db.prepare(sql)
+    const rows = userId === null ? stmt.all(kind, limit) : stmt.all(kind, userId, limit)
+    return rows as unknown as DownloadHistoryEntry[]
+  }
+
+  private clearTransferHistory (kind: 'download' | 'upload', userId: number | null): void {
+    const sql = `DELETE FROM download_history WHERE kind = ? AND user_id ${userId === null ? 'IS NULL' : '= ?'}`
+    const stmt = this.db.prepare(sql)
+    if (userId === null) stmt.run(kind)
+    else stmt.run(kind, userId)
+  }
 
   recordDownload (
     userId: number | null, path: string, name: string, length: number,
     infoHash: string | null = null, durationMs: number | null = null
   ): void {
-    this.db.prepare(
-      'INSERT INTO download_history (user_id, path, name, length, completed_at, info_hash, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(userId, path, name, length, Date.now(), infoHash, durationMs)
+    this.recordTransfer('download', userId, path, name, length, infoHash, durationMs)
   }
 
   listDownloadHistory (userId: number | null, limit = 200): DownloadHistoryEntry[] {
-    const sql = `
-      SELECT id, path, name, length, completed_at, info_hash, duration_ms FROM download_history
-      WHERE user_id ${userId === null ? 'IS NULL' : '= ?'}
-      ORDER BY completed_at DESC LIMIT ?
-    `
-    const stmt = this.db.prepare(sql)
-    const rows = userId === null ? stmt.all(limit) : stmt.all(userId, limit)
-    return rows as unknown as DownloadHistoryEntry[]
+    return this.listTransferHistory('download', userId, limit)
   }
 
   clearDownloadHistory (userId: number | null): void {
-    const sql = `DELETE FROM download_history WHERE user_id ${userId === null ? 'IS NULL' : '= ?'}`
-    const stmt = this.db.prepare(sql)
-    if (userId === null) stmt.run()
-    else stmt.run(userId)
+    this.clearTransferHistory('download', userId)
+  }
+
+  recordUpload (
+    userId: number | null, path: string, name: string, length: number, durationMs: number | null = null
+  ): void {
+    this.recordTransfer('upload', userId, path, name, length, null, durationMs)
+  }
+
+  listUploadHistory (userId: number | null, limit = 200): DownloadHistoryEntry[] {
+    return this.listTransferHistory('upload', userId, limit)
+  }
+
+  clearUploadHistory (userId: number | null): void {
+    this.clearTransferHistory('upload', userId)
   }
 }

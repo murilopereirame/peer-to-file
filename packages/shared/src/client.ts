@@ -109,6 +109,10 @@ export class P2FClient {
     return await this.requestJson('/api/move', P2FClient.jsonInit('POST', { from, to }))
   }
 
+  async mkdir (path: string): Promise<{ path: string }> {
+    return await this.requestJson('/api/mkdir', P2FClient.jsonInit('POST', { path }))
+  }
+
   /** `clientPublicKeyBase64` is this session's ephemeral ECDH public key — see browserCrypto.ts's establishKeyWrap. */
   async torrentMeta (path: string, clientPublicKeyBase64: string): Promise<TorrentMeta> {
     return await this.requestJson(
@@ -135,6 +139,18 @@ export class P2FClient {
 
   async historyClear (): Promise<void> {
     await this.request('/api/downloads/history/clear', { method: 'POST' })
+  }
+
+  async uploadHistoryList (): Promise<{ entries: HistoryEntry[] }> {
+    return await this.requestJson('/api/uploads/history')
+  }
+
+  async uploadHistoryRecord (path: string, name: string, length: number, durationMs?: number): Promise<void> {
+    await this.request('/api/uploads/history', P2FClient.jsonInit('POST', { path, name, length, durationMs }))
+  }
+
+  async uploadHistoryClear (): Promise<void> {
+    await this.request('/api/uploads/history/clear', { method: 'POST' })
   }
 
   /** URL to POST a file's raw bytes to, to create it at `dirPath/name`. */

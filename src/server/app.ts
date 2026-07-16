@@ -5,7 +5,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import express, { type Request, type Response, type NextFunction, type Express } from 'express'
 import {
-  BrowseError, deleteEntry, listDir, moveEntry, resolveInsideRoot, resolveUploadTarget,
+  BrowseError, createFolder, deleteEntry, listDir, moveEntry, resolveInsideRoot, resolveUploadTarget,
   throwIfPermissionError
 } from './browse.ts'
 import { renderTorrent, type TorrentStore } from './torrents.ts'
@@ -282,6 +282,29 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
     res.json({ ok: true })
   })
 
+  app.get('/api/uploads/history', (req, res) => {
+    res.json({ entries: db.listUploadHistory(historyUserId(res)) })
+  })
+
+  app.post('/api/uploads/history', jsonBody, (req, res) => {
+    const { path: relPath, name, length, durationMs } = (req.body ?? {}) as {
+      path?: unknown, name?: unknown, length?: unknown, durationMs?: unknown
+    }
+    if (typeof relPath !== 'string' || typeof name !== 'string' || typeof length !== 'number') {
+      throw new BrowseError(400, 'path, name and length are required')
+    }
+    db.recordUpload(
+      historyUserId(res), relPath, name, length,
+      typeof durationMs === 'number' ? durationMs : null
+    )
+    res.status(201).json({ ok: true })
+  })
+
+  app.post('/api/uploads/history/clear', (req, res) => {
+    db.clearUploadHistory(historyUserId(res))
+    res.json({ ok: true })
+  })
+
   app.get('/api/list', wrap(async (req, res) => {
     res.json(await listDir(config.root, req.query.path ?? ''))
   }))
@@ -304,6 +327,16 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       from: fromRel, to: toRel, user: requester?.username, ip: req.ip
     })
     res.json({ ok: true, path: toRel })
+  }))
+
+  app.post('/api/mkdir', jsonBody, wrap(async (req, res) => {
+    const { path: relPath } = (req.body ?? {}) as { path?: unknown }
+    const { rel } = await createFolder(config.root, relPath)
+    const requester = (res.locals as { user?: { username: string } }).user
+    activity.add('browse', `created folder "${rel}"${requester ? ` by ${requester.username}` : ''}`, {
+      path: rel, user: requester?.username, ip: req.ip
+    })
+    res.json({ ok: true, path: rel })
   }))
 
   // Streamed to disk (never buffered in memory) via a temp file, then

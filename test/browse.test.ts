@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  BrowseError, deleteEntry, isValidEntryName, listDir, moveEntry, resolveInsideRoot, resolveNewPathInsideRoot
+  BrowseError, createFolder, deleteEntry, isValidEntryName, listDir, moveEntry, resolveInsideRoot, resolveNewPathInsideRoot
 } from '../src/server/browse.ts'
 
 let outside: string
@@ -272,6 +272,52 @@ test('moveEntry renames a symlink itself, leaving its target where it was', asyn
     assert.ok(st.isSymbolicLink())
     // the target file itself never moved
     assert.equal(await fs.readFile(path.join(mroot, 'a.txt'), 'utf8'), 'hello')
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('createFolder creates an empty directory and reports its relative path', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    const result = await createFolder(mroot, 'newdir')
+    assert.equal(result.rel, 'newdir')
+    const st = await fs.stat(path.join(mroot, 'newdir'))
+    assert.ok(st.isDirectory())
+    assert.deepEqual(await fs.readdir(path.join(mroot, 'newdir')), [])
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('createFolder works inside a subfolder', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    const result = await createFolder(mroot, 'sub/nested')
+    assert.equal(result.rel, path.join('sub', 'nested'))
+    const st = await fs.stat(path.join(mroot, 'sub', 'nested'))
+    assert.ok(st.isDirectory())
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('createFolder refuses to overwrite an existing file or folder', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await expectStatus(createFolder(mroot, 'a.txt'), 409)
+    await expectStatus(createFolder(mroot, 'sub'), 409)
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('createFolder rejects a missing parent, invalid names and traversal', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await expectStatus(createFolder(mroot, 'missing-parent/newdir'), 404)
+    await expectStatus(createFolder(mroot, 'a.txt/newdir'), 400) // parent is a file
+    await expectStatus(createFolder(mroot, '../escape'), 403)
   } finally {
     await fs.rm(mroot, { recursive: true, force: true })
   }

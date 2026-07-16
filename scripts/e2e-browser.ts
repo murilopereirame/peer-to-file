@@ -11,7 +11,11 @@
 //      the transfer must resume, not restart
 //   7. pause again, RELOAD THE PAGE — the download list and verified pieces
 //      (OPFS) must survive; resume and let it finish
-//   8. checksum the saved file against the source
+//   8. checksum the saved file against the source, download/upload history,
+//      logs tab
+//   9-11. stale-download reconciliation, upload/rename/move/delete
+//   12. create a folder via the toolbar modal, manual refresh
+//   13. theme toggle overrides (and releases back to) the OS preference
 //
 // Requires a Chromium-driving package: npm i --no-save playwright-core
 // (plus a Chromium binary; set E2E_CHROMIUM to its path if playwright's
@@ -111,6 +115,13 @@ await cdp.send('Network.emulateNetworkConditions', {
   uploadThroughput: 2 * 1024 * 1024
 })
 
+// Browse/Transfers/History/Logs are separate tabs now (not stacked on one
+// page), so any check against #downloads, #uploads, #history-panel or the
+// logs view first needs the right tab active.
+const clickTab = async (label: string): Promise<void> => {
+  await page.click(`.tab-bar button:has-text("${label}")`)
+}
+
 const downloaded = () => page.$eval(
   '#downloads li',
   el => Number((el as HTMLElement).dataset.downloaded ?? 0)
@@ -194,6 +205,7 @@ try {
   await page.waitForSelector('#listing li.file')
 
   await page.click('#listing li.file button')
+  await clickTab('Transfers')
   await page.waitForSelector('#downloads li[data-state="downloading"]', { timeout: 60_000 })
   console.log('✓ download started')
 
@@ -263,7 +275,8 @@ try {
   await sleep(800)
   const beforeReload = await progress()
   await page.reload()
-  await page.waitForSelector('#browser:not([hidden])', { timeout: 15_000 }) // session cookie survives
+  await page.waitForSelector('#browser', { timeout: 15_000 }) // session cookie survives; tab resets to Browse
+  await clickTab('Transfers')
   await page.waitForSelector('#downloads li[data-state="paused"]', { timeout: 20_000 })
   console.log('✓ page reloaded: still signed in, download restored (paused)')
 
@@ -324,10 +337,14 @@ try {
 
   // 8b. download history: a small, fast root-level file to keep this quick.
   // FileBrowser resets to root on mount, and the page.reload() in step 7
-  // didn't navigate anywhere since, so we're still there.
+  // didn't navigate anywhere since, so we're still there — just need the
+  // Browse tab active again (we've been on Transfers since step 4).
+  await clickTab('Browse')
   await page.waitForSelector('#listing li:has-text("notes.txt")', { timeout: 10_000 })
   await page.click('#listing li:has-text("notes.txt") button:has-text("Download")')
+  await clickTab('Transfers')
   await page.waitForSelector('#downloads li:has-text("notes.txt")[data-state="done"]', { timeout: 20_000 })
+  await clickTab('History')
   await page.waitForFunction(
     () => (document.querySelector('#history-panel')?.textContent ?? '').includes('notes.txt'),
     undefined, { timeout: 10_000 }
@@ -338,7 +355,9 @@ try {
   // check for WebTorrent treating the re-add as a duplicate of the still-
   // "done" torrent and handing back the same object, whose 'done' event
   // never fires again for a newly attached listener.
+  await clickTab('Browse')
   await page.click('#listing li:has-text("notes.txt") button:has-text("Download")')
+  await clickTab('Transfers')
   await sleep(300)
   const notesRowCount = await page.locator('#downloads li:has-text("notes.txt")').count()
   if (notesRowCount !== 1) fail(`re-downloading created ${notesRowCount} rows instead of reusing one`)
@@ -346,6 +365,7 @@ try {
   console.log('✓ re-downloading a finished file restarts it in place, no manual Clear needed')
 
   // 8d. clear history
+  await clickTab('History')
   page.once('dialog', dialog => { void dialog.accept() })
   await page.click('#history-panel >> text=Clear history')
   await page.waitForFunction(
@@ -354,23 +374,23 @@ try {
   )
   console.log('✓ clear history empties the download history list')
 
-  // 9. logs page — opened as its own tab, shares the session cookie
-  const logsPage = await context.newPage()
-  await logsPage.goto(`http://127.0.0.1:${PORT}/logs.html`)
-  await logsPage.waitForSelector('#conn-status.ok', { timeout: 10_000 })
-  await logsPage.waitForFunction(
+  // 9. logs — its own tab now, switched in-page (SPA), no reload, shares all
+  // in-memory state (session, toasts) with the rest of the app.
+  await clickTab('Logs')
+  await page.waitForSelector('#conn-status.ok', { timeout: 10_000 })
+  await page.waitForFunction(
     () => (document.querySelector('#log-list')?.textContent ?? '').includes('payload.bin'),
     undefined,
     { timeout: 10_000 }
   )
-  const logsText = await logsPage.locator('#log-list').innerText()
-  if (!/torrent/i.test(logsText)) fail(`logs page missing a torrent-kind entry: ${logsText}`)
+  const logsText = await page.locator('#log-list').innerText()
+  if (!/torrent/i.test(logsText)) fail(`logs view missing a torrent-kind entry: ${logsText}`)
   // filter by a kind guaranteed to be recent (the ring buffer only keeps the
   // latest ~500/200-per-fetch entries, so anything from early in this long
   // test — like the sign-in — may have already scrolled out, same as it
   // would for a real admin watching a busy server)
-  await logsPage.selectOption('#kind-filter', 'torrent')
-  await logsPage.waitForFunction(
+  await page.selectOption('#kind-filter', 'torrent')
+  await page.waitForFunction(
     () => {
       const kinds = [...document.querySelectorAll('#log-list .log-kind')]
       return kinds.length > 0 && kinds.every(el => el.textContent === 'torrent')
@@ -378,10 +398,10 @@ try {
     undefined,
     { timeout: 5_000 }
   )
-  console.log('✓ logs page shows server activity and filters by kind')
+  console.log('✓ logs view shows server activity and filters by kind')
 
-  const logsDownloadPromise = logsPage.waitForEvent('download', { timeout: 10_000 })
-  await logsPage.click('#download-logs')
+  const logsDownloadPromise = page.waitForEvent('download', { timeout: 10_000 })
+  await page.click('#export-logs')
   const logsDownload = await logsDownloadPromise
   if (!/^p2file-logs-.*\.txt$/.test(logsDownload.suggestedFilename())) {
     fail(`unexpected logs download filename: ${logsDownload.suggestedFilename()}`)
@@ -391,9 +411,11 @@ try {
   const logsFileText = await fs.readFile(logsSavedPath, 'utf8')
   if (!/torrent/i.test(logsFileText)) fail(`downloaded logs file missing a torrent-kind entry: ${logsFileText}`)
   await fs.rm(logsSavedPath, { force: true })
-  console.log('✓ download logs button exports the filtered log as a file')
+  console.log('✓ export logs button exports the filtered log as a file')
 
-  await logsPage.close()
+  await clickTab('Browse')
+  await page.waitForSelector('#browser', { timeout: 5_000 })
+  console.log('✓ Browse tab returns to the file browser without a reload')
 
   // 10. stale-download reconciliation: a synthetic orphaned OPFS store (no
   // matching localStorage entry) and a pendingCleanup entry must both be
@@ -440,18 +462,21 @@ try {
     page.click('.browser-toolbar button:has-text("Upload")')
   ])
   await fileChooser.setFiles(uploadPath)
-  await page.waitForSelector('#uploads li[data-state="done"]', { timeout: 30_000 })
   await page.waitForSelector('#listing li:has-text("p2f-e2e-upload.bin")', { timeout: 10_000 })
   console.log('✓ uploaded file appears in the listing')
 
-  // uploads get their own card, separate from the file browser
+  // uploads live on the Transfers tab now, as their own card, separate from
+  // the file browser (which isn't even mounted while that tab is active).
+  await clickTab('Transfers')
+  await page.waitForSelector('#uploads li[data-state="done"]', { timeout: 30_000 })
   const uploadsIsSeparateCard = await page.evaluate(() => {
     const browser = document.querySelector('#browser')
     const uploads = document.querySelector('#uploads-panel')
-    return !!browser && !!uploads && !browser.contains(uploads) && uploads.classList.contains('card')
+    return !browser && !!uploads && uploads.classList.contains('card')
   })
-  if (!uploadsIsSeparateCard) fail('#uploads-panel is not rendered as its own card, separate from #browser')
+  if (!uploadsIsSeparateCard) fail('#uploads-panel is not rendered as its own card on the Transfers tab')
   console.log('✓ upload section renders as its own card, separate from the file browser')
+  await clickTab('Browse')
 
   // Rename/Move/Delete are collapsed into a per-row kebab (⋮) menu.
   await page.click('#listing li:has-text("p2f-e2e-upload.bin") .kebab-btn')
@@ -493,6 +518,39 @@ try {
   )
   console.log('✓ deleted a file (after confirmation)')
   await fs.rm(uploadPath, { force: true })
+
+  // 12. new folder + manual refresh, back at root
+  await page.click('#breadcrumb button:has-text("root")')
+  await page.waitForSelector('#listing li.up', { state: 'detached', timeout: 5_000 })
+  await page.click('.browser-toolbar button:has-text("New folder")')
+  await page.waitForSelector('.modal-backdrop', { timeout: 5_000 })
+  await page.fill('.modal .rename-input', 'e2e-new-folder')
+  await page.click('.modal-actions >> text=Create')
+  await page.waitForSelector('.modal-backdrop', { state: 'detached', timeout: 5_000 })
+  await page.waitForSelector('#listing li:has-text("e2e-new-folder")', { timeout: 10_000 })
+  await page.waitForSelector('.toast:has-text("Created folder")', { timeout: 5_000 })
+  console.log('✓ new folder created via the toolbar modal')
+
+  await page.click('.browser-toolbar button:has-text("Refresh")')
+  await page.waitForSelector('#listing li:has-text("e2e-new-folder")', { timeout: 10_000 })
+  console.log('✓ manual refresh keeps the listing intact')
+
+  page.once('dialog', dialog => { void dialog.accept() })
+  await page.click('#listing li:has-text("e2e-new-folder") .kebab-btn')
+  await page.click('.kebab-menu >> text=Delete')
+  await page.waitForFunction(
+    () => !(document.querySelector('#listing')?.textContent ?? '').includes('e2e-new-folder'),
+    undefined, { timeout: 10_000 }
+  )
+
+  // 13. theme toggle: explicit override applies immediately and independent
+  // of the OS preference, then "System" hands control back to it.
+  await page.click('.theme-toggle button:has-text("Dark")')
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark', undefined, { timeout: 5_000 })
+  await page.click('.theme-toggle button:has-text("Light")')
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light', undefined, { timeout: 5_000 })
+  await page.click('.theme-toggle button:has-text("System")')
+  console.log('✓ theme toggle switches the resolved data-theme attribute')
 
   console.log('\nE2E PASS')
 } finally {

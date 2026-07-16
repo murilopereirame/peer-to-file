@@ -286,6 +286,29 @@ test('POST /api/move refuses to overwrite an existing entry', async () => {
   await fs.rm(path.join(root, 'src-move.txt'))
 })
 
+test('POST /api/mkdir creates a folder', async () => {
+  const res = await fetch(`${base}/api/mkdir`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'a-new-folder' })
+  })
+  assert.equal(res.status, 200)
+  const resBody = await res.json() as any
+  assert.equal(resBody.path, 'a-new-folder')
+  const st = await fs.stat(path.join(root, 'a-new-folder'))
+  assert.ok(st.isDirectory())
+  await fs.rm(path.join(root, 'a-new-folder'), { recursive: true })
+})
+
+test('POST /api/mkdir refuses to overwrite an existing entry', async () => {
+  const res = await fetch(`${base}/api/mkdir`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'docs' })
+  })
+  assert.equal(res.status, 409)
+})
+
 test('POST /api/upload streams a file to disk', async () => {
   const payload = crypto.randomBytes(256 * 1024)
   const { body, headers } = await encryptUpload(payload)
@@ -381,6 +404,39 @@ test('download history works without auth as a single shared, unscoped list', as
   assert.equal(clear.status, 200)
   const after = await (await fetch(`${base}/api/downloads/history`)).json() as any
   assert.deepEqual(after.entries, [])
+})
+
+test('upload history is tracked separately from download history', async () => {
+  const recordDownload = await fetch(`${base}/api/downloads/history`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'big.bin', name: 'downloaded.bin', length: fileContent.length })
+  })
+  assert.equal(recordDownload.status, 201)
+
+  const recordUpload = await fetch(`${base}/api/uploads/history`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'big.bin', name: 'uploaded.bin', length: fileContent.length, durationMs: 1500 })
+  })
+  assert.equal(recordUpload.status, 201)
+
+  const downloads = await (await fetch(`${base}/api/downloads/history`)).json() as any
+  assert.deepEqual(downloads.entries.map((e: any) => e.name), ['downloaded.bin'])
+
+  const uploads = await (await fetch(`${base}/api/uploads/history`)).json() as any
+  assert.deepEqual(uploads.entries.map((e: any) => e.name), ['uploaded.bin'])
+  assert.equal(uploads.entries[0].duration_ms, 1500)
+
+  // clearing one kind must not touch the other
+  const clearUploads = await fetch(`${base}/api/uploads/history/clear`, { method: 'POST' })
+  assert.equal(clearUploads.status, 200)
+  const uploadsAfter = await (await fetch(`${base}/api/uploads/history`)).json() as any
+  assert.deepEqual(uploadsAfter.entries, [])
+  const downloadsAfter = await (await fetch(`${base}/api/downloads/history`)).json() as any
+  assert.deepEqual(downloadsAfter.entries.map((e: any) => e.name), ['downloaded.bin'])
+
+  await fetch(`${base}/api/downloads/history/clear`, { method: 'POST' })
 })
 
 test('serves the web client and the WebTorrent bundle', async () => {

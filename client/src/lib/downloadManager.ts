@@ -67,7 +67,23 @@ const TOUCH_INTERVAL_MS = 30_000
 // still draining, and a later request for it found no torrent and got
 // WebTorrent's own 404 page instead of file bytes — surfacing as a real 404
 // page navigation on the slower/heavier-crypto-cost end of that gap.
-const POST_READ_CLEANUP_DELAY_MS = 15_000
+//
+// This grace period is itself scaled by file size for the same reason the
+// safety net below is: a flat window assumes "finish flushing to disk" is a
+// negligible, size-independent cost, which held for small test files but
+// not for a large one on a browser/OS with a slower streamed-download
+// pipeline — Safari's in particular — where the flush lagging the drain
+// signal by more than a flat ~15s on a big file reproduced the exact same
+// 404 the drain signal was added to fix in the first place.
+const MIN_POST_READ_CLEANUP_DELAY_MS = 15_000
+const ASSUMED_MIN_FLUSH_THROUGHPUT_BYTES_PER_SEC = 4 * 1024 * 1024 // 4 MB/s
+const POST_READ_CLEANUP_SAFETY_FACTOR = 3
+
+function postReadCleanupDelayMs (fileLength: number): number {
+  const estimated = (fileLength / ASSUMED_MIN_FLUSH_THROUGHPUT_BYTES_PER_SEC) * 1000 * POST_READ_CLEANUP_SAFETY_FACTOR
+  return Math.max(MIN_POST_READ_CLEANUP_DELAY_MS, estimated)
+}
+
 // Safety-net fallback only, for when the drain signal never fires at all
 // (an error mid-stream, an abandoned tab, or some other genuine failure) —
 // NOT a bound on how long a legitimate save can take. Every chunk of a
@@ -633,7 +649,7 @@ export class DownloadManager {
     // completion once decryption sat in the middle of this pipe.
     transferDrainCallbacks.set(torrent.infoHash, () => {
       transferDrainCallbacks.delete(torrent.infoHash)
-      setTimeout(cleanup, POST_READ_CLEANUP_DELAY_MS)
+      setTimeout(cleanup, postReadCleanupDelayMs(torrent.length))
     })
     safetyNet = setTimeout(cleanup, pendingCleanupSafetyNetMs(torrent.length))
   }
