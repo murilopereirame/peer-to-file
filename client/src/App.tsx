@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiContext } from './context/ApiContext'
 import { ToastProvider } from './context/ToastContext'
+import { UploadsProvider } from './context/UploadsContext'
+import { useTheme } from './context/ThemeContext'
 import { HttpError, errMessage } from './lib/format'
 import { useDownloadManager, useDownloads } from './hooks/useDownloads'
 import { SetupScreen } from './components/SetupScreen'
 import { LoginScreen } from './components/LoginScreen'
-import { FileBrowser } from './components/FileBrowser'
-import { DownloadsPanel } from './components/DownloadsPanel'
-import { HistoryPanel } from './components/HistoryPanel'
-import { LogsPanel } from './components/LogsPanel'
+import { BrowserApp } from './components/BrowserApp'
 
 // The client is always served by the same origin as the API it talks to, so
 // there's nothing for a user to type in — see the "Managing files"/CORS
@@ -17,7 +16,6 @@ import { LogsPanel } from './components/LogsPanel'
 const API_BASE = `${location.protocol}//${location.host}`
 
 type View = 'loading' | 'setup' | 'login' | 'browser'
-type Subview = 'browser' | 'logs'
 
 interface AuthInfo {
   required: boolean
@@ -25,10 +23,20 @@ interface AuthInfo {
   authenticated: boolean
 }
 
+function ThemeToggle (): React.JSX.Element {
+  const { override, setOverride } = useTheme()
+  return (
+    <div className="theme-toggle">
+      <button type="button" className={override === null ? 'active' : ''} onClick={() => setOverride(null)}>System</button>
+      <button type="button" className={override === 'light' ? 'active' : ''} onClick={() => setOverride('light')}>Light</button>
+      <button type="button" className={override === 'dark' ? 'active' : ''} onClick={() => setOverride('dark')}>Dark</button>
+    </div>
+  )
+}
+
 export function App (): React.JSX.Element {
   const [status, setStatusState] = useState<{ msg: string, kind: '' | 'ok' | 'error' }>({ msg: '', kind: '' })
   const [view, setView] = useState<View>('loading')
-  const [subview, setSubview] = useState<Subview>('browser')
   const [authed, setAuthed] = useState(false)
 
   const setStatus = useCallback((msg: string, kind: '' | 'ok' | 'error' = '') => {
@@ -95,66 +103,55 @@ export function App (): React.JSX.Element {
   const handleAuthenticated = useCallback(() => {
     setAuthed(true)
     setView('browser')
-    setSubview('browser')
   }, [])
 
   const handleLogout = useCallback(() => {
     void (async () => {
       try { await apiFetch('/api/logout', { method: 'POST' }) } catch { /* session gone anyway */ }
       setView('login')
-      setSubview('browser')
     })()
   }, [apiFetch])
 
   return (
     <ApiContext.Provider value={{ apiBase: API_BASE, apiFetch }}>
       <ToastProvider>
-        <div className="app-shell">
-          <header className="app-header">
-            <div className="header-row">
-              <div className="brand">
-                <img src="/icon.png" className="logo" alt="P2File" />
-                <div>
-                  <h1>P2File</h1>
-                  <span className="tagline">self-hosted P2P file browser</span>
+        <UploadsProvider>
+          <div className="app-shell">
+            <header className="app-header">
+              <div className="header-row">
+                <div className="brand">
+                  <img src="/icon.png" className="logo" alt="P2File" />
+                  <div>
+                    <h1>P2File</h1>
+                    <span className="tagline">self-hosted P2P file browser</span>
+                  </div>
+                </div>
+                <div className="header-actions">
+                  <ThemeToggle />
+                  {view === 'browser' && authed && <button id="logout" type="button" onClick={handleLogout}>Log out</button>}
                 </div>
               </div>
-              {view === 'browser' && (
-                <div className="header-actions">
-                  {subview === 'browser'
-                    ? <button id="logs-link" type="button" className="link-like" onClick={() => setSubview('logs')}>View logs</button>
-                    : <button id="back-link" type="button" className="link-like" onClick={() => setSubview('browser')}>&larr; back to browser</button>}
-                  {authed && <button id="logout" type="button" onClick={handleLogout}>Log out</button>}
+              {status.msg && (
+                <div id="conn-status" className={`status ${status.kind}`}>
+                  {status.msg}
+                  {status.kind === 'error' && (
+                    <button type="button" onClick={() => { void checkSession() }}>retry</button>
+                  )}
                 </div>
               )}
-            </div>
-            {status.msg && (
-              <div id="conn-status" className={`status ${status.kind}`}>
-                {status.msg}
-                {status.kind === 'error' && (
-                  <button type="button" onClick={() => { void checkSession() }}>retry</button>
-                )}
-              </div>
-            )}
-          </header>
+            </header>
 
-          <main>
-            {view === 'setup' && <SetupScreen onDone={handleAuthenticated} />}
-            {view === 'login' && <LoginScreen onDone={handleAuthenticated} />}
-            {view === 'browser' && subview === 'browser' && (
-              <>
-                <FileBrowser manager={manager} />
-                <DownloadsPanel entries={downloads} manager={manager} />
-                <HistoryPanel refreshSignal={doneCount} />
-              </>
-            )}
-            {view === 'browser' && subview === 'logs' && <LogsPanel />}
-          </main>
+            <main>
+              {view === 'setup' && <SetupScreen onDone={handleAuthenticated} />}
+              {view === 'login' && <LoginScreen onDone={handleAuthenticated} />}
+              {view === 'browser' && <BrowserApp manager={manager} downloads={downloads} doneCount={doneCount} />}
+            </main>
 
-          <footer>
-            <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a></p>
-          </footer>
-        </div>
+            <footer>
+              <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a></p>
+            </footer>
+          </div>
+        </UploadsProvider>
       </ToastProvider>
     </ApiContext.Provider>
   )

@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { errMessage, formatBytes, formatDateTime, joinPath, parentPath, type DirEntry, type Listing } from '@p2f/shared'
+import {
+  errMessage, formatBytes, formatDateTime, joinPath, parentPath, requestNotificationPermission,
+  type DirEntry, type Listing
+} from '@p2f/shared'
 import { useApp, withUnauthorizedRetry } from '../context/AppContext'
 import { useDownloads } from '../context/DownloadsContext'
 import { useUploads } from '../context/UploadsContext'
@@ -46,6 +49,34 @@ function RenameModal ({ entry, onCancel, onConfirm }: { entry: DirEntry | null, 
           <div className="btn-row">
             <Button variant="secondary" onClick={onCancel}>Cancel</Button>
             <Button onClick={() => { void confirm() }} loading={busy}>Save</Button>
+          </div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function NewFolderModal ({ open, onCancel, onConfirm }: { open: boolean, onCancel: () => void, onConfirm: (name: string) => Promise<void> }): React.JSX.Element | null {
+  const [value, setValue] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { if (open) { setValue(''); setError('') } }, [open])
+  if (!open) return null
+  const confirm = async (): Promise<void> => {
+    if (!value.trim()) return
+    setBusy(true)
+    try { await onConfirm(value.trim()) } catch (err) { setError(errMessage(err)) } finally { setBusy(false) }
+  }
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <Card style={{ width: 380 }}>
+        <div onClick={e => e.stopPropagation()}>
+          <Title>New folder</Title>
+          <Input value={value} onChange={e => setValue(e.target.value)} autoFocus onKeyDown={e => { if (e.key === 'Enter') void confirm() }} placeholder="folder name" />
+          <ErrorText>{error}</ErrorText>
+          <div className="btn-row">
+            <Button variant="secondary" onClick={onCancel}>Cancel</Button>
+            <Button onClick={() => { void confirm() }} loading={busy}>Create</Button>
           </div>
         </div>
       </Card>
@@ -143,6 +174,7 @@ export function BrowserScreen (): React.JSX.Element {
   const [renaming, setRenaming] = useState<DirEntry | null>(null)
   const [moving, setMoving] = useState<DirEntry | null>(null)
   const [deleting, setDeleting] = useState<DirEntry | null>(null)
+  const [creatingFolder, setCreatingFolder] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Per-path listing cache so revisiting a folder (breadcrumb, "../") paints
   // instantly from the last-known listing while a background refetch keeps
@@ -169,10 +201,19 @@ export function BrowserScreen (): React.JSX.Element {
 
   useEffect(() => { void load('') }, [load])
 
+  // Keeps the currently-viewed folder reasonably fresh without the user
+  // having to navigate away and back — cache-first load() never blanks the
+  // UI, so this is a silent background refresh, not a visible reload.
+  useEffect(() => {
+    const id = setInterval(() => { void load(path) }, 30_000)
+    return () => clearInterval(id)
+  }, [path, load])
+
   const entries = listing?.entries ?? []
 
   const onFilesPicked = (files: FileList | null): void => {
     if (!files) return
+    requestNotificationPermission()
     for (const file of files) {
       notify(`Uploading "${file.name}"…`)
       uploads.start(path, file, () => { void load(path) })
@@ -184,6 +225,8 @@ export function BrowserScreen (): React.JSX.Element {
       <Title>Browse</Title>
       <div className="browser-toolbar">
         <Breadcrumbs path={path} onNavigate={p => { void load(p) }} />
+        <Button variant="secondary" onClick={() => setCreatingFolder(true)}>New folder</Button>
+        <Button variant="secondary" onClick={() => { void load(path) }}>Refresh</Button>
         <Button onClick={() => fileInputRef.current?.click()}>Upload files</Button>
         <input ref={fileInputRef} type="file" multiple hidden onChange={e => { onFilesPicked(e.target.files); e.target.value = '' }} />
       </div>
@@ -214,7 +257,11 @@ export function BrowserScreen (): React.JSX.Element {
                   {entry.type === 'file' && (
                     <button
                       className="link-btn"
-                      onClick={() => { downloads.start(joinPath(path, entry.name), entry.name); notify(`Added "${entry.name}" to the download queue`) }}
+                      onClick={() => {
+                        requestNotificationPermission()
+                        downloads.start(joinPath(path, entry.name), entry.name)
+                        notify(`Added "${entry.name}" to the download queue`)
+                      }}
                     >
                       Download
                     </button>
@@ -239,6 +286,17 @@ export function BrowserScreen (): React.JSX.Element {
         </table>
       </Card>
 
+      <NewFolderModal
+        open={creatingFolder}
+        onCancel={() => setCreatingFolder(false)}
+        onConfirm={async (name) => {
+          if (!app.client) return
+          await withUnauthorizedRetry(app, () => app.client!.mkdir(joinPath(path, name)))
+          setCreatingFolder(false)
+          notify(`Created folder "${name}"`)
+          await load(path)
+        }}
+      />
       <RenameModal
         entry={renaming}
         onCancel={() => setRenaming(null)}

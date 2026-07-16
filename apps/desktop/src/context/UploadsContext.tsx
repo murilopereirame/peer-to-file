@@ -1,7 +1,8 @@
 import React, { createContext, useCallback, useContext, useState } from 'react'
-import { encryptFileForUpload, errMessage, establishKeyWrap, getServerEcdhPublicKey } from '@p2f/shared'
+import { encryptFileForUpload, errMessage, establishKeyWrap, getServerEcdhPublicKey, joinPath, notifyOS } from '@p2f/shared'
 import { useApp } from './AppContext'
 import { ipcFetch } from '../lib/client'
+import { useToast } from './ToastContext'
 
 export interface UploadEntry {
   id: string
@@ -26,6 +27,7 @@ export function useUploads (): Ctx {
 
 export function UploadsProvider ({ children }: { children: React.ReactNode }): React.JSX.Element {
   const app = useApp()
+  const notify = useToast()
   const [uploads, setUploads] = useState<UploadEntry[]>([])
 
   const patch = useCallback((id: string, fields: Partial<UploadEntry>) => {
@@ -44,6 +46,7 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
     const client = app.client
     if (!client) return
     const id = `${destDir}/${file.name}#${Date.now()}`
+    const startedAt = Date.now()
     setUploads(prev => [{ id, name: file.name, status: 'running' }, ...prev])
     void (async () => {
       const serverPublicKey = await getServerEcdhPublicKey(async () => client.info())
@@ -56,12 +59,18 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
         body: await body.arrayBuffer()
       }))
       .then(res => {
-        if (res.ok) patch(id, { status: 'done' })
-        else patch(id, { status: 'error', error: `server rejected the upload (HTTP ${res.status})` })
+        if (res.ok) {
+          patch(id, { status: 'done' })
+          void client.uploadHistoryRecord(joinPath(destDir, file.name), file.name, file.size, Date.now() - startedAt)
+          notify(`"${file.name}" finished uploading`)
+          notifyOS('Upload complete', file.name)
+        } else {
+          patch(id, { status: 'error', error: `server rejected the upload (HTTP ${res.status})` })
+        }
       })
       .catch(err => { patch(id, { status: 'error', error: errMessage(err) }) })
       .finally(() => { onSettled?.() })
-  }, [app, patch])
+  }, [app, patch, notify])
 
   const remove = useCallback((id: string) => { setUploads(prev => prev.filter(u => u.id !== id)) }, [])
 

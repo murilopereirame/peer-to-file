@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { requestNotificationPermission } from '@p2f/shared'
 import { useApi } from '../context/ApiContext'
 import { errMessage, formatBytes, HttpError } from '../lib/format'
 import type { DownloadManager } from '../lib/downloadManager'
-import { useUploads } from '../hooks/useUploads'
+import { useUploads } from '../context/UploadsContext'
 import { useToast } from '../context/ToastContext'
-import { UploadPanel } from './UploadPanel'
 import { MoveModal } from './MoveModal'
+import { NewFolderModal } from './NewFolderModal'
 
 interface DirEntry {
   name: string
@@ -64,23 +65,32 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
 
   useEffect(() => { load('') }, [load])
 
-  // Stable identity (needed so useUploads doesn't treat onUploaded as a new
-  // callback on every render) that still always refreshes whatever folder
-  // is currently showing — reads it from a ref rather than taking `path` as
-  // a dependency, which would defeat the stability.
+  // Keeps the currently-viewed folder reasonably fresh without the user
+  // having to navigate away and back — cache-first load() never blanks the
+  // UI, so this is a silent background refresh, not a visible reload.
+  useEffect(() => {
+    const id = setInterval(() => { load(path) }, 30_000)
+    return () => clearInterval(id)
+  }, [path, load])
+
+  // Stable identity that still always refreshes whatever folder is currently
+  // showing — reads it from a ref rather than taking `path` as a dependency,
+  // which would defeat the stability.
   const refresh = useCallback((): void => { load(pathRef.current) }, [load])
-  const { uploads, upload, dismiss } = useUploads(refresh)
+  const { start } = useUploads()
 
   const uploadFiles = (files: FileList | File[]): void => {
+    requestNotificationPermission()
     for (const file of files) {
       notify(`Uploading "${file.name}"…`)
-      upload(file, pathRef.current)
+      start(pathRef.current, file, refresh)
     }
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const dragDepth = useRef(0)
+  const [creatingFolder, setCreatingFolder] = useState(false)
 
   const onDragEnter = (e: DragEvent): void => {
     e.preventDefault()
@@ -104,64 +114,71 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
 
   return (
     <>
-      <section
-        id="browser" className={`card${dragging ? ' drag-active' : ''}`}
-        onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
-      >
-        <div className="browser-toolbar">
-          <nav id="breadcrumb" aria-label="path">
-            <button type="button" onClick={() => load('')}>&#8962; root</button>
-            {segments.map((segment, i) => {
-              const isLast = i === segments.length - 1
-              return (
-                <span key={i} style={{ display: 'contents' }}>
-                  <span className="sep">/</span>
-                  {isLast
-                    ? <span className="current">{segment}</span>
-                    : <button type="button" onClick={() => load(segments.slice(0, i + 1).join('/'))}>{segment}</button>}
-                </span>
-              )
-            })}
-          </nav>
-          <button type="button" onClick={() => fileInputRef.current?.click()}>Upload</button>
-          <input
-            ref={fileInputRef} type="file" multiple hidden
-            onChange={(e: ChangeEvent<HTMLInputElement>) => {
-              if (e.target.files) uploadFiles(e.target.files)
-              e.target.value = ''
-            }}
+    <section
+      id="browser" className={`card${dragging ? ' drag-active' : ''}`}
+      onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
+    >
+      <div className="browser-toolbar">
+        <nav id="breadcrumb" aria-label="path">
+          <button type="button" onClick={() => load('')}>&#8962; root</button>
+          {segments.map((segment, i) => {
+            const isLast = i === segments.length - 1
+            return (
+              <span key={i} style={{ display: 'contents' }}>
+                <span className="sep">/</span>
+                {isLast
+                  ? <span className="current">{segment}</span>
+                  : <button type="button" onClick={() => load(segments.slice(0, i + 1).join('/'))}>{segment}</button>}
+              </span>
+            )
+          })}
+        </nav>
+        <button type="button" onClick={() => setCreatingFolder(true)}>New folder</button>
+        <button type="button" onClick={() => load(path)}>Refresh</button>
+        <button type="button" onClick={() => fileInputRef.current?.click()}>Upload</button>
+        <input
+          ref={fileInputRef} type="file" multiple hidden
+          onChange={(e: ChangeEvent<HTMLInputElement>) => {
+            if (e.target.files) uploadFiles(e.target.files)
+            e.target.value = ''
+          }}
+        />
+      </div>
+
+      {dragging && <div className="drop-hint">drop files to upload to {path === '' ? 'root' : path}</div>}
+
+      <ul id="listing">
+        {path !== '' && (
+          <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
+            <span className="entry-icon">⬆️</span>
+            <span className="entry-name">../</span>
+          </li>
+        )}
+        {loading && <li className="empty loading">loading…</li>}
+        {!loading && error && (
+          <li className="empty error">
+            failed to load folder: {error}{' '}
+            <button type="button" onClick={() => load(path)}>retry</button>
+          </li>
+        )}
+        {!loading && !error && listing?.entries.length === 0 && (
+          <li className="empty">empty folder</li>
+        )}
+        {!loading && !error && listing?.entries.map(entry => (
+          <ListingRow
+            key={entry.name} entry={entry} path={path}
+            onOpenDir={load} onChanged={refresh} manager={manager} apiFetch={apiFetch}
           />
-        </div>
-
-        {dragging && <div className="drop-hint">drop files to upload to {path === '' ? 'root' : path}</div>}
-
-        <ul id="listing">
-          {path !== '' && (
-            <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
-              <span className="entry-icon">⬆️</span>
-              <span className="entry-name">../</span>
-            </li>
-          )}
-          {loading && <li className="empty loading">loading…</li>}
-          {!loading && error && (
-            <li className="empty error">
-              failed to load folder: {error}{' '}
-              <button type="button" onClick={() => load(path)}>retry</button>
-            </li>
-          )}
-          {!loading && !error && listing?.entries.length === 0 && (
-            <li className="empty">empty folder</li>
-          )}
-          {!loading && !error && listing?.entries.map(entry => (
-            <ListingRow
-              key={entry.name} entry={entry} path={path}
-              onOpenDir={load} onChanged={refresh} manager={manager} apiFetch={apiFetch}
-            />
-          ))}
-        </ul>
-      </section>
-
-      <UploadPanel uploads={uploads} onDismiss={dismiss} />
+        ))}
+      </ul>
+    </section>
+    {creatingFolder && (
+      <NewFolderModal
+        path={path}
+        onClose={() => setCreatingFolder(false)}
+        onCreated={(name) => { setCreatingFolder(false); notify(`Created folder "${name}"`); refresh() }}
+      />
+    )}
     </>
   )
 }

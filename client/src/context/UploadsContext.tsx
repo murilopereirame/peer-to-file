@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useApi } from '../context/ApiContext'
-import { encryptFileForUpload, establishKeyWrap, getServerEcdhPublicKey } from '@p2f/shared'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { encryptFileForUpload, establishKeyWrap, getServerEcdhPublicKey, joinPath, notifyOS } from '@p2f/shared'
+import { useApi } from './ApiContext'
+import { useToast } from './ToastContext'
 
 export type UploadStatus = 'uploading' | 'done' | 'error'
 
@@ -12,17 +13,30 @@ export interface UploadEntry {
   message?: string
 }
 
+interface Ctx {
+  uploads: UploadEntry[]
+  start: (destDir: string, file: File, onSettled?: () => void) => void
+  dismiss: (id: string) => void
+}
+
+const UploadsContext = createContext<Ctx | null>(null)
+
+export function useUploads (): Ctx {
+  const ctx = useContext(UploadsContext)
+  if (!ctx) throw new Error('useUploads must be used within an UploadsProvider')
+  return ctx
+}
+
 /**
  * Uploads are short-lived and don't need to survive a reload (unlike
  * downloads), so this is plain component state driven by XHR upload
- * progress events — fetch() has no upload-progress API.
+ * progress events — fetch() has no upload-progress API. Held in a Provider
+ * (rather than a plain hook instantiated per call site) so the Transfers
+ * tab and the file browser's upload trigger see the same in-flight queue.
  */
-export function useUploads (onUploaded: () => void): {
-  uploads: UploadEntry[]
-  upload: (file: File, destPath: string) => void
-  dismiss: (id: string) => void
-} {
+export function UploadsProvider ({ children }: { children: React.ReactNode }): React.JSX.Element {
   const { apiBase, apiFetch } = useApi()
+  const notify = useToast()
   const [uploads, setUploads] = useState<UploadEntry[]>([])
   const inFlight = useRef(new Map<string, XMLHttpRequest>())
 
@@ -38,9 +52,10 @@ export function useUploads (onUploaded: () => void): {
     setUploads(list => list.map(u => (u.id === id ? { ...u, ...patch } : u)))
   }, [])
 
-  const upload = useCallback((file: File, destPath: string) => {
+  const start = useCallback((destDir: string, file: File, onSettled?: () => void) => {
     if (!apiBase) return
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const startedAt = Date.now()
     setUploads(list => [...list, { id, name: file.name, progress: 0, status: 'uploading' }])
 
     // Encrypted client-side (AES-256-CTR, key/IV generated per upload, then
@@ -55,7 +70,7 @@ export function useUploads (onUploaded: () => void): {
       const keyWrap = await establishKeyWrap(serverPublicKey)
       return encryptFileForUpload(file, keyWrap)
     })().then(({ body, headers }) => {
-      const url = `${apiBase}/api/upload?path=${encodeURIComponent(destPath)}&name=${encodeURIComponent(file.name)}`
+      const url = `${apiBase}/api/upload?path=${encodeURIComponent(destDir)}&name=${encodeURIComponent(file.name)}`
       const xhr = new XMLHttpRequest()
       inFlight.current.set(id, xhr)
       xhr.open('POST', url)
@@ -68,7 +83,15 @@ export function useUploads (onUploaded: () => void): {
       xhr.addEventListener('load', () => {
         if (xhr.status >= 200 && xhr.status < 300) {
           patch(id, { progress: 1, status: 'done' })
-          onUploaded()
+          void apiFetch('/api/uploads/history', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              path: joinPath(destDir, file.name), name: file.name, length: file.size, durationMs: Date.now() - startedAt
+            })
+          })
+          notify(`"${file.name}" finished uploading`)
+          notifyOS('Upload complete', file.name)
         } else {
           let message = `HTTP ${xhr.status}`
           try {
@@ -79,16 +102,17 @@ export function useUploads (onUploaded: () => void): {
         }
       })
       xhr.addEventListener('error', () => patch(id, { status: 'error', message: 'network error' }))
-      xhr.addEventListener('loadend', () => { inFlight.current.delete(id) })
+      xhr.addEventListener('loadend', () => { inFlight.current.delete(id); onSettled?.() })
       xhr.send(body)
     }, err => {
       patch(id, { status: 'error', message: err instanceof Error ? err.message : 'encryption failed' })
+      onSettled?.()
     })
-  }, [apiBase, apiFetch, patch, onUploaded])
+  }, [apiBase, apiFetch, patch, notify])
 
   const dismiss = useCallback((id: string) => {
     setUploads(list => list.filter(u => u.id !== id))
   }, [])
 
-  return { uploads, upload, dismiss }
+  return <UploadsContext.Provider value={{ uploads, start, dismiss }}>{children}</UploadsContext.Provider>
 }

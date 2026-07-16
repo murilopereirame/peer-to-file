@@ -227,6 +227,21 @@ export async function moveEntry (
   return { fromAbs, fromRel: path.relative(root, fromAbs), toAbs, toRel: path.relative(root, toAbs) }
 }
 
+/** Creates a new, empty directory inside the root. Refuses to overwrite an existing entry. */
+export async function createFolder (root: string, relPath: unknown): Promise<{ abs: string, rel: string }> {
+  const abs = await resolveNewPathInsideRoot(root, relPath)
+  const exists = await fs.lstat(abs).then(() => true, () => false)
+  if (exists) {
+    throw new BrowseError(409, 'a file or folder already exists there')
+  }
+  try {
+    await fs.mkdir(abs)
+  } catch (err) {
+    throwIfPermissionError(err)
+  }
+  return { abs, rel: path.relative(root, abs) }
+}
+
 /**
  * List a directory inside the root. Symlinks pointing outside the root,
  * broken symlinks and special files (sockets, devices, ...) are omitted.

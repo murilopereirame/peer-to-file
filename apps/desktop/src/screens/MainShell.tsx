@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { notifyOS } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
 import { DownloadsProvider, useDownloads } from '../context/DownloadsContext'
 import { UploadsProvider } from '../context/UploadsContext'
-import { ToastProvider } from '../context/ToastContext'
+import { ToastProvider, useToast } from '../context/ToastContext'
 import { ConnectionBadge } from '../components/ConnectionBadge'
 import { BrowserScreen } from './BrowserScreen'
 import { DownloadsScreen } from './DownloadsScreen'
@@ -34,8 +35,30 @@ function TabBar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => void
   )
 }
 
+/** Fires a toast + OS notification exactly once per download the moment it finishes, regardless of which tab is active. */
+function useDownloadCompletionNotifier (): void {
+  const { downloads } = useDownloads()
+  const notify = useToast()
+  const notifiedRef = useRef(new Set<string>())
+
+  useEffect(() => {
+    const current = new Set(downloads.map(d => d.path))
+    for (const seen of notifiedRef.current) {
+      if (!current.has(seen)) notifiedRef.current.delete(seen)
+    }
+    for (const d of downloads) {
+      if (d.status === 'done' && !notifiedRef.current.has(d.path)) {
+        notifiedRef.current.add(d.path)
+        notify(`"${d.name}" finished downloading`)
+        notifyOS('Download complete', d.name)
+      }
+    }
+  }, [downloads, notify])
+}
+
 function Shell (): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('browse')
+  useDownloadCompletionNotifier()
   return (
     <div className="app-shell">
       <header className="app-header">

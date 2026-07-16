@@ -1,4 +1,4 @@
-import type { UploadEntry } from '../hooks/useUploads'
+import type { UploadEntry } from '../context/UploadsContext'
 
 export function UploadPanel ({
   uploads, onDismiss

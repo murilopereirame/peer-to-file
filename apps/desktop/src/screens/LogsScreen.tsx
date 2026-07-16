@@ -55,7 +55,10 @@ export function LogsScreen (): React.JSX.Element {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <Title>Activity logs</Title>
-        <Button variant="secondary" onClick={() => { void load() }}>Refresh</Button>
+        <div className="btn-row" style={{ marginTop: 0 }}>
+          <Button variant="secondary" onClick={() => { void load() }}>Refresh</Button>
+          {visible.length > 0 && <Button variant="secondary" onClick={onExport}>Export logs</Button>}
+        </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 13 }}>
         <label htmlFor="kind-filter" className="muted">kind</label>
@@ -73,7 +76,6 @@ export function LogsScreen (): React.JSX.Element {
           <div style={{ fontSize: 13 }}>{e.message}</div>
         </Card>
       ))}
-      {visible.length > 0 && <Button variant="secondary" onClick={onExport}>Export logs</Button>}
     </div>
   )
 }
