@@ -50,6 +50,13 @@ export class OpfsChunkStore {
   private readonly lastChunkIndex: number
   private readonly lastChunkLength: number
   private readonly key: string
+  // Drain mode: once the final file is being assembled from the pieces (a
+  // strictly sequential, single-pass read), each piece is deleted as soon as
+  // the read moves past it — see startDraining(). Off during the download
+  // itself, where pieces must persist so a refreshed tab can resume.
+  private draining = false
+  // Pieces with index < reapedUpTo have already been deleted while draining.
+  private reapedUpTo = 0
 
   // Instances keyed by infoHash, so code elsewhere (downloadManager.ts) can
   // find the store WebTorrent created internally for a given torrent — it
@@ -119,8 +126,31 @@ export class OpfsChunkStore {
       expectedLength: this.expectedLength(index)
     }).then(data => {
       done(null, data as Uint8Array)
+      // Serve first, then free everything strictly before this piece: reaching
+      // piece N in a sequential file read means N-1 and earlier are done with
+      // and will never be re-read, so their disk space can be reclaimed now
+      // instead of at the end. The current piece is only reaped once a later
+      // one is requested, which keeps partial (offset/length) reads of the
+      // same piece safe. The final piece is left to destroy() (which the
+      // wholesale store teardown after a completed save handles anyway).
+      if (this.draining && index > this.reapedUpTo) {
+        for (let i = this.reapedUpTo; i < index; i++) {
+          callWorker({ op: 'removeChunk', key: this.key, index: i }).catch(() => {})
+        }
+        this.reapedUpTo = index
+      }
     }, (err: Error) => done(err))
   }
+
+  /**
+   * Switch the store into drain mode for the final-file assembly. From here
+   * on, each piece is deleted as the sequential save-read advances past it, so
+   * peak disk use stays near 1x the file size (the shrinking piece store plus
+   * the growing output) rather than the ~2x a hold-everything-until-done save
+   * needs. One-way: a download whose pieces are being drained is being turned
+   * into the saved file and won't be resumed from OPFS afterward.
+   */
+  startDraining (): void { this.draining = true }
 
   close (cb: StoreCb): void { cb(null) }
 

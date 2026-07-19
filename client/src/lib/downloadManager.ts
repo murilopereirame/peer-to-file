@@ -553,6 +553,17 @@ export class DownloadManager {
         console.debug('[p2f] save tier 1: File System Access API')
         const handle = await window.showSaveFilePicker({ suggestedName: file.name })
         const writable = await handle.createWritable()
+        // Drain the OPFS piece store as this sequential read walks through it,
+        // so each piece is freed the moment the save moves past it. Without
+        // this the whole piece store lives until the save finishes and is only
+        // then destroyed wholesale, so completing a save needs room for the
+        // full download twice over (every stored piece plus the full output
+        // file). Draining keeps the peak near 1x instead. Only the File System
+        // Access tier does this: it has a real completion promise (the pipeTo
+        // below) and controls its own write, whereas the service-worker tier
+        // has no JS-visible finish signal and must keep pieces re-readable for
+        // its whole grace period.
+        OpfsChunkStore.instances.get(torrent.infoHash)?.startDraining()
         await file.stream().pipeTo(writable)
         this.completeSave(torrent, entryPath, true)
       } else if (this.streamServer) {
@@ -577,6 +588,11 @@ export class DownloadManager {
       // The torrent (and its OPFS pieces) is left intact on failure — e.g.
       // the user cancelled a save-as dialog — so reloading the page picks
       // the already-complete download back up and offers to save it again.
+      // Note the File System Access tier drains pieces as it writes (see
+      // above), so a failure *after* the pipe started streaming may have
+      // already freed earlier pieces; the resume-from-OPFS fallback only fully
+      // applies when the save fails before that (e.g. the picker was
+      // dismissed), which is the common cancellation case.
       this.setEntry(entryPath, { status: 'error', message: `save failed: ${errMessage(err)}` })
     }
   }
