@@ -49,6 +49,7 @@ export interface P2FBridge {
   getSetting: <T>(key: string) => Promise<T | undefined>
   setSetting: (key: string, value: unknown) => Promise<void>
   deleteSetting: (key: string) => Promise<void>
+  setKeepAwake: (enabled: boolean) => Promise<void>
 }
 
 declare global {

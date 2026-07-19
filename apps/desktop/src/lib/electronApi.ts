@@ -40,6 +40,16 @@ export async function pickDownloadFolder (): Promise<string | null> {
   return await window.p2f.pickDownloadFolder()
 }
 
+// --- Keep-awake during transfers --------------------------------------------
+// The setting below is just the user's preference (off by default); whether
+// the OS is actually being held awake right now is a separate, transient
+// call driven by whether a transfer is in flight — see the useKeepAwake
+// hook in MainShell.tsx, which decides when to call this.
+
+export async function setSystemKeepAwake (enabled: boolean): Promise<void> {
+  await window.p2f.setKeepAwake(enabled)
+}
+
 async function syncDownloadDirToMain (path: string | null): Promise<void> {
   await window.p2f.setDownloadDir(path)
 }
@@ -113,6 +123,16 @@ export const settings = {
   },
   async setAskBeforeSave (value: boolean): Promise<void> {
     await window.p2f.setSetting('askBeforeSave', value)
+  },
+
+  /** false (default): never hold the system awake. true: while a download
+   * or upload is actively running, block system sleep (see
+   * setSystemKeepAwake / useKeepAwake). */
+  async getKeepAwakeDuringTransfers (): Promise<boolean> {
+    return (await window.p2f.getSetting<boolean>('keepAwakeDuringTransfers')) ?? false
+  },
+  async setKeepAwakeDuringTransfers (value: boolean): Promise<void> {
+    await window.p2f.setSetting('keepAwakeDuringTransfers', value)
   },
 
   async clearServerScoped (): Promise<void> {

@@ -34,7 +34,9 @@ const api = {
 
   getSetting: <T, >(key: string): Promise<T | undefined> => ipcRenderer.invoke('settings:get', key),
   setSetting: (key: string, value: unknown): Promise<void> => ipcRenderer.invoke('settings:set', key, value),
-  deleteSetting: (key: string): Promise<void> => ipcRenderer.invoke('settings:delete', key)
+  deleteSetting: (key: string): Promise<void> => ipcRenderer.invoke('settings:delete', key),
+
+  setKeepAwake: (enabled: boolean): Promise<void> => ipcRenderer.invoke('power:setKeepAwake', enabled)
 }
 
 export type P2FBridge = typeof api

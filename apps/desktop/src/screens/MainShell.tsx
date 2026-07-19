@@ -2,8 +2,9 @@ import React, { useEffect, useRef, useState } from 'react'
 import { notifyOS } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
 import { DownloadsProvider, useDownloads } from '../context/DownloadsContext'
-import { UploadsProvider } from '../context/UploadsContext'
+import { UploadsProvider, useUploads } from '../context/UploadsContext'
 import { ToastProvider, useToast } from '../context/ToastContext'
+import { setSystemKeepAwake } from '../lib/electronApi'
 import { ConnectionBadge } from '../components/ConnectionBadge'
 import { BrowserScreen } from './BrowserScreen'
 import { DownloadsScreen } from './DownloadsScreen'
@@ -56,9 +57,30 @@ function useDownloadCompletionNotifier (): void {
   }, [downloads, notify])
 }
 
+/** Holds the system awake (via Electron's powerSaveBlocker, see
+ * electron/main.cts) for as long as a download or upload is actually in
+ * flight — gated on the "keep awake during transfers" setting, which
+ * defaults to off. Releases the blocker the moment nothing's active rather
+ * than for the app's whole lifetime, so it never outlasts an idle app. */
+function useKeepAwake (): void {
+  const { keepAwakeDuringTransfers } = useApp()
+  const { downloads } = useDownloads()
+  const { uploads } = useUploads()
+
+  useEffect(() => {
+    if (!keepAwakeDuringTransfers) { void setSystemKeepAwake(false); return }
+    const active = downloads.some(d => d.status === 'preparing' || d.status === 'downloading' || d.status === 'saving') ||
+      uploads.some(u => u.status === 'running')
+    void setSystemKeepAwake(active)
+  }, [keepAwakeDuringTransfers, downloads, uploads])
+
+  useEffect(() => () => { void setSystemKeepAwake(false) }, [])
+}
+
 function Shell (): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('browse')
   useDownloadCompletionNotifier()
+  useKeepAwake()
   return (
     <div className="app-shell">
       <header className="app-header">

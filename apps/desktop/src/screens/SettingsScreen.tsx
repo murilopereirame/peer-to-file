@@ -82,6 +82,19 @@ export function SettingsScreen (): React.JSX.Element {
       </Card>
 
       <Card style={{ marginBottom: 14 }}>
+        <strong>Keep the machine awake during transfers</strong>
+        <Muted>Prevents the system from sleeping while a download or upload is running. Off by default.</Muted>
+        <div className="btn-row">
+          <Button variant={!app.keepAwakeDuringTransfers ? 'primary' : 'secondary'} onClick={() => { void app.setKeepAwakeDuringTransfersPref(false) }}>
+            Disabled
+          </Button>
+          <Button variant={app.keepAwakeDuringTransfers ? 'primary' : 'secondary'} onClick={() => { void app.setKeepAwakeDuringTransfersPref(true) }}>
+            Enabled
+          </Button>
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 14 }}>
         <strong>Appearance</strong>
         <div className="btn-row">
           {(['System', 'Light', 'Dark'] as const).map(opt => {

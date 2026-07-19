@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, protocol } from 'electron'
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync } from 'node:fs'
 import { extname, join } from 'node:path'
@@ -68,6 +68,19 @@ function uniqueSavePath (dir: string, filename: string): string {
   return candidate
 }
 
+// Backs the "keep the machine awake during transfers" setting (off by
+// default) — the renderer decides *when* to hold this (an active
+// download/upload) and calls power:setKeepAwake accordingly; this only
+// tracks the single blocker so repeated `true` calls don't leak blockers.
+let keepAwakeBlockerId: number | null = null
+
+function stopKeepAwake (): void {
+  if (keepAwakeBlockerId !== null) {
+    if (powerSaveBlocker.isStarted(keepAwakeBlockerId)) powerSaveBlocker.stop(keepAwakeBlockerId)
+    keepAwakeBlockerId = null
+  }
+}
+
 let mainWindow: BrowserWindow | null = null
 
 async function createWindow (): Promise<void> {
@@ -124,6 +137,7 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  stopKeepAwake()
   if (process.platform !== 'darwin') app.quit()
 })
 
@@ -155,6 +169,20 @@ ipcMain.handle('settings:set', (_e, key: string, value: unknown) => { settingsSt
 ipcMain.handle('settings:delete', (_e, key: string) => { settingsStore.delete(key) })
 
 ipcMain.handle('net:fetch', (_e, req: FetchRequest) => performFetch(req))
+
+// 'prevent-app-suspension' keeps the system from sleeping while transfers
+// are active without also forcing the display to stay on — starting an
+// already-started blocker is avoided so this stays idempotent under the
+// renderer's polling.
+ipcMain.handle('power:setKeepAwake', (_e, enabled: boolean) => {
+  if (enabled) {
+    if (keepAwakeBlockerId === null || !powerSaveBlocker.isStarted(keepAwakeBlockerId)) {
+      keepAwakeBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    }
+  } else {
+    stopKeepAwake()
+  }
+})
 
 // See the DownloadCompletedInfo/pendingDownloadQueue doc comment above —
 // call registerPendingDownload() and only *then* trigger the download, so
