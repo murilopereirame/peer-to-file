@@ -62,6 +62,17 @@ async function get (
   }
 }
 
+// Deletes a single stored piece, freeing its disk space immediately. Used to
+// drain the store piece-by-piece while assembling the final file (see
+// OpfsChunkStore.startDraining), rather than holding every piece until the
+// whole save finishes and only then destroying the store wholesale.
+async function removeChunk (key: string, index: number): Promise<void> {
+  const dir = await dirFor(key)
+  try {
+    await dir.removeEntry(String(index))
+  } catch { /* already gone — nothing to free */ }
+}
+
 async function destroy (key: string): Promise<void> {
   dirs.delete(key)
   try {
@@ -84,6 +95,10 @@ async function handle (req: OpfsWorkerRequest): Promise<void> {
       // the one every browser's postMessage has supported since transferable
       // objects existed at all — no reason to depend on the newer overload.
       postMessage({ id: req.id, ok: true, data } satisfies OpfsWorkerResponse, [data.buffer])
+    } else if (req.op === 'removeChunk') {
+      if (req.index === undefined) throw new Error('removeChunk: missing index')
+      await removeChunk(req.key, req.index)
+      postMessage({ id: req.id, ok: true } satisfies OpfsWorkerResponse)
     } else {
       await destroy(req.key)
       postMessage({ id: req.id, ok: true } satisfies OpfsWorkerResponse)
