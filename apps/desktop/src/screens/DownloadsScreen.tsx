@@ -22,6 +22,13 @@ function averageSpeed (entry: DownloadSnapshot): string {
   return `${formatBytes(entry.downloaded / (entry.elapsedMs / 1000))}/s`
 }
 
+function etaLabel (entry: DownloadSnapshot): string | null {
+  if (entry.status !== 'downloading' || entry.speedBytesPerSec <= 0 || entry.length <= 0) return null
+  const remaining = entry.length - entry.downloaded
+  if (remaining <= 0) return null
+  return `ETA ${formatDuration((remaining / entry.speedBytesPerSec) * 1000)}`
+}
+
 function checksumLabel (status: DownloadSnapshot['checksumStatus']): string {
   switch (status) {
     case 'ok': return '✓ verified against the server'
@@ -97,6 +104,7 @@ export function DownloadsScreen (): React.JSX.Element {
           <Muted>
             {statusLabel(d.status)} · {formatBytes(d.downloaded)}{d.length > 0 ? ` / ${formatBytes(d.length)}` : ''}
             {d.status === 'downloading' && d.numPeers > 0 ? ` · ${d.numPeers} peer${d.numPeers === 1 ? '' : 's'} · ${formatBytes(d.speedBytesPerSec)}/s` : ''}
+            {etaLabel(d) ? ` · ${etaLabel(d)}` : ''}
             {d.status === 'done' && d.checksumStatus === 'ok' ? ' · ✓ verified' : ''}
             {d.status === 'done' && d.checksumStatus === 'mismatch' ? ' · ⚠ checksum mismatch' : ''}
           </Muted>

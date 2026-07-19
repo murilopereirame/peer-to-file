@@ -15,6 +15,8 @@ export interface AppContextValue {
   scheme: ThemeMode
   downloadDir: string | null
   setDownloadDir: (dir: string | null) => Promise<void>
+  keepAwakeDuringTransfers: boolean
+  setKeepAwakeDuringTransfersPref: (value: boolean) => Promise<void>
   themeOverride: ThemeMode | null
   setThemeOverridePref: (mode: ThemeMode | null) => Promise<void>
   connectToServer: (url: string) => Promise<void>
@@ -54,6 +56,7 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
   const [username, setUsername] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [downloadDir, setDownloadDirState] = useState<string | null>(null)
+  const [keepAwakeDuringTransfers, setKeepAwakeDuringTransfersState] = useState(false)
   const [themeOverride, setThemeOverride] = useState<ThemeMode | null>(null)
   const system = useSystemScheme()
   const scheme: ThemeMode = themeOverride ?? system
@@ -103,11 +106,12 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
 
   useEffect(() => {
     void (async () => {
-      const [url, dir, override] = await Promise.all([
-        settings.getServerUrl(), settings.getDownloadDir(), settings.getThemeOverride()
+      const [url, dir, override, keepAwake] = await Promise.all([
+        settings.getServerUrl(), settings.getDownloadDir(), settings.getThemeOverride(), settings.getKeepAwakeDuringTransfers()
       ])
       setDownloadDirState(dir)
       setThemeOverride(override)
+      setKeepAwakeDuringTransfersState(keepAwake)
       if (!url) { setPhase('server'); return }
       const c = createClient(url)
       setClient(c)
@@ -186,6 +190,11 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     setDownloadDirState(dir)
   }, [])
 
+  const setKeepAwakeDuringTransfersPref = useCallback(async (value: boolean): Promise<void> => {
+    await settings.setKeepAwakeDuringTransfers(value)
+    setKeepAwakeDuringTransfersState(value)
+  }, [])
+
   const setThemeOverridePref = useCallback(async (mode: ThemeMode | null): Promise<void> => {
     await settings.setThemeOverride(mode)
     setThemeOverride(mode)
@@ -193,7 +202,8 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
 
   const value: AppContextValue = {
     phase, client, serverUrl, username, connected, colors, scheme,
-    downloadDir, setDownloadDir, themeOverride, setThemeOverridePref,
+    downloadDir, setDownloadDir, keepAwakeDuringTransfers, setKeepAwakeDuringTransfersPref,
+    themeOverride, setThemeOverridePref,
     connectToServer, changeServer, completeSetup, completeLogin, logout, retry, handleUnauthorized
   }
 
