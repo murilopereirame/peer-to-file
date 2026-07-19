@@ -233,17 +233,23 @@ export function BrowserScreen (): React.JSX.Element {
       <ErrorText>{error}</ErrorText>
       <Card>
         <table className="listing">
+          <colgroup>
+            <col style={{ width: 24 }} />
+            <col />
+            <col style={{ width: 90 }} />
+            <col style={{ width: 30 }} />
+          </colgroup>
           <tbody>
             {path !== '' && (
               <tr className="up" onClick={() => { void load(parentPath(path)) }}>
-                <td style={{ width: 24 }}>⬆️</td>
+                <td>⬆️</td>
                 <td colSpan={3}><Muted>../</Muted></td>
               </tr>
             )}
             {entries.length === 0 && <tr><td><Muted>This folder is empty.</Muted></td></tr>}
             {entries.map(entry => (
               <tr key={entry.name}>
-                <td style={{ width: 24 }}>{entry.type === 'dir' ? '📁' : '📄'}</td>
+                <td>{entry.type === 'dir' ? '📁' : '📄'}</td>
                 <td>
                   <a
                     style={{ cursor: entry.type === 'dir' ? 'pointer' : 'default', color: entry.type === 'dir' ? 'var(--color-primary)' : 'var(--color-text)' }}
@@ -253,7 +259,7 @@ export function BrowserScreen (): React.JSX.Element {
                   </a>
                   <div className="muted">{entry.type === 'file' ? `${formatBytes(entry.size)} · ` : ''}{formatDateTime(entry.mtime)}</div>
                 </td>
-                <td style={{ width: 90, textAlign: 'right' }}>
+                <td style={{ textAlign: 'right' }}>
                   {entry.type === 'file' && (
                     <button
                       className="link-btn"
@@ -267,7 +273,7 @@ export function BrowserScreen (): React.JSX.Element {
                     </button>
                   )}
                 </td>
-                <td style={{ width: 30, position: 'relative' }}>
+                <td style={{ position: 'relative' }}>
                   <button className="link-btn muted" onClick={() => setMenuFor(menuFor === entry.name ? null : entry.name)}>⋮</button>
                   {menuFor === entry.name && (
                     <div style={{

@@ -66,11 +66,13 @@ function Shell (): React.JSX.Element {
         <ConnectionBadge />
       </header>
       <main className="app-main">
-        {tab === 'browse' && <BrowserScreen />}
-        {tab === 'transfers' && <DownloadsScreen />}
-        {tab === 'history' && <HistoryScreen />}
-        {tab === 'logs' && <LogsScreen />}
-        {tab === 'settings' && <SettingsScreen />}
+        <div className="app-main-inner">
+          {tab === 'browse' && <BrowserScreen />}
+          {tab === 'transfers' && <DownloadsScreen />}
+          {tab === 'history' && <HistoryScreen />}
+          {tab === 'logs' && <LogsScreen />}
+          {tab === 'settings' && <SettingsScreen />}
+        </div>
       </main>
       <TabBar active={tab} onChange={setTab} />
     </div>
