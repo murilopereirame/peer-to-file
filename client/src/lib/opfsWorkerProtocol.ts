@@ -7,7 +7,7 @@
 
 export interface OpfsWorkerRequest {
   id: number
-  op: 'put' | 'get' | 'destroy'
+  op: 'put' | 'get' | 'destroy' | 'removeChunk'
   key: string
   index?: number
   buf?: Uint8Array
