@@ -3,34 +3,60 @@ import type { IncomingMessage } from 'node:http'
 import type { AuthDb, User } from './db.ts'
 
 export const SESSION_COOKIE = 'p2f_session'
-export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days, sliding
-export const TRANSFER_TOKEN_TTL_MS = 48 * 60 * 60 * 1000 // outlives long downloads
+export const REFRESH_COOKIE = 'p2f_refresh'
+export const REFRESH_PATH = '/api/refresh'
+// Short-lived access credential; the refresh token below renews it silently.
+export const ACCESS_TTL_MS = 48 * 60 * 60 * 1000 // 48 h, hard cap (not sliding)
+export const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+// Kept short so a token leaked from a URL/proxy log has a small window; clients
+// re-fetch /api/torrent (and thus re-mint) transparently on expiry.
+export const TRANSFER_TOKEN_TTL_MS = 6 * 60 * 60 * 1000
+
+export interface Session {
+  user: User
+  /** Raw access-session id (set as the p2f_session cookie). */
+  accessId: string
+  /** Raw refresh-token id (set as the p2f_refresh cookie). */
+  refreshId: string
+}
+
+export interface AuthResult {
+  user: User
+  /** True when the credential was an ambient session cookie (CSRF-relevant),
+   *  false for an explicit Authorization: Bearer token. */
+  viaCookie: boolean
+}
 
 /**
- * Three credential kinds, one trust decision:
+ * Authentication is always on. Three credential kinds, one trust decision:
  *
- *  - Session cookies (HttpOnly, SameSite=Lax) for the web client.
+ *  - Session cookies (HttpOnly, SameSite=Lax) for the web/desktop client,
+ *    renewed by a longer-lived, single-use, rotating refresh cookie scoped to
+ *    /api/refresh.
  *  - API tokens (`Authorization: Bearer p2f_...`) for scripts/cross-origin.
  *  - Stateless HMAC "transfer tokens" embedded in the webseed and tracker
  *    URLs handed out by /api/torrent. WebTorrent's fetch/WebSocket calls
  *    can't carry cookies reliably (cross-origin, or Node-internal seeder),
  *    so the URLs themselves must prove authorization. Raw-file tokens are
- *    bound to one path; tracker tokens only open the signaling channel.
+ *    bound to one path; tracker tokens are bound to one infohash.
  */
 export interface AuthService {
-  enabled: boolean
   /** True until the first user is created (first-run web setup). */
   needsSetup (): boolean
   /** Create the first (admin) user and sign them in. Throws once a user exists. */
-  setup (username: string, password: string): { user: User, sessionId: string }
+  setup (username: string, password: string): Session
   /** Resolve the requesting user from a session cookie or Bearer token. */
-  authenticate (req: IncomingMessage): User | null
-  login (username: string, password: string): { user: User, sessionId: string } | null
-  logout (sessionId: string): void
+  authenticate (req: IncomingMessage): AuthResult | null
+  login (username: string, password: string): Session | null
+  /** Rotate a refresh token into a fresh access+refresh pair. Null if invalid/expired. */
+  refresh (refreshId: string): Session | null
+  logout (accessId: string, refreshId: string): void
+  /** Invalidate every session and refresh token for a user (revoke-all). */
+  logoutAll (userId: number): void
   mintRawToken (relPath: string): string
   verifyRawToken (relPath: string, token: string): boolean
-  mintTrackerToken (ttlMs?: number): string
-  verifyTrackerToken (token: string): boolean
+  mintTrackerToken (infoHash: string, ttlMs?: number): string
+  verifyTrackerToken (infoHash: string, token: string): boolean
 }
 
 export function parseCookies (header: string | undefined): Record<string, string> {
@@ -64,60 +90,66 @@ function mintSignedToken (secret: Buffer, scope: string, ttlMs: number): string 
   return `${exp}.${sign(secret, `${scope}:${exp}`)}`
 }
 
-const disabledAuth: AuthService = {
-  enabled: false,
-  needsSetup: () => false,
-  setup: () => { throw new Error('authentication is disabled') },
-  authenticate: () => null,
-  login: () => null,
-  logout: () => {},
-  mintRawToken: () => '',
-  verifyRawToken: () => true,
-  mintTrackerToken: () => '',
-  verifyTrackerToken: () => true
-}
-
-export function createAuthService (db: AuthDb | null): AuthService {
-  if (!db) return disabledAuth
+export function createAuthService (db: AuthDb): AuthService {
   const secret = db.transferSecret()
 
-  return {
-    enabled: true,
+  const startSession = (user: User): Session => ({
+    user,
+    accessId: db.createSession(user.id, ACCESS_TTL_MS),
+    refreshId: db.createRefreshToken(user.id, REFRESH_TTL_MS)
+  })
 
+  return {
     needsSetup: () => db.userCount() === 0,
 
     setup (username, password) {
-      const user = db.setupFirstUser(username, password)
-      return { user, sessionId: db.createSession(user.id, SESSION_TTL_MS) }
+      return startSession(db.setupFirstUser(username, password))
     },
 
     authenticate (req) {
       const authz = req.headers.authorization
       if (authz?.startsWith('Bearer ')) {
-        return db.getTokenUser(authz.slice('Bearer '.length).trim())
+        const user = db.getTokenUser(authz.slice('Bearer '.length).trim())
+        return user ? { user, viaCookie: false } : null
       }
       const sessionId = parseCookies(req.headers.cookie)[SESSION_COOKIE]
-      if (sessionId) return db.getSessionUser(sessionId, SESSION_TTL_MS)
+      if (sessionId) {
+        // Access sessions are a hard 48 h cap — no sliding renewal; the
+        // refresh cookie is what extends a login past that.
+        const user = db.getSessionUser(sessionId)
+        return user ? { user, viaCookie: true } : null
+      }
       return null
     },
 
     login (username, password) {
       const user = db.verifyCredentials(username, password)
       if (!user) return null
-      return { user, sessionId: db.createSession(user.id, SESSION_TTL_MS) }
+      return startSession(user)
     },
 
-    logout (sessionId) {
-      db.deleteSession(sessionId)
+    refresh (refreshId) {
+      const user = db.consumeRefreshToken(refreshId)
+      if (!user) return null
+      return startSession(user)
+    },
+
+    logout (accessId, refreshId) {
+      if (accessId) db.deleteSession(accessId)
+      if (refreshId) db.deleteRefreshToken(refreshId)
+    },
+
+    logoutAll (userId) {
+      db.deleteAllUserSessions(userId)
     },
 
     mintRawToken: relPath =>
       mintSignedToken(secret, `raw:${relPath}`, TRANSFER_TOKEN_TTL_MS),
     verifyRawToken: (relPath, token) =>
       verifySignedToken(secret, `raw:${relPath}`, token),
-    mintTrackerToken: (ttlMs = TRANSFER_TOKEN_TTL_MS) =>
-      mintSignedToken(secret, 'tracker', ttlMs),
-    verifyTrackerToken: token =>
-      verifySignedToken(secret, 'tracker', token)
+    mintTrackerToken: (infoHash, ttlMs = TRANSFER_TOKEN_TTL_MS) =>
+      mintSignedToken(secret, `tracker:${infoHash}`, ttlMs),
+    verifyTrackerToken: (infoHash, token) =>
+      verifySignedToken(secret, `tracker:${infoHash}`, token)
   }
 }

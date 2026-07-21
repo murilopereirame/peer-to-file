@@ -1,5 +1,6 @@
 import http from 'node:http'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import TrackerServer from 'bittorrent-tracker/server'
@@ -49,6 +50,8 @@ export interface RunningServer {
   tracker: TrackerServer
   db: AuthDb
   activity: ActivityLog
+  /** One-time first-run setup token, or null if an admin account already exists. */
+  setupToken: string | null
   close (): Promise<void>
 }
 
@@ -60,37 +63,37 @@ export async function startServer (
   config: Config,
   log: Logger = consoleLogger
 ): Promise<RunningServer> {
-  // Always open, regardless of auth: download history (and any other future
-  // local state) needs somewhere to live even with P2F_AUTH=off, where it's
-  // just kept as a single shared, unscoped history instead of per-user.
-  // createAuthService still gets null when auth is off, so login/session
-  // behavior is unaffected — every endpoint stays open with no gate.
   const db = new AuthDb(config.dbPath)
   db.pruneExpiredSessions()
-  const auth = createAuthService(config.authEnabled ? db : null)
+  const auth = createAuthService(db)
   const activity = createActivityLog()
+
+  // First-run setup gate (F1a): while no account exists, /api/setup is only
+  // usable by a caller who presents this one-time token, logged below. Once an
+  // admin account exists the endpoint 409s regardless, so the token is moot.
+  const setupToken = db.userCount() === 0 ? crypto.randomBytes(24).toString('base64url') : null
 
   // The Node seeder announces to its own tracker over loopback (or the bind
   // address when it isn't a wildcard). Peer matching only needs both sides to
   // hit the same tracker instance — URLs don't have to be identical. Lazy:
-  // with auth on it goes through /tracker on the main port, whose final
-  // number is only known after listen (tests use port 0).
+  // it goes through the token-gated /tracker on the main port, whose final
+  // number is only known after listen (tests use port 0). The tracker token
+  // is bound to the specific infohash being announced (F3).
   const internalHost = (config.host === '0.0.0.0' || config.host === '::')
     ? '127.0.0.1'
     : config.host
   const seeder = await createSeeder({
-    announce: () => auth.enabled
-      ? [`ws://${bracketHost(internalHost)}:${config.port}/tracker?t=${encodeURIComponent(auth.mintTrackerToken())}`]
-      : [`ws://${bracketHost(internalHost)}:${config.trackerPort}`],
+    announce: infoHash =>
+      [`ws://${bracketHost(internalHost)}:${config.port}/tracker?ih=${infoHash}&t=${encodeURIComponent(auth.mintTrackerToken(infoHash))}`],
     log
   })
 
-  // With auth on, the standalone tracker port would be unauthenticated, so
-  // the tracker is only exposed via /tracker on the main HTTP server.
+  // The tracker is only ever exposed via the token-gated /tracker path on the
+  // main HTTP server — never as a standalone, unauthenticated port.
   const tracker = new TrackerServer({
     udp: false,
-    http: !config.authEnabled,
-    ws: !config.authEnabled,
+    http: false,
+    ws: false,
     stats: false
   })
   tracker.on('error', (err: Error) => log.error(`tracker: ${err.message}`))
@@ -105,20 +108,13 @@ export async function startServer (
       })
     })
   }
-  if (!config.authEnabled) {
-    await new Promise<void>(resolve => {
-      tracker.listen(config.trackerPort, config.host, resolve)
-    })
-    if (config.trackerPort === 0 && tracker.http) {
-      const addr = tracker.http.address()
-      if (addr && typeof addr === 'object') config.trackerPort = addr.port
-    }
-  }
-
-  const cipherCache = createCipherCache(config.cacheDir, db.cipherMasterSecret())
+  const cipherCache = createCipherCache(config.cacheDir, db.cipherMasterSecret(), {
+    maxBytes: config.cacheMaxBytes,
+    isPinned: cachePath => seeder.isSeeding(cachePath)
+  })
   const keyExchange = createKeyExchange(db.ecdhPrivateKey())
   const store = createTorrentStore(cipherCache)
-  const app = createApp({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version })
+  const app = createApp({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version, log, setupToken })
   const server = http.createServer(app)
 
   // Serve the tracker WebSocket on the main HTTP port too (at /tracker), so
@@ -127,7 +123,14 @@ export async function startServer (
   const trackerWss = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
-    clientTracking: false
+    clientTracking: false,
+    // Accept our token-carrying subprotocol (p2f.<token>) so a client that
+    // sends Sec-WebSocket-Protocol gets it echoed back per RFC 6455; clients
+    // that send none (the browser bundle) are unaffected.
+    handleProtocols: (protocols: Set<string>) => {
+      for (const p of protocols) if (p.startsWith('p2f.')) return p
+      return false
+    }
   })
   // Upgraded sockets leave the http server's connection tracking, so
   // closeAllConnections() won't reach them — track them for shutdown.
@@ -135,13 +138,19 @@ export async function startServer (
   server.on('upgrade', (req, socket, head) => {
     const [pathname, query] = (req.url ?? '').split('?') as [string, string?]
     if (pathname === '/tracker') {
-      if (auth.enabled) {
-        const token = new URLSearchParams(query ?? '').get('t') ?? ''
-        if (!auth.verifyTrackerToken(token)) {
-          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
-          socket.destroy()
-          return
-        }
+      const params = new URLSearchParams(query ?? '')
+      const infoHash = params.get('ih') ?? ''
+      // Prefer a token carried in Sec-WebSocket-Protocol (keeps it out of proxy
+      // access logs); fall back to the ?t= query for clients that can't set a
+      // subprotocol (the browser WebTorrent bundle opens a bare WebSocket).
+      const subprotocols = (req.headers['sec-websocket-protocol'] ?? '')
+        .split(',').map(s => s.trim()).filter(Boolean)
+      const protoToken = subprotocols.find(p => p.startsWith('p2f.'))?.slice('p2f.'.length)
+      const token = protoToken ?? params.get('t') ?? ''
+      if (!auth.verifyTrackerToken(infoHash, token)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+        socket.destroy()
+        return
       }
       trackerWss.handleUpgrade(req, socket, head, ws => {
         trackerSockets.add(socket)
@@ -172,20 +181,13 @@ export async function startServer (
 
   log.info(`serving ${config.root}`)
   log.info(`web client + API on http://${bracketHost(config.host)}:${config.port}`)
-  if (config.authEnabled) {
-    log.info(`tracker on ws://${bracketHost(config.host)}:${config.port}/tracker (token-gated)`)
-    log.info(`auth: enabled, database ${config.dbPath}`)
-    if (db && db.userCount() === 0) {
-      log.warn('no users exist yet — create one with: node src/server/cli.ts add-user <name>')
-    }
-  } else {
-    log.info(`tracker on ws://${bracketHost(config.host)}:${config.trackerPort}`)
-    log.warn('auth: DISABLED (P2F_AUTH=off) — anyone who can reach these ports has full access')
+  log.info(`tracker on ws://${bracketHost(config.host)}:${config.port}/tracker (token-gated)`)
+  log.info(`auth: enabled, database ${config.dbPath}`)
+  if (setupToken) {
+    log.warn('no users exist yet — open the web client to create the admin account, or run: node src/server/cli.ts add-user <name>')
+    log.warn(`first-run setup token (needed by the setup screen): ${setupToken}`)
   }
   log.info(`WebRTC seeding: ${seeder.enabled ? 'enabled' : 'DISABLED (webseed fallback only)'}`)
-  if (!config.authEnabled && (config.host === '0.0.0.0' || config.host === '::')) {
-    log.warn('bound to a wildcard address with auth off — make sure only your VPN can reach these ports')
-  }
 
   async function close (): Promise<void> {
     await withTimeout(
@@ -202,7 +204,7 @@ export async function startServer (
     db.close()
   }
 
-  return { config, server, tracker, db, activity, close }
+  return { config, server, tracker, db, activity, setupToken, close }
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])

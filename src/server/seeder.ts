@@ -5,6 +5,8 @@ import type { Logger } from './log.ts'
 export interface Seeder {
   enabled: boolean
   ensureSeeding (cipherPath: string, meta: ParsedTorrent): void
+  /** Whether a ciphertext cache file is currently being seeded (pins it against cache eviction). */
+  isSeeding (cipherPath: string): boolean
   destroy (): Promise<void>
 }
 
@@ -18,7 +20,7 @@ export interface Seeder {
  * data source through the exact same chunked/verified/resumable machinery.
  */
 export async function createSeeder (
-  { announce, log }: { announce: () => string[], log: Logger }
+  { announce, log }: { announce: (infoHash: string) => string[], log: Logger }
 ): Promise<Seeder> {
   let WebTorrent: typeof import('webtorrent').default
   try {
@@ -29,6 +31,7 @@ export async function createSeeder (
     return {
       enabled: false,
       ensureSeeding () {},
+      isSeeding: () => false,
       async destroy () {}
     }
   }
@@ -44,22 +47,25 @@ export async function createSeeder (
   client.on('error', (err: unknown) => log.error(`seeder error: ${(err as Error).message}`))
 
   const seeding = new Set<string>() // infohashes added to the client
+  const seededPaths = new Set<string>() // ciphertext cache files pinned against eviction
 
   function ensureSeeding (cipherPath: string, meta: ParsedTorrent): void {
     if (seeding.has(meta.infoHash)) return
     seeding.add(meta.infoHash)
+    seededPaths.add(cipherPath)
 
     // Re-use the exact metadata served to clients (same infohash) and point
     // the store at the ciphertext cache file (same basename as the source,
     // see cipherCache.ts): WebTorrent verifies pieces, then seeds — peers get
     // ciphertext over the wire, matching what /api/raw serves.
-    const torrentFile = toTorrentFile({ ...meta, announce: announce() })
+    const torrentFile = toTorrentFile({ ...meta, announce: announce(meta.infoHash) })
     const torrent = client.add(torrentFile, { path: path.dirname(cipherPath) })
     torrent.on('ready', () => {
       log.info(`seeding ${meta.name} (${meta.infoHash})`)
     })
     torrent.on('error', (err: unknown) => {
       seeding.delete(meta.infoHash)
+      seededPaths.delete(cipherPath)
       log.error(`failed to seed ${meta.name}: ${(err as Error).message}`)
     })
   }
@@ -67,6 +73,7 @@ export async function createSeeder (
   return {
     enabled: true,
     ensureSeeding,
+    isSeeding: cipherPath => seededPaths.has(cipherPath),
     destroy () {
       return new Promise(resolve => client.destroy(() => resolve()))
     }

@@ -18,8 +18,6 @@ export interface Config {
    * the tracker reached at <publicUrl>/tracker on the main HTTP port.
    */
   publicUrl: string | null
-  /** Require authentication on all endpoints (default true). */
-  authEnabled: boolean
   /** SQLite database path for users/sessions/tokens (default ./p2f.db). */
   dbPath: string
   /**
@@ -28,12 +26,44 @@ export interface Config {
    * shared root is mounted read-only.
    */
   cacheDir: string
+  /**
+   * Soft cap on the ciphertext cache's total size in bytes. When a new entry
+   * would push the cache over this, least-recently-used entries are evicted
+   * (never one that's actively being seeded). 0 disables the cap. Default 8 GiB.
+   */
+  cacheMaxBytes: number
+  /**
+   * Whether to mark auth cookies `Secure`. 'auto' (default) derives it from
+   * the effective external scheme (P2F_PUBLIC_URL and, with P2F_TRUST_PROXY
+   * on, X-Forwarded-Proto); 'on'/'off' force it.
+   */
+  secureCookies: 'auto' | 'on' | 'off'
+  /**
+   * When true, trust X-Forwarded-* from a front proxy so req.ip and the
+   * request scheme are accurate. Off by default — a direct-bind deployment
+   * must not trust spoofable headers.
+   */
+  trustProxy: boolean
 }
 
-function parseAuth (value: string | undefined): boolean {
-  if (value === undefined || value === '' || value === 'on') return true
-  if (value === 'off') return false
-  throw new Error(`P2F_AUTH must be 'on' or 'off', got: ${value}`)
+function parseSecureCookies (value: string | undefined): 'auto' | 'on' | 'off' {
+  if (value === undefined || value === '' || value === 'auto') return 'auto'
+  if (value === 'on' || value === 'off') return value
+  throw new Error(`P2F_SECURE_COOKIES must be 'auto', 'on' or 'off', got: ${value}`)
+}
+
+function parseBool (value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === '') return fallback
+  if (value === '1' || value === 'true' || value === 'on') return true
+  if (value === '0' || value === 'false' || value === 'off') return false
+  throw new Error(`expected a boolean (on/off), got: ${value}`)
+}
+
+function parseBytes (value: string | undefined, fallback: number): number {
+  if (value === undefined || value === '') return fallback
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) throw new Error(`invalid byte size: ${value}`)
+  return n
 }
 
 function parsePublicUrl (value: string | undefined): string | null {
@@ -75,13 +105,13 @@ function parsePort (value: string | undefined, fallback: number): number {
  *   P2F_PUBLIC_URL   public origin when behind a reverse proxy, e.g.
  *                    https://files.example.com — implies wss announce via
  *                    <origin>/tracker and takes precedence over P2F_PUBLIC_HOST
- *   P2F_AUTH         'on' (default) or 'off' — require login/tokens on all
- *                    endpoints; 'off' restores the VPN-only trust model
  *   P2F_DB           SQLite database path for users/sessions/API tokens and
- *                    download history (default ./p2f.db; opened regardless
- *                    of P2F_AUTH)
+ *                    download history (default ./p2f.db)
  *   P2F_CACHE_DIR    directory for the on-demand transfer-encryption
  *                    ciphertext cache (default ./p2f-cache)
+ *   P2F_CACHE_MAX_BYTES  soft cap on the ciphertext cache size (default 8 GiB)
+ *   P2F_SECURE_COOKIES   'auto' (default), 'on' or 'off' — mark auth cookies Secure
+ *   P2F_TRUST_PROXY  'on'/'off' (default off) — trust X-Forwarded-* from a proxy
  */
 export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
   const rootInput = path.resolve(env.P2F_ROOT || './data')
@@ -102,8 +132,10 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
     trackerPort: parsePort(env.P2F_TRACKER_PORT, 8001),
     publicHost: env.P2F_PUBLIC_HOST || null,
     publicUrl: parsePublicUrl(env.P2F_PUBLIC_URL),
-    authEnabled: parseAuth(env.P2F_AUTH),
     dbPath: env.P2F_DB || path.resolve('./p2f.db'),
-    cacheDir: env.P2F_CACHE_DIR || path.resolve('./p2f-cache')
+    cacheDir: env.P2F_CACHE_DIR || path.resolve('./p2f-cache'),
+    cacheMaxBytes: parseBytes(env.P2F_CACHE_MAX_BYTES, 8 * 1024 * 1024 * 1024),
+    secureCookies: parseSecureCookies(env.P2F_SECURE_COOKIES),
+    trustProxy: parseBool(env.P2F_TRUST_PROXY, false)
   }
 }

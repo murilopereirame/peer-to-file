@@ -9,13 +9,18 @@ import {
   throwIfPermissionError
 } from './browse.ts'
 import { renderTorrent, type TorrentStore } from './torrents.ts'
-import { SESSION_COOKIE, SESSION_TTL_MS, parseCookies, type AuthService } from './auth.ts'
+import {
+  SESSION_COOKIE, REFRESH_COOKIE, REFRESH_PATH, ACCESS_TTL_MS, REFRESH_TTL_MS,
+  parseCookies, type AuthService, type Session
+} from './auth.ts'
 import { createDebouncer, type ActivityLog } from './activity.ts'
+import { createFixedWindowLimiter, createTokenBucketLimiter } from './rateLimit.ts'
 import type { Config } from './config.ts'
 import type { Seeder } from './seeder.ts'
 import type { AuthDb } from './db.ts'
 import type { CipherCache } from './cipherCache.ts'
 import { KeyExchangeError, type KeyExchange } from './keyExchange.ts'
+import type { Logger } from './log.ts'
 
 export interface AppDeps {
   config: Config
@@ -27,6 +32,9 @@ export interface AppDeps {
   cipherCache: CipherCache
   keyExchange: KeyExchange
   version: string
+  log: Logger
+  /** One-time first-run setup token (F1a); null once an admin account exists. */
+  setupToken: string | null
 }
 
 const clientDist = fileURLToPath(new URL('../../client/dist', import.meta.url))
@@ -64,10 +72,20 @@ const wrap = (fn: AsyncHandler) =>
     fn(req, res).catch(next)
   }
 
-export function createApp ({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version }: AppDeps): Express {
+export function createApp ({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version, log, setupToken }: AppDeps): Express {
   const app = express()
   app.disable('x-powered-by')
+  // F12: honor X-Forwarded-* only when explicitly told there's a trusted proxy.
+  if (config.trustProxy) app.set('trust proxy', true)
   const webseedLogOnce = createDebouncer(30_000)
+  // F1a setup token is single-use in spirit: null it once setup completes so a
+  // logged token from first boot can't be replayed after an admin exists.
+  let pendingSetupToken = setupToken
+
+  // F1: throttle online password guessing per client IP.
+  const loginLimiter = createFixedWindowLimiter(10, 5 * 60 * 1000)
+  // F2: smooth bursts against the expensive hash+encrypt / disk-write endpoints.
+  const heavyLimiter = createTokenBucketLimiter(30, 60 * 1000)
 
   const wrapOrBadRequest = (clientKey: string, plaintext: Buffer): string => {
     try {
@@ -86,14 +104,30 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
     }
   }
 
-  const secureCookies = config.publicUrl?.startsWith('https:') ?? false
-  const sessionCookie = (value: string, maxAgeSec: number): string => {
-    const attrs = [
-      `${SESSION_COOKIE}=${value}`, 'HttpOnly', 'Path=/', 'SameSite=Lax',
-      `Max-Age=${maxAgeSec}`
-    ]
-    if (secureCookies) attrs.push('Secure')
+  // F6: decide the Secure flag. 'on'/'off' force it; 'auto' derives it from the
+  // effective external scheme — https public origin, or (with trust proxy on) a
+  // request that arrived over https per X-Forwarded-Proto.
+  const cookieSecure = (req: Request): boolean => {
+    if (config.secureCookies === 'on') return true
+    if (config.secureCookies === 'off') return false
+    if (config.publicUrl?.startsWith('https:')) return true
+    return req.protocol === 'https'
+  }
+  const buildCookie = (name: string, value: string, maxAgeSec: number, cookiePath: string, secure: boolean): string => {
+    const attrs = [`${name}=${value}`, 'HttpOnly', `Path=${cookiePath}`, 'SameSite=Lax', `Max-Age=${maxAgeSec}`]
+    if (secure) attrs.push('Secure')
     return attrs.join('; ')
+  }
+  // F9: an access cookie (short) plus a refresh cookie scoped to /api/refresh.
+  const setSessionCookies = (req: Request, res: Response, session: Session): void => {
+    const secure = cookieSecure(req)
+    res.append('Set-Cookie', buildCookie(SESSION_COOKIE, session.accessId, ACCESS_TTL_MS / 1000, '/', secure))
+    res.append('Set-Cookie', buildCookie(REFRESH_COOKIE, session.refreshId, REFRESH_TTL_MS / 1000, REFRESH_PATH, secure))
+  }
+  const clearSessionCookies = (req: Request, res: Response): void => {
+    const secure = cookieSecure(req)
+    res.append('Set-Cookie', buildCookie(SESSION_COOKIE, '', 0, '/', secure))
+    res.append('Set-Cookie', buildCookie(REFRESH_COOKIE, '', 0, REFRESH_PATH, secure))
   }
 
   // The client page is normally served by this same process, but CORS is kept
@@ -135,20 +169,30 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       // key never crosses the wire in the clear.
       ecdhPublicKey: keyExchange.publicKeyBase64,
       auth: {
-        required: auth.enabled,
-        needsSetup: auth.enabled && auth.needsSetup(),
-        authenticated: auth.enabled ? auth.authenticate(req) !== null : true
+        required: true,
+        needsSetup: auth.needsSetup(),
+        authenticated: auth.authenticate(req) !== null
       }
     })
   })
 
   // First-run setup: creates the one and only admin account. Only reachable
-  // until that account exists — afterwards it behaves like a disabled route,
-  // so there is no standing "create a user" endpoint an attacker could hit.
+  // until that account exists — afterwards it 409s, so there is no standing
+  // "create a user" endpoint an attacker could hit. F1a: while open, it also
+  // requires the one-time setup token logged at first boot.
   app.post('/api/setup', jsonBody, wrap(async (req, res) => {
-    if (!auth.enabled) throw new BrowseError(400, 'authentication is disabled')
     if (!auth.needsSetup()) throw new BrowseError(409, 'setup already completed')
-    const { username, password } = (req.body ?? {}) as { username?: unknown, password?: unknown }
+    const { username, password, setupToken: providedToken } = (req.body ?? {}) as {
+      username?: unknown, password?: unknown, setupToken?: unknown
+    }
+    const headerToken = req.get('X-P2F-Setup-Token')
+    const token = typeof providedToken === 'string' ? providedToken : headerToken
+    if (pendingSetupToken && (typeof token !== 'string' ||
+        token.length !== pendingSetupToken.length ||
+        !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(pendingSetupToken)))) {
+      activity.add('auth', 'setup rejected: bad or missing setup token', { ip: req.ip })
+      throw new BrowseError(403, 'invalid or missing setup token')
+    }
     if (typeof username !== 'string' || typeof password !== 'string') {
       throw new BrowseError(400, 'username and password are required')
     }
@@ -158,26 +202,50 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
     } catch (err) {
       throw new BrowseError(400, err instanceof Error ? err.message : 'setup failed')
     }
+    pendingSetupToken = null // consumed — no replay after the admin exists
     activity.add('auth', `admin account "${result.user.username}" created`, { ip: req.ip })
-    res.append('Set-Cookie', sessionCookie(result.sessionId, SESSION_TTL_MS / 1000))
+    setSessionCookies(req, res, result)
     res.json({ username: result.user.username })
   }))
 
   app.post('/api/login', jsonBody, wrap(async (req, res) => {
     const { username, password } = (req.body ?? {}) as { username?: unknown, password?: unknown }
-    if (!auth.enabled) throw new BrowseError(400, 'authentication is disabled')
+    // F1: per-IP lockout on repeated failures.
+    const ipKey = req.ip ?? 'unknown'
+    if (loginLimiter.isLimited(ipKey)) {
+      res.set('Retry-After', String(Math.ceil(loginLimiter.retryAfterMs(ipKey) / 1000)))
+      throw new BrowseError(429, 'too many login attempts — try again later')
+    }
     if (typeof username !== 'string' || typeof password !== 'string') {
       throw new BrowseError(400, 'username and password are required')
     }
     const result = auth.login(username, password)
     if (!result) {
+      loginLimiter.hit(ipKey)
       activity.add('auth', `failed login for "${username}"`, { ip: req.ip })
+      // Single structured line for log-based intrusion tooling (e.g. fail2ban).
+      log.warn(`auth-fail ip=${req.ip ?? 'unknown'} user="${String(username).replace(/["\r\n]/g, '')}"`)
       // blunt the brute-force edge a little
       await new Promise(resolve => setTimeout(resolve, 300))
       throw new BrowseError(401, 'invalid credentials')
     }
+    loginLimiter.reset(ipKey)
     activity.add('auth', `"${result.user.username}" signed in`, { ip: req.ip })
-    res.append('Set-Cookie', sessionCookie(result.sessionId, SESSION_TTL_MS / 1000))
+    setSessionCookies(req, res, result)
+    res.json({ username: result.user.username })
+  }))
+
+  // F9: rotate the refresh cookie into a fresh access+refresh pair. Pre-auth
+  // (the access session may already be expired); the refresh cookie is scoped
+  // to this path and SameSite=Lax, so a cross-site page can't drive it.
+  app.post('/api/refresh', wrap(async (req, res) => {
+    const refreshId = parseCookies(req.headers.cookie)[REFRESH_COOKIE]
+    const result = refreshId ? auth.refresh(refreshId) : null
+    if (!result) {
+      clearSessionCookies(req, res)
+      throw new BrowseError(401, 'refresh failed')
+    }
+    setSessionCookies(req, res, result)
     res.json({ username: result.user.username })
   }))
 
@@ -187,9 +255,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   app.get('/api/raw', wrap(async (req, res) => {
     const relQuery = typeof req.query.path === 'string' ? req.query.path : ''
     const token = typeof req.query.t === 'string' ? req.query.t : ''
-    if (auth.enabled &&
-        !auth.verifyRawToken(relQuery, token) &&
-        auth.authenticate(req) === null) {
+    if (!auth.verifyRawToken(relQuery, token) && auth.authenticate(req) === null) {
       throw new BrowseError(401, 'authentication required')
     }
     const abs = await resolveInsideRoot(config.root, relQuery)
@@ -214,28 +280,56 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   // --- everything below requires a session cookie or Bearer token -------------
 
   app.use('/api', (req, res, next) => {
-    if (!auth.enabled) return next()
-    const user = auth.authenticate(req)
-    if (!user) {
+    const result = auth.authenticate(req)
+    if (!result) {
       res.status(401).json({ error: 'authentication required' })
       return
     }
-    ;(res.locals as { user?: unknown }).user = user
+    const locals = res.locals as { user?: unknown, viaCookie?: boolean }
+    locals.user = result.user
+    locals.viaCookie = result.viaCookie
+    next()
+  })
+
+  // F5: CSRF defence-in-depth. A cross-site page can't set a custom header on a
+  // credentialed request (that requires a preflight the wildcard CORS won't pass
+  // for cookies) nor on a simple form POST, so requiring one on cookie-
+  // authenticated state-changing requests blocks CSRF without narrowing CORS
+  // (which the WebTorrent webseed at /api/raw depends on). Bearer-token clients
+  // don't ride ambient cookies, so they're exempt.
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+    const viaCookie = (res.locals as { viaCookie?: boolean }).viaCookie
+    if (viaCookie && req.get('X-P2F-Csrf') == null) {
+      res.status(403).json({ error: 'missing CSRF header' })
+      return
+    }
     next()
   })
 
   app.post('/api/logout', (req, res) => {
-    const sessionId = parseCookies(req.headers.cookie)[SESSION_COOKIE]
-    if (sessionId) auth.logout(sessionId)
+    const cookies = parseCookies(req.headers.cookie)
+    auth.logout(cookies[SESSION_COOKIE] ?? '', cookies[REFRESH_COOKIE] ?? '')
     const user = (res.locals as { user?: { username: string } }).user
     if (user) activity.add('auth', `"${user.username}" signed out`, { ip: req.ip })
-    res.append('Set-Cookie', sessionCookie('', 0))
+    clearSessionCookies(req, res)
+    res.json({ ok: true })
+  })
+
+  // F9: revoke every session + refresh token for the signed-in user.
+  app.post('/api/logout-all', (req, res) => {
+    const user = (res.locals as { user?: { id: number, username: string } }).user
+    if (user) {
+      auth.logoutAll(user.id)
+      activity.add('auth', `"${user.username}" revoked all sessions`, { ip: req.ip })
+    }
+    clearSessionCookies(req, res)
     res.json({ ok: true })
   })
 
   app.get('/api/me', (req, res) => {
     const user = (res.locals as { user?: { username: string } }).user
-    res.json({ username: auth.enabled ? user?.username ?? null : null })
+    res.json({ username: user?.username ?? null })
   })
 
   app.get('/api/logs', (req, res) => {
@@ -253,10 +347,9 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   // saving (posted by the client itself once a save completes — there's no
   // reliable server-side "this peer finished" signal, since transfers can
   // come entirely over WebRTC with no webseed hit at all). Scoped to the
-  // signed-in user; with auth off there's no user id, so it's one shared,
-  // unscoped list (userId null) rather than per-visitor.
-  const historyUserId = (res: Response): number | null =>
-    ((res.locals as { user?: { id: number } }).user?.id) ?? null
+  // signed-in user (auth is always on, so there is always a user id).
+  const historyUserId = (res: Response): number =>
+    (res.locals as { user: { id: number } }).user.id
 
   app.get('/api/downloads/history', (req, res) => {
     res.json({ entries: db.listDownloadHistory(historyUserId(res)) })
@@ -354,27 +447,30 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   // cross-session reuse the way downloads need), but doesn't send it in the
   // clear: it's ECDH-wrapped (keyExchange.ts) under the client's own
   // per-request ephemeral keypair, so an observer of the wire can't recover
-  // it just by watching. A plaintext SHA-256 (also only readable after
-  // decrypting) closes the integrity gap CTR alone leaves — uploads had no
-  // integrity check at all before this feature, so this is a net
-  // improvement, not a weaker guarantee than some alternative.
+  // it just by watching. The plaintext SHA-256 the server verifies against is
+  // carried *inside* that wrapped blob (F7: key(32)||iv(16)||sha256(32)), so it
+  // too is only readable after decrypting — closing the integrity gap CTR alone
+  // leaves without exposing the expected hash to a wire observer.
   app.post('/api/upload', wrap(async (req, res) => {
+    if (!heavyLimiter.take(req.ip ?? 'unknown')) {
+      throw new BrowseError(429, 'too many requests — slow down')
+    }
     const destDirRel = typeof req.query.path === 'string' ? req.query.path : ''
     const name = typeof req.query.name === 'string' ? req.query.name : ''
     const destAbs = await resolveUploadTarget(config.root, destDirRel, name)
 
     const clientKey = req.get('X-P2F-Enc-Client-Pubkey')
     const wrappedKey = req.get('X-P2F-Enc-Key-Wrapped')
-    const plainShaHeader = req.get('X-P2F-Plain-Sha256')
-    if (!clientKey || !wrappedKey || !plainShaHeader) {
+    if (!clientKey || !wrappedKey) {
       throw new BrowseError(400, 'missing encryption headers')
     }
     const keyMaterial = unwrapOrBadRequest(clientKey, wrappedKey)
-    if (keyMaterial.length !== 48) {
+    if (keyMaterial.length !== 80) {
       throw new BrowseError(400, 'invalid encryption headers')
     }
     const encKey = keyMaterial.subarray(0, 32)
     const encIv = keyMaterial.subarray(32, 48)
+    const expectedSha = keyMaterial.subarray(48, 80).toString('hex')
 
     const tmpAbs = `${destAbs}.p2f-upload-${crypto.randomUUID()}`
     const out = fsSync.createWriteStream(tmpAbs, { flags: 'wx' })
@@ -390,7 +486,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
         out.on('finish', resolve)
         req.pipe(decipher).pipe(out)
       })
-      if (plainHash.digest('hex') !== plainShaHeader.toLowerCase()) {
+      if (plainHash.digest('hex') !== expectedSha) {
         throw new BrowseError(400, 'upload failed integrity check')
       }
       try {
@@ -421,6 +517,9 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
   // Announce points at the embedded tracker, urlList at /api/raw as an HTTP
   // webseed fallback. Requesting metadata also starts the WebRTC seeder.
   app.get('/api/torrent', wrap(async (req, res) => {
+    if (!heavyLimiter.take(req.ip ?? 'unknown')) {
+      throw new BrowseError(429, 'too many requests — slow down')
+    }
     // The client's ephemeral ECDH public key for this request — required so
     // the transfer key below can be wrapped under a key an eavesdropper
     // can't derive just by watching the wire (see keyExchange.ts).
@@ -431,15 +530,14 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
     const meta = await store.getMeta(abs)
     const rel = path.relative(config.root, abs)
 
-    // With auth on, the webseed carries a path-bound transfer token and the
-    // announce a tracker token — WebTorrent's own requests can't present
-    // cookies or headers, so authorization lives in the URLs themselves.
+    // The webseed carries a path-bound transfer token and the announce an
+    // infohash-bound tracker token (F3) — WebTorrent's own requests can't
+    // present cookies or headers, so authorization lives in the URLs
+    // themselves.
     const rawQuery = (p: string): string =>
-      `path=${encodeURIComponent(p)}` +
-      (auth.enabled ? `&t=${encodeURIComponent(auth.mintRawToken(p))}` : '')
-    const trackerQuery = auth.enabled
-      ? `?t=${encodeURIComponent(auth.mintTrackerToken())}`
-      : ''
+      `path=${encodeURIComponent(p)}&t=${encodeURIComponent(auth.mintRawToken(p))}`
+    const trackerQuery =
+      `?ih=${meta.infoHash}&t=${encodeURIComponent(auth.mintTrackerToken(meta.infoHash))}`
 
     let announce: string[]
     let webseed: string
@@ -453,11 +551,9 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       const host = config.publicHost ? bracketHost(config.publicHost) : hostWithoutPort(hostHeader)
       const httpHostPort = config.publicHost ? `${host}:${config.port}` : hostHeader
 
-      // The standalone tracker port cannot check tokens, so with auth on the
-      // tracker is only reachable through /tracker on the main HTTP port.
-      announce = auth.enabled
-        ? [`ws://${httpHostPort}/tracker${trackerQuery}`]
-        : [`ws://${host}:${config.trackerPort}`]
+      // The tracker is only reachable through the token-gated /tracker path on
+      // the main HTTP port.
+      announce = [`ws://${httpHostPort}/tracker${trackerQuery}`]
       webseed = `http://${httpHostPort}/api/raw?${rawQuery(rel)}`
     }
 

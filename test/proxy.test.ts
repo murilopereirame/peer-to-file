@@ -8,6 +8,7 @@ import WebSocket from 'ws'
 import parseTorrent from 'parse-torrent'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 import { silentLogger } from '../src/server/log.ts'
+import { testConfig } from './support.ts'
 
 // Reverse-proxy mode: P2F_PUBLIC_URL set, tracker reachable on the main
 // HTTP port at /tracker, all handed-out URLs based on the public origin.
@@ -15,6 +16,9 @@ import { silentLogger } from '../src/server/log.ts'
 let root: string
 let running: RunningServer
 let base: string
+let apiToken: string
+
+const auth = (): Record<string, string> => ({ Authorization: `Bearer ${apiToken}` })
 
 /** A throwaway ECDH (P-256) public key — /api/torrent requires one (see keyExchange.ts) but these tests don't unwrap the response's key material. */
 async function clientPublicKey (): Promise<string> {
@@ -22,22 +26,25 @@ async function clientPublicKey (): Promise<string> {
   return Buffer.from(await crypto.webcrypto.subtle.exportKey('raw', keyPair.publicKey)).toString('base64')
 }
 
+async function torrentMeta (): Promise<any> {
+  const ck = await clientPublicKey()
+  const res = await fetch(`${base}/api/torrent?path=file.bin&ck=${encodeURIComponent(ck)}`, { headers: auth() })
+  assert.equal(res.status, 200)
+  return await res.json()
+}
+
 before(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-proxy-')))
   await fs.writeFile(path.join(root, 'file.bin'), crypto.randomBytes(32 * 1024))
 
-  running = await startServer({
+  running = await startServer(testConfig({
     root,
-    host: '127.0.0.1',
-    port: 0,
-    trackerPort: 0,
-    publicHost: null,
     publicUrl: 'https://files.example.com',
-    authEnabled: false,
-    dbPath: ':memory:',
     cacheDir: path.join(root, '.p2f-cache')
-  }, silentLogger)
+  }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
+  running.db.createUser('alice', 'correct horse battery')
+  apiToken = running.db.createApiToken('alice', 'test')
 })
 
 after(async () => {
@@ -46,25 +53,25 @@ after(async () => {
 })
 
 test('metadata URLs use the public origin (wss + same-port tracker path)', async () => {
-  const ck = await clientPublicKey()
-  const res = await fetch(`${base}/api/torrent?path=file.bin&ck=${encodeURIComponent(ck)}`)
-  assert.equal(res.status, 200)
-  const body = await res.json() as any
+  const body = await torrentMeta()
 
-  assert.deepEqual(body.announce, ['wss://files.example.com/tracker'])
-  assert.equal(body.webseed, 'https://files.example.com/api/raw?path=file.bin')
+  // announce/webseed use the public origin and now carry transfer tokens (F3)
+  assert.ok(body.announce[0].startsWith(`wss://files.example.com/tracker?ih=${body.infoHash}&t=`))
+  assert.ok(body.webseed.startsWith('https://files.example.com/api/raw?path=file.bin&t='))
 
   const parsed = await parseTorrent(Buffer.from(body.torrentBase64, 'base64'))
-  assert.deepEqual(parsed.announce, ['wss://files.example.com/tracker'])
-  assert.deepEqual(parsed.urlList, ['https://files.example.com/api/raw?path=file.bin'])
+  assert.deepEqual(parsed.announce, body.announce)
+  assert.deepEqual(parsed.urlList, [body.webseed])
 })
 
 test('the tracker answers announces on the main port at /tracker', async () => {
-  const ck = await clientPublicKey()
-  const res = await fetch(`${base}/api/torrent?path=file.bin&ck=${encodeURIComponent(ck)}`)
-  const { infoHash } = await res.json() as any
+  const body = await torrentMeta()
+  const { infoHash } = body
+  // Reuse the infohash + token from the announce URL to reach the local port.
+  const announce = new URL(body.announce[0])
+  const localTracker = `ws://127.0.0.1:${running.config.port}/tracker?ih=${announce.searchParams.get('ih')}&t=${encodeURIComponent(announce.searchParams.get('t')!)}`
 
-  const ws = new WebSocket(`ws://127.0.0.1:${running.config.port}/tracker`)
+  const ws = new WebSocket(localTracker)
   const reply = await new Promise<any>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('no tracker reply')), 5000)
     ws.on('error', reject)

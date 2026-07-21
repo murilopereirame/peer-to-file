@@ -165,14 +165,17 @@ export interface EncryptedUpload {
  * Encrypts a file client-side before it goes over the wire to /api/upload.
  * Unlike downloads (a server-generated, cross-session-stable key), uploads
  * are one-shot — the client just generates a fresh random key/IV, encrypts,
- * and hands the server what it needs to decrypt: the key/IV themselves
- * ECDH-wrapped under `keyWrap` (see the doc comment on the /api/upload
- * handler in src/server/app.ts), plus a plaintext SHA-256 the server
- * verifies after decrypting. Reads the file twice (once streamed through
- * ctrXor for the ciphertext body, once via `arrayBuffer()` for the SHA-256)
- * rather than hand-rolling an incremental SHA-256 — this project already
- * accepts O(file size) memory for the equivalent download-side fallback, so
- * the same trade-off here isn't a new category of limitation.
+ * and hands the server what it needs to decrypt: the key/IV themselves plus
+ * the plaintext SHA-256, all ECDH-wrapped together under `keyWrap` (see the
+ * doc comment on the /api/upload handler in src/server/app.ts). Wrapping the
+ * hash rather than sending it as a cleartext header (F7) means a wire observer
+ * can't read *or* substitute the expected hash — the integrity check only
+ * means something whenever the authenticated key-unwrap succeeds. Reads the
+ * file twice (once streamed through ctrXor for the ciphertext body, once via
+ * `arrayBuffer()` for the SHA-256) rather than hand-rolling an incremental
+ * SHA-256 — this project already accepts O(file size) memory for the
+ * equivalent download-side fallback, so the same trade-off here isn't a new
+ * category of limitation.
  */
 export async function encryptFileForUpload (file: Blob, keyWrap: KeyWrap): Promise<EncryptedUpload> {
   const rawKey = crypto.getRandomValues(new Uint8Array(32))
@@ -190,20 +193,19 @@ export async function encryptFileForUpload (file: Blob, keyWrap: KeyWrap): Promi
     offset += value.length
   }
 
-  const plainDigest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  const plainSha256 = Array.from(new Uint8Array(plainDigest))
-    .map(b => b.toString(16).padStart(2, '0')).join('')
+  const plainDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))
 
-  const keyMaterial = new Uint8Array(48)
+  // key(32) || iv(16) || sha256(32) = 80 bytes, wrapped as one authenticated blob.
+  const keyMaterial = new Uint8Array(80)
   keyMaterial.set(rawKey, 0)
   keyMaterial.set(iv, 32)
+  keyMaterial.set(plainDigest, 48)
 
   return {
     body: new Blob(parts as BlobPart[]),
     headers: {
       'X-P2F-Enc-Client-Pubkey': keyWrap.clientPublicKeyBase64,
-      'X-P2F-Enc-Key-Wrapped': await wrapKeyMaterial(keyWrap.wrapKey, keyMaterial),
-      'X-P2F-Plain-Sha256': plainSha256
+      'X-P2F-Enc-Key-Wrapped': await wrapKeyMaterial(keyWrap.wrapKey, keyMaterial)
     }
   }
 }

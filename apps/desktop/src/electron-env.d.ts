@@ -5,7 +5,7 @@
 
 export interface StoredCredentials {
   username: string
-  password: string
+  refreshToken: string
 }
 
 export interface FetchRequest {
@@ -37,9 +37,11 @@ export interface DownloadCompletedInfo {
 
 export interface P2FBridge {
   fetch: (req: FetchRequest) => Promise<FetchResult>
-  saveCredentials: (server: string, username: string, password: string) => Promise<void>
+  saveCredentials: (server: string, username: string, refreshToken: string) => Promise<void>
   loadCredentials: (server: string) => Promise<StoredCredentials | null>
   clearCredentials: (server: string) => Promise<void>
+  getCookie: (origin: string, name: string) => Promise<string | null>
+  setCookie: (origin: string, name: string, value: string) => Promise<void>
   defaultDownloadsDir: () => Promise<string | null>
   pickDownloadFolder: () => Promise<string | null>
   setDownloadDir: (path: string | null) => Promise<void>

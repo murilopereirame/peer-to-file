@@ -10,9 +10,9 @@ trackers, no install on the client side.
 
 ## ⚠️ Security model — read this first
 
-**Authentication is on by default** (`P2F_AUTH=on`): every endpoint requires a login
-session, an API token, or — for the transfer URLs WebTorrent uses — a signed, expiring
-transfer token. Defense in depth still applies:
+**Authentication is always on**: every endpoint requires a login session, an API token,
+or — for the transfer URLs WebTorrent uses — a signed, expiring transfer token. There is
+no way to disable it. Defense in depth still applies:
 
 - The server binds to `127.0.0.1` by default. Set `P2F_HOST` to your **VPN interface IP**
   (e.g. your WireGuard address like `10.0.0.1`) rather than a publicly routable address.
@@ -26,8 +26,13 @@ transfer token. Defense in depth still applies:
   want file management too, and only after you're satisfied with the auth/network
   boundary above: with write access, anyone who can authenticate can delete or overwrite
   anything under the shared root.
-- `P2F_AUTH=off` restores the original no-auth mode for pure-VPN setups — then the VPN is
-  the only trust boundary.
+- Sessions are short-lived: a **48 h access cookie** is renewed by a longer-lived,
+  single-use **refresh cookie** (rotated on each use, scoped to `/api/refresh`).
+  API tokens for scripts default to a **90-day** lifetime (`--ttl` to change). Passwords
+  are a minimum of 12 characters, and repeated failed logins are rate-limited per IP
+  (each failure also logs a `p2f auth-fail ip=… user="…"` line you can wire to fail2ban).
+- Cookie-authenticated state-changing requests require an `X-P2F-Csrf` header the bundled
+  clients send automatically — CSRF defense-in-depth on top of `SameSite=Lax` cookies.
 - HTTP traffic itself is plain unless you terminate TLS in front (see the nginx section);
   on a WireGuard tunnel the transport is already encrypted. **File content is encrypted
   regardless**, independent of TLS/VPN — see "Transfer encryption" below.
@@ -71,11 +76,13 @@ Users live in a SQLite database (Node's built-in `node:sqlite` — no native mod
 Passwords are stored as scrypt hashes, tokens and session ids as SHA-256 hashes.
 
 **First run**: with no users in the database yet, opening the web client shows a
-one-time **setup screen** instead of a login form — pick a username and password there
-and that becomes the admin account. `POST /api/setup` is the endpoint behind it; it
-works exactly once (it 409s the moment any account exists, whether created through the
-screen or the CLI below), so there is no standing "create a user" endpoint left over
-for an attacker to hit.
+one-time **setup screen** instead of a login form — enter the **setup token** printed in
+the server log at first boot (`first-run setup token: …`), then pick a username and
+password and that becomes the admin account. `POST /api/setup` is the endpoint behind it;
+it requires that token while open and works exactly once (it 409s the moment any account
+exists, whether created through the screen or the CLI below), so there is no standing
+"create a user" endpoint — and no unauthenticated first-boot window — for an attacker to
+hit.
 
 Additional accounts, or headless/scripted setup, go through the CLI:
 
@@ -88,10 +95,13 @@ node src/server/cli.ts add-user alice   docker compose exec peer-to-file \
 The CLI also manages API tokens for scripts / non-browser clients:
 
 ```sh
-node src/server/cli.ts add-token alice backup-script   # prints the token once
+node src/server/cli.ts add-token alice backup-script            # 90-day token, printed once
+node src/server/cli.ts add-token alice ci --ttl 30d             # custom lifetime
+node src/server/cli.ts add-token alice forever --ttl never      # non-expiring
 curl -H "Authorization: Bearer p2f_..." "http://10.0.0.1:8000/api/list?path="
 ```
 
+Tokens default to a 90-day lifetime; `--ttl` accepts `90d`/`12h`/`30m` or `never`.
 `list-users`, `del-user`, `list-tokens`, `del-token` complete the set.
 
 ### How the P2P transfer stays authenticated
@@ -99,9 +109,11 @@ curl -H "Authorization: Bearer p2f_..." "http://10.0.0.1:8000/api/list?path="
 Cookies and headers don't reach WebTorrent's internal HTTP/WebSocket calls, so
 `/api/torrent` embeds short-lived HMAC-signed tokens directly in the URLs it hands out:
 the webseed URL carries a token bound to that one file path, and the tracker URL a token
-that only opens the signaling channel. Both expire after 48 h; a page refresh fetches
-fresh ones. With auth on, the standalone tracker port is not opened at all — the tracker
-is only reachable through the token-gated `/tracker` path on the main port.
+bound to that one torrent's infohash. Both expire after 6 h; a page refresh (or resuming
+a long-paused download) fetches fresh ones. The tracker is only ever reachable through the
+token-gated `/tracker` path on the main port — no standalone, unauthenticated tracker port
+is opened. A client that can carry a `Sec-WebSocket-Protocol` may pass the tracker token
+there (`p2f.<token>`) instead of the query string, keeping it out of proxy access logs.
 
 ## How it works
 
@@ -209,10 +221,9 @@ re-queues it in place — no need to **Clear** the old row first.
 A **Download history** card lists every file this browser has finished saving, with its
 size and completion time — a simple "what did I already grab" record, separate from the
 live in-progress **Downloads** list above it. It's server-persisted (`download_history`
-table in the same SQLite database as users/sessions) and scoped to the signed-in user; with
-`P2F_AUTH=off` there's no user identity to scope it by, so it's one shared, unscoped list
-instead. **Clear history** wipes your own entries — it only touches this list, not
-anything on disk or the file's own availability.
+table in the same SQLite database as users/sessions) and scoped to the signed-in user.
+**Clear history** wipes your own entries — it only touches this list, not anything on disk
+or the file's own availability.
 
 ### Activity logs
 
@@ -292,12 +303,14 @@ the backend.
 | `P2F_ROOT`         | `./data`    | Directory to share (mounted read-only in Docker as `/data`)     |
 | `P2F_HOST`         | `127.0.0.1` | Bind address — **set this to your VPN IP**                      |
 | `P2F_PORT`         | `8000`      | HTTP port: API, webseed and the web client                      |
-| `P2F_TRACKER_PORT` | `8001`      | Embedded WebSocket tracker port                                 |
+| `P2F_TRACKER_PORT` | `8001`      | Legacy tracker port — no longer opened (the tracker is served only at `/tracker` on the main port); kept for compatibility |
 | `P2F_PUBLIC_HOST`  | *(unset)*   | Host override for tracker/webseed URLs handed to clients (only needed behind port remapping; normally derived from each request's `Host` header) |
 | `P2F_PUBLIC_URL`   | *(unset)*   | Public origin when behind a reverse proxy, e.g. `https://files.example.com` — see below |
-| `P2F_AUTH`         | `on`        | `on` requires login/tokens on every endpoint; `off` restores the VPN-only trust model |
-| `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens/download history (`/config/p2f.db` in Docker) — opened regardless of `P2F_AUTH` |
+| `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens/download history (`/config/p2f.db` in Docker) |
 | `P2F_CACHE_DIR`    | `./p2f-cache` | Ciphertext cache for transfer encryption (`/config/cache` in Docker) — see "Transfer encryption" below |
+| `P2F_CACHE_MAX_BYTES` | `8589934592` | Soft cap (bytes) on the ciphertext cache; least-recently-used entries are evicted over it (`0` disables). Default 8 GiB |
+| `P2F_SECURE_COOKIES` | `auto`    | Mark auth cookies `Secure`: `auto` (derive from the effective scheme), `on`, or `off` |
+| `P2F_TRUST_PROXY`  | `off`       | Trust `X-Forwarded-*` from a front proxy (needed for correct client IPs / `Secure` behind nginx) |
 
 ## Behind a reverse proxy (nginx)
 
@@ -317,8 +330,13 @@ commented example lives in [`docs/nginx.example.conf`](docs/nginx.example.conf).
 The same security rule applies one layer up: TLS is not authentication. Bind the nginx
 listener to the VPN IP, or add auth (basic auth, client certs) at the proxy.
 
-The separate tracker port (`P2F_TRACKER_PORT`) keeps running for direct/VPN access but
-does not need to be exposed through the proxy.
+Behind a TLS-terminating proxy, also set `P2F_TRUST_PROXY=on` (so client IPs in the
+activity log and the `Secure`-cookie decision honor `X-Forwarded-*`). If the proxy
+terminates HTTPS but you don't set `P2F_PUBLIC_URL` to an `https://` origin, set
+`P2F_SECURE_COOKIES=on` explicitly so session cookies are still marked `Secure`.
+
+The tracker is served only on the main HTTP port at `/tracker`; no standalone tracker port
+is opened, so nothing extra needs exposing through the proxy.
 
 ## Development
 
@@ -380,7 +398,7 @@ build.
   memory use scales with file size.
 - First download of a file waits for the server to hash it (~disk read speed); metadata
   is cached afterwards.
-- Transfer tokens expire after 48 h; a download paused longer than that resumes with
+- Transfer tokens expire after 6 h; a download paused longer than that resumes with
   fresh tokens on the next page load (or after re-clicking Download).
 - The activity log is in-memory and unauthenticated requests aren't attributed to a
   user (only an IP) — it's an operational aid, not a security audit trail.

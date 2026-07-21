@@ -62,6 +62,18 @@ export function clearCookiesForOrigin (origin: string): void {
   cookieJar.delete(origin)
 }
 
+/** Read a single cookie value from the in-memory jar (e.g. the refresh token). */
+export function getCookie (origin: string, name: string): string | undefined {
+  return cookieJar.get(origin)?.get(name)
+}
+
+/** Seed a cookie into the jar (e.g. a persisted refresh token restored on launch). */
+export function setCookie (origin: string, name: string, value: string): void {
+  let jar = cookieJar.get(origin)
+  if (!jar) { jar = new Map(); cookieJar.set(origin, jar) }
+  jar.set(name, value)
+}
+
 export async function performFetch (req: FetchRequest): Promise<FetchResult> {
   const origin = new URL(req.url).origin
   const headers = new Headers(req.headers ?? {})

@@ -76,6 +76,7 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
       xhr.open('POST', url)
       xhr.withCredentials = true
       xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+      xhr.setRequestHeader('X-P2F-Csrf', '1') // F5: CSRF guard on cookie-authed mutations
       for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value)
       xhr.upload.addEventListener('progress', e => {
         if (e.lengthComputable) patch(id, { progress: e.loaded / e.total })

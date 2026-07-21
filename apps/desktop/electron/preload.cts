@@ -15,11 +15,17 @@ export interface DownloadCompletedInfo {
 const api = {
   fetch: (req: FetchRequest): Promise<FetchResult> => ipcRenderer.invoke('net:fetch', req),
 
-  saveCredentials: (server: string, username: string, password: string): Promise<void> =>
-    ipcRenderer.invoke('credentials:save', server, username, password),
+  saveCredentials: (server: string, username: string, refreshToken: string): Promise<void> =>
+    ipcRenderer.invoke('credentials:save', server, username, refreshToken),
   loadCredentials: (server: string): Promise<StoredCredentials | null> =>
     ipcRenderer.invoke('credentials:load', server),
   clearCredentials: (server: string): Promise<void> => ipcRenderer.invoke('credentials:clear', server),
+
+  // Persist/restore the refresh token (p2f_refresh) via the main-process jar (F9).
+  getCookie: (origin: string, name: string): Promise<string | null> =>
+    ipcRenderer.invoke('net:getCookie', origin, name),
+  setCookie: (origin: string, name: string, value: string): Promise<void> =>
+    ipcRenderer.invoke('net:setCookie', origin, name, value),
 
   defaultDownloadsDir: (): Promise<string | null> => ipcRenderer.invoke('downloads:defaultDir'),
   pickDownloadFolder: (): Promise<string | null> => ipcRenderer.invoke('downloads:pickFolder'),

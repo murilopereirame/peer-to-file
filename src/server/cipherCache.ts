@@ -20,6 +20,13 @@ export interface CipherCache {
   getEntry (absPath: string): Promise<CipherEntry>
 }
 
+export interface CipherCacheOptions {
+  /** Soft cap on total cache size in bytes; 0 disables eviction. */
+  maxBytes?: number
+  /** Returns true if a cache file must not be evicted (e.g. actively seeded). */
+  isPinned?: (cachePath: string) => boolean
+}
+
 /**
  * On-demand ciphertext cache: application-layer encryption for file transfers,
  * independent of whatever TLS/VPN the deployment does or doesn't have. Each
@@ -48,21 +55,89 @@ export interface CipherCache {
  * within one process). Deliberately stored outside P2F_ROOT so it stays
  * writable even when the shared root is mounted read-only.
  */
-export function createCipherCache (cacheDir: string, masterSecret: Buffer): CipherCache {
+export function createCipherCache (
+  cacheDir: string, masterSecret: Buffer, options: CipherCacheOptions = {}
+): CipherCache {
   const cache = new Map<string, Promise<CipherEntry>>()
+  const maxBytes = options.maxBytes ?? 0
+  const isPinned = options.isPinned ?? (() => false)
+  // idHash -> last access time, an in-memory LRU hint for eviction ordering.
+  const lastAccess = new Map<string, number>()
+  // idHash -> identity, so eviction can drop the matching in-memory promise
+  // (whose cachePath points at the dir being deleted) synchronously.
+  const idHashToIdentity = new Map<string, string>()
 
   async function getEntry (absPath: string): Promise<CipherEntry> {
     const st = await fs.stat(absPath)
     const identity = `${absPath}:${st.size}:${st.mtimeMs}`
+    const idHash = crypto.createHash('sha256').update(identity).digest('hex')
+    lastAccess.set(idHash, Date.now())
+    idHashToIdentity.set(idHash, identity)
     let promise = cache.get(identity)
     if (!promise) {
-      promise = buildEntry(absPath, identity)
+      promise = buildEntry(absPath, identity).then(async entry => {
+        if (maxBytes > 0) await evictIfNeeded().catch(() => {})
+        return entry
+      })
       promise.catch(() => {
         if (cache.get(identity) === promise) cache.delete(identity)
       })
       cache.set(identity, promise)
     }
     return promise
+  }
+
+  /**
+   * Best-effort LRU eviction: when the on-disk cache exceeds maxBytes, delete
+   * the least-recently-used entry directories until back under the cap, never
+   * touching one that's currently pinned (actively seeded). An evicted file is
+   * simply re-encrypted on its next request, so this is safe to get wrong.
+   */
+  async function evictIfNeeded (): Promise<void> {
+    let dirs: string[]
+    try {
+      dirs = await fs.readdir(cacheDir)
+    } catch {
+      return
+    }
+    const entries: Array<{ idHash: string, dir: string, size: number, cacheFile: string | null, atime: number }> = []
+    let total = 0
+    for (const idHash of dirs) {
+      const dir = path.join(cacheDir, idHash)
+      let files: string[]
+      try {
+        files = await fs.readdir(dir)
+      } catch {
+        continue
+      }
+      let size = 0
+      let cacheFile: string | null = null
+      for (const f of files) {
+        try {
+          const st = await fs.stat(path.join(dir, f))
+          size += st.size
+          if (!f.endsWith('.sha256')) cacheFile = path.join(dir, f)
+        } catch { /* vanished mid-scan */ }
+      }
+      total += size
+      entries.push({ idHash, dir, size, cacheFile, atime: lastAccess.get(idHash) ?? 0 })
+    }
+    if (total <= maxBytes) return
+    // Oldest first.
+    entries.sort((a, b) => a.atime - b.atime)
+    for (const e of entries) {
+      if (total <= maxBytes) break
+      if (e.cacheFile && isPinned(e.cacheFile)) continue
+      try {
+        await fs.rm(e.dir, { recursive: true, force: true })
+        total -= e.size
+        lastAccess.delete(e.idHash)
+        // Drop the in-memory promise pointing at this evicted dir, so the next
+        // request rebuilds it instead of returning a path that no longer exists.
+        const identity = idHashToIdentity.get(e.idHash)
+        if (identity) { cache.delete(identity); idHashToIdentity.delete(e.idHash) }
+      } catch { /* eviction is best-effort */ }
+    }
   }
 
   async function buildEntry (absPath: string, identity: string): Promise<CipherEntry> {

@@ -24,6 +24,7 @@ export interface ApiTokenInfo {
   name: string
   created_at: number
   last_used_at: number | null
+  expires_at: number | null
 }
 
 export interface DownloadHistoryEntry {
@@ -36,13 +37,19 @@ export interface DownloadHistoryEntry {
   duration_ms: number | null
 }
 
-const SCRYPT_N = 16384
+// N raised to 2^17 (OWASP guidance). Old hashes stored with a smaller N still
+// verify — the parameters are encoded in each hash string — and are upgraded
+// transparently on the next successful login (see needsRehash / upgrade below).
+// maxmem must be raised in step with N: scrypt needs ~128*N*r bytes, which at
+// N=2^17 exceeds node's 32 MiB default.
+const SCRYPT_N = 131072
 const SCRYPT_R = 8
 const SCRYPT_P = 1
+const SCRYPT_MAXMEM = 256 * 1024 * 1024
 
 function hashPassword (password: string): string {
   const salt = crypto.randomBytes(16)
-  const hash = crypto.scryptSync(password, salt, 64, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })
+  const hash = crypto.scryptSync(password, salt, 64, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM })
   return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString('hex')}$${hash.toString('hex')}`
 }
 
@@ -52,9 +59,17 @@ function verifyPassword (password: string, stored: string): boolean {
   const [, n, r, p, saltHex, hashHex] = parts as [string, string, string, string, string, string]
   const expected = Buffer.from(hashHex, 'hex')
   const actual = crypto.scryptSync(password, Buffer.from(saltHex, 'hex'), expected.length, {
-    N: Number(n), r: Number(r), p: Number(p)
+    N: Number(n), r: Number(r), p: Number(p), maxmem: SCRYPT_MAXMEM
   })
   return crypto.timingSafeEqual(actual, expected)
+}
+
+/** True if a stored hash uses weaker parameters than the current target. */
+function needsRehash (stored: string): boolean {
+  const parts = stored.split('$')
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return true
+  const [, n, r, p] = parts
+  return Number(n) < SCRYPT_N || Number(r) < SCRYPT_R || Number(p) < SCRYPT_P
 }
 
 const sha256 = (value: string): string =>
@@ -84,6 +99,12 @@ export class AuthDb {
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS sessions (
+        id_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
         id_hash TEXT PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         created_at INTEGER NOT NULL,
@@ -120,7 +141,10 @@ export class AuthDb {
     for (const stmt of [
       'ALTER TABLE download_history ADD COLUMN info_hash TEXT',
       'ALTER TABLE download_history ADD COLUMN duration_ms INTEGER',
-      "ALTER TABLE download_history ADD COLUMN kind TEXT NOT NULL DEFAULT 'download'"
+      "ALTER TABLE download_history ADD COLUMN kind TEXT NOT NULL DEFAULT 'download'",
+      // Nullable: a NULL expiry means "never expires", so API tokens created
+      // before this migration keep working unchanged.
+      'ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER'
     ]) {
       try { this.db.exec(stmt) } catch { /* column already exists */ }
     }
@@ -136,8 +160,8 @@ export class AuthDb {
     if (!/^[a-zA-Z0-9._-]{1,64}$/.test(username)) {
       throw new Error('username must be 1-64 chars of letters, digits, . _ -')
     }
-    if (password.length < 8) {
-      throw new Error('password must be at least 8 characters')
+    if (password.length < 12) {
+      throw new Error('password must be at least 12 characters')
     }
     const now = Date.now()
     const res = this.db.prepare(
@@ -179,10 +203,18 @@ export class AuthDb {
       'SELECT id, username, pass_hash, created_at FROM users WHERE username = ?'
     ).get(username) as ({ id: number, username: string, pass_hash: string, created_at: number } | undefined)
     if (!row || !verifyPassword(password, row.pass_hash)) return null
+    // Transparently upgrade a hash stored with weaker (older) scrypt params
+    // now that we've verified the plaintext once.
+    if (needsRehash(row.pass_hash)) {
+      this.db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(hashPassword(password), row.id)
+    }
     return { id: row.id, username: row.username, created_at: row.created_at }
   }
 
-  // --- sessions (cookie value is the raw id; only its hash is stored) ------
+  // --- sessions (short-lived access) + refresh tokens ---------------------
+  // Cookie values are raw random ids; only their SHA-256 hashes are stored.
+  // Access sessions are a hard TTL (no sliding renewal); the refresh token
+  // below is what extends a login, rotating single-use on each /api/refresh.
 
   createSession (userId: number, ttlMs: number): string {
     const id = crypto.randomBytes(32).toString('hex')
@@ -193,7 +225,7 @@ export class AuthDb {
     return id
   }
 
-  getSessionUser (sessionId: string, slideTtlMs?: number): User | null {
+  getSessionUser (sessionId: string): User | null {
     const row = this.db.prepare(`
       SELECT u.id, u.username, u.created_at, s.expires_at FROM sessions s
       JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?
@@ -203,10 +235,6 @@ export class AuthDb {
       this.deleteSession(sessionId)
       return null
     }
-    if (slideTtlMs) {
-      this.db.prepare('UPDATE sessions SET expires_at = ? WHERE id_hash = ?')
-        .run(Date.now() + slideTtlMs, sha256(sessionId))
-    }
     return { id: row.id, username: row.username, created_at: row.created_at }
   }
 
@@ -214,29 +242,70 @@ export class AuthDb {
     this.db.prepare('DELETE FROM sessions WHERE id_hash = ?').run(sha256(sessionId))
   }
 
+  createRefreshToken (userId: number, ttlMs: number): string {
+    const id = crypto.randomBytes(32).toString('hex')
+    const now = Date.now()
+    this.db.prepare(
+      'INSERT INTO refresh_tokens (id_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)'
+    ).run(sha256(id), userId, now, now + ttlMs)
+    return id
+  }
+
+  /**
+   * Single-use: validates a refresh token and deletes it (rotation), returning
+   * its user. node:sqlite is synchronous with no await between the read and the
+   * delete, so a token can't be redeemed twice by concurrent requests.
+   */
+  consumeRefreshToken (refreshId: string): User | null {
+    const row = this.db.prepare(`
+      SELECT u.id, u.username, u.created_at, r.expires_at FROM refresh_tokens r
+      JOIN users u ON u.id = r.user_id WHERE r.id_hash = ?
+    `).get(sha256(refreshId)) as ({ id: number, username: string, created_at: number, expires_at: number } | undefined)
+    if (!row) return null
+    this.db.prepare('DELETE FROM refresh_tokens WHERE id_hash = ?').run(sha256(refreshId))
+    if (row.expires_at < Date.now()) return null
+    return { id: row.id, username: row.username, created_at: row.created_at }
+  }
+
+  deleteRefreshToken (refreshId: string): void {
+    this.db.prepare('DELETE FROM refresh_tokens WHERE id_hash = ?').run(sha256(refreshId))
+  }
+
+  /** Revoke every access session and refresh token for a user. */
+  deleteAllUserSessions (userId: number): void {
+    this.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
+    this.db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(userId)
+  }
+
   pruneExpiredSessions (): void {
-    this.db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now())
+    const now = Date.now()
+    this.db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now)
+    this.db.prepare('DELETE FROM refresh_tokens WHERE expires_at < ?').run(now)
   }
 
   // --- API tokens (Bearer) --------------------------------------------------
 
-  createApiToken (username: string, name: string): string {
+  /** `ttlMs` null → non-expiring token; otherwise it expires ttlMs from now. */
+  createApiToken (username: string, name: string, ttlMs: number | null = null): string {
     const user = this.db.prepare('SELECT id FROM users WHERE username = ?')
       .get(username) as ({ id: number } | undefined)
     if (!user) throw new Error(`no such user: ${username}`)
     const token = `p2f_${crypto.randomBytes(32).toString('base64url')}`
+    const now = Date.now()
     this.db.prepare(
-      'INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?, ?, ?, ?)'
-    ).run(user.id, name, sha256(token), Date.now())
+      'INSERT INTO api_tokens (user_id, name, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(user.id, name, sha256(token), now, ttlMs === null ? null : now + ttlMs)
     return token
   }
 
   getTokenUser (token: string): User | null {
     const row = this.db.prepare(`
-      SELECT u.id, u.username, u.created_at, t.id AS token_id FROM api_tokens t
+      SELECT u.id, u.username, u.created_at, t.id AS token_id, t.expires_at FROM api_tokens t
       JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?
-    `).get(sha256(token)) as ({ id: number, username: string, created_at: number, token_id: number } | undefined)
+    `).get(sha256(token)) as ({ id: number, username: string, created_at: number, token_id: number, expires_at: number | null } | undefined)
     if (!row) return null
+    // NULL expiry = never expires (grandfathered / explicitly non-expiring).
+    if (row.expires_at !== null && row.expires_at < Date.now()) return null
     this.db.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?')
       .run(Date.now(), row.token_id)
     return { id: row.id, username: row.username, created_at: row.created_at }
@@ -244,7 +313,7 @@ export class AuthDb {
 
   listApiTokens (username?: string): ApiTokenInfo[] {
     const sql = `
-      SELECT t.id, t.user_id, t.name, t.created_at, t.last_used_at FROM api_tokens t
+      SELECT t.id, t.user_id, t.name, t.created_at, t.last_used_at, t.expires_at FROM api_tokens t
       JOIN users u ON u.id = t.user_id
       ${username ? 'WHERE u.username = ?' : ''} ORDER BY t.id
     `

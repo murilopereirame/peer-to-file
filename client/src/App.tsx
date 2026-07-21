@@ -15,6 +15,18 @@ import { BrowserApp } from './components/BrowserApp'
 // intentionally no longer supports.
 const API_BASE = `${location.protocol}//${location.host}`
 
+// F9: a single in-flight refresh, shared by any requests that 401 at once, so
+// a burst of concurrent calls triggers exactly one /api/refresh.
+let refreshInFlight: Promise<boolean> | null = null
+function tryRefresh (): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' })
+      .then(r => r.ok, () => false)
+      .finally(() => { refreshInFlight = null })
+  }
+  return refreshInFlight
+}
+
 type View = 'loading' | 'setup' | 'login' | 'browser'
 
 interface AuthInfo {
@@ -44,7 +56,18 @@ export function App (): React.JSX.Element {
   }, [])
 
   const apiFetch = useCallback(async (pathname: string, init?: RequestInit): Promise<Response> => {
-    const res = await fetch(`${API_BASE}${pathname}`, { credentials: 'include', ...init })
+    // F5: a custom header on every request; the server requires it on cookie-
+    // authenticated mutations, and it's harmless on GETs.
+    const doFetch = (): Promise<Response> => fetch(`${API_BASE}${pathname}`, {
+      credentials: 'include',
+      ...init,
+      headers: { 'X-P2F-Csrf': '1', ...(init?.headers as Record<string, string> | undefined) }
+    })
+    let res = await doFetch()
+    // F9: on a 401, try one silent refresh before giving up and showing login.
+    if (res.status === 401 && pathname !== '/api/refresh') {
+      if (await tryRefresh()) res = await doFetch()
+    }
     if (res.status === 401) {
       setView('login')
       throw new HttpError(401, 'authentication required')

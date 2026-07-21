@@ -148,6 +148,19 @@ but is a boundary that silently disappears the moment a third account exists (se
 
 ## 6. Findings
 
+> **Remediation status (2026-07):** F0–F12 have since been addressed. Highlights:
+> the `P2F_AUTH=off` mode was removed (authentication is always on, F0/F10); login is
+> rate-limited with fail2ban-friendly logging and a 12-char password floor (F1); the
+> ciphertext cache is size-capped with LRU eviction and the expensive endpoints are
+> throttled (F2); tracker tokens are infohash-bound with a shortened TTL and optional
+> `Sec-WebSocket-Protocol` carriage (F3); cookie-authenticated mutations require an
+> `X-P2F-Csrf` header (F5); a `P2F_SECURE_COOKIES` knob plus `P2F_TRUST_PROXY` fix the
+> cookie/scheme handling (F6/F12); the upload SHA-256 moved inside the authenticated
+> wrapped blob (F7); scrypt cost was raised with upgrade-on-login (F8); sessions became
+> a 48 h access + rotating refresh pair and API tokens gained a default 90-day TTL (F9);
+> `/api/setup` is gated behind a one-time setup token (F1a); and CI runs `npm audit` with
+> Dependabot enabled (F11). The findings below are retained as the original review record.
+
 Severity is relative to the intended (VPN-bound, few trusted users) deployment.
 
 | ID | Severity | Title |
@@ -376,6 +389,9 @@ oversights:
 
 - The server can read plaintext files (not zero-knowledge storage).
 - No protection against an **active** on-path attacker without TLS/VPN.
-- Flat trust among authenticated users in the intended two-peer model.
+- Flat trust among authenticated users in the intended two-peer model (F4 — deferred
+  until a multi-user use case appears; every account is effectively admin until then).
 - In-memory activity log is operational, not an audit trail.
-- `P2F_AUTH=off` intentionally reduces the trust boundary to the network alone.
+- An authorized tracker connection (infohash-bound token) could still announce a
+  different infohash over that one socket — a minor swarm-metadata leak on a private
+  two-peer tracker, accepted rather than patched into the tracker's message handling.

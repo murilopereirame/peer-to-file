@@ -7,6 +7,7 @@ export function SetupScreen ({ onDone }: { onDone: () => void }): React.JSX.Elem
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [setupToken, setSetupToken] = useState('')
   const [status, setStatus] = useState<{ msg: string, kind: '' | 'error' }>({ msg: '', kind: '' })
   const [busy, setBusy] = useState(false)
 
@@ -23,7 +24,7 @@ export function SetupScreen ({ onDone }: { onDone: () => void }): React.JSX.Elem
         await apiFetch('/api/setup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password })
+          body: JSON.stringify({ username, password, setupToken })
         })
         setPassword('')
         setConfirm('')
@@ -42,22 +43,28 @@ export function SetupScreen ({ onDone }: { onDone: () => void }): React.JSX.Elem
       <h2>Create the admin account</h2>
       <p className="hint">
         No account exists yet. Choose a username and password to secure this server —
-        this is the only account this screen will ever create.
+        this is the only account this screen will ever create. The one-time
+        <strong> setup token</strong> is printed in the server log at first boot.
       </p>
       <form id="setup-form" className="field-group" onSubmit={submit}>
         <input
-          id="setup-user" type="text" placeholder="username" autoFocus
+          id="setup-token" type="text" placeholder="setup token (from the server log)" autoFocus
+          autoComplete="off" spellCheck={false} required
+          value={setupToken} onChange={e => setSetupToken(e.target.value)}
+        />
+        <input
+          id="setup-user" type="text" placeholder="username"
           autoComplete="username" spellCheck={false} required
           value={username} onChange={e => setUsername(e.target.value)}
         />
         <input
-          id="setup-pass" type="password" placeholder="password (min. 8 characters)"
-          autoComplete="new-password" minLength={8} required
+          id="setup-pass" type="password" placeholder="password (min. 12 characters)"
+          autoComplete="new-password" minLength={12} required
           value={password} onChange={e => setPassword(e.target.value)}
         />
         <input
           id="setup-pass2" type="password" placeholder="confirm password"
-          autoComplete="new-password" minLength={8} required
+          autoComplete="new-password" minLength={12} required
           value={confirm} onChange={e => setConfirm(e.target.value)}
         />
         <button type="submit" className="primary block" disabled={busy}>Create account</button>
