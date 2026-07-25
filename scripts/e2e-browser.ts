@@ -152,6 +152,11 @@ try {
   await page.waitForSelector('#setup:not([hidden])', { timeout: 10_000 })
   console.log('✓ client auto-connected, first-run setup required')
 
+  // The setup form requires the one-time token the server prints at first
+  // boot (F1a); startServer hands it straight back to us. Without it the
+  // required field blocks the form's submit handler from ever running.
+  if (!running.setupToken) fail('expected a first-run setup token')
+  await page.fill('#setup-token', running.setupToken)
   await page.fill('#setup-user', USER)
   await page.fill('#setup-pass', PASSWORD)
   await page.fill('#setup-pass2', 'does not match')
