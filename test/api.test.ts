@@ -27,10 +27,7 @@ before(async () => {
   await fs.mkdir(path.join(root, 'docs'))
   await fs.writeFile(path.join(root, 'docs', 'readme.md'), '# hi\n')
 
-  running = await startServer(testConfig({
-    root,
-    cacheDir: path.join(root, '.p2f-cache')
-  }), silentLogger)
+  running = await startServer(testConfig({ root }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
   running.db.createUser('alice', 'correct horse battery')
   apiToken = running.db.createApiToken('alice', 'test')

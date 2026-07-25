@@ -46,21 +46,18 @@ above. The server can still read files (it already does, to hash and serve them)
 is not zero-knowledge storage: an operator with access to the server can read the shared
 files, same as today.
 
-- **Downloads**: the server encrypts each shared file once per version into a ciphertext
-  cache (`P2F_CACHE_DIR`, default `./p2f-cache`) with a key deterministically derived from
-  a per-server secret plus the file's identity — deterministic so an unchanged file
-  produces the same ciphertext (and BitTorrent infohash) across server restarts, keeping
-  the existing resume behavior intact. Both the HTTP webseed and WebRTC peers serve this
-  ciphertext; BitTorrent's own per-piece SHA-1 verification runs against it unchanged. The
-  web and desktop clients decrypt transparently as they save.
-
-  The whole ciphertext is written once (not streamed on the fly) because the WebRTC seeder
-  and BitTorrent piece hashing both need random access to the complete ciphertext. To keep
-  those copies from piling up on a busy server, an hourly reaper stops seeding any file with
-  no connected peers that has gone idle and deletes its cache entry — well before the byte
-  cap would. Because the key is derived deterministically, an unchanged file re-encrypts to
-  byte-identical ciphertext (same infohash) on its next request, so reaping never breaks
-  resume. Tune it with `P2F_CACHE_IDLE_MS` / `P2F_CACHE_CLEANUP_INTERVAL_MS`.
+- **Downloads**: the server encrypts each shared file on the fly with a key deterministically
+  derived from a per-server secret plus the file's identity — deterministic so an unchanged
+  file produces the same ciphertext (and BitTorrent infohash) across server restarts, keeping
+  the existing resume behavior intact. Nothing is written to disk: because AES-CTR is
+  seekable, the torrent's piece hashes are computed in a single streaming pass, the HTTP
+  webseed encrypts each requested byte range as it's served, and the WebRTC seeder serves
+  pieces through an on-demand store — none holds more than a small rolling buffer. BitTorrent's
+  own per-piece SHA-1 verification runs against the ciphertext unchanged, and the web and
+  desktop clients decrypt transparently as they save. (Requesting a file adds its torrent to
+  the WebRTC swarm; an hourly reaper drops torrents with no peers that have gone idle, and
+  they're re-added deterministically on the next request — tune with `P2F_SEED_IDLE_MS` /
+  `P2F_SEED_SWEEP_INTERVAL_MS`.)
 - **Uploads**: the client generates a fresh one-time key per upload and encrypts the file
   before it leaves the device, plus a plaintext SHA-256 the server verifies after
   decrypting — closing the integrity gap CTR alone doesn't cover (uploads had no integrity
@@ -75,8 +72,8 @@ files, same as today.
   protects against a passive observer; it isn't a substitute for authenticating the network
   path itself (that's what TLS/VPN are for) against an *active* attacker who can tamper
   with traffic in real time.
-- `P2F_CACHE_DIR` is deliberately outside `P2F_ROOT`, so it stays writable even when the
-  shared root is mounted read-only.
+- Transfer encryption keeps nothing on disk, so `P2F_ROOT` can be mounted read-only without
+  any writable cache alongside it.
 
 ### Setting up users and tokens
 
@@ -315,10 +312,8 @@ the backend.
 | `P2F_PUBLIC_HOST`  | *(unset)*   | Host override for tracker/webseed URLs handed to clients (only needed behind port remapping; normally derived from each request's `Host` header) |
 | `P2F_PUBLIC_URL`   | *(unset)*   | Public origin when behind a reverse proxy, e.g. `https://files.example.com` — see below |
 | `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens/download history (`/config/p2f.db` in Docker) |
-| `P2F_CACHE_DIR`    | `./p2f-cache` | Ciphertext cache for transfer encryption (`/config/cache` in Docker) — see "Transfer encryption" below |
-| `P2F_CACHE_MAX_BYTES` | `8589934592` | Soft cap (bytes) on the ciphertext cache; least-recently-used entries are evicted over it (`0` disables). Default 8 GiB |
-| `P2F_CACHE_IDLE_MS` | `3600000` | Idle time (ms) before an unused cache entry — not seeded, not fetched — is reaped by the hourly cleanup task. Default 1 h |
-| `P2F_CACHE_CLEANUP_INTERVAL_MS` | `3600000` | How often (ms) the cache cleanup task sweeps for idle entries. Default 1 h |
+| `P2F_SEED_IDLE_MS` | `3600000` | Idle time (ms, no connected peers) before a seeded torrent is dropped from the WebRTC swarm (re-added on the next request). Default 1 h |
+| `P2F_SEED_SWEEP_INTERVAL_MS` | `3600000` | How often (ms) the reaper sweeps for idle torrents. Default 1 h |
 | `P2F_SECURE_COOKIES` | `auto`    | Mark auth cookies `Secure`: `auto` (derive from the effective scheme), `on`, or `off` |
 | `P2F_TRUST_PROXY`  | `off`       | Trust `X-Forwarded-*` from a front proxy (needed for correct client IPs / `Secure` behind nginx) |
 

@@ -21,26 +21,14 @@ export interface Config {
   /** SQLite database path for users/sessions/tokens (default ./p2f.db). */
   dbPath: string
   /**
-   * Directory for the on-demand ciphertext cache (default ./p2f-cache).
-   * Deliberately separate from P2F_ROOT so it stays writable even when the
-   * shared root is mounted read-only.
+   * How long a seeded torrent may sit with no connected peers before the hourly
+   * reaper stops seeding it (it's re-added on the next request). Transfer
+   * encryption is streamed on the fly, so there is no ciphertext cache to size
+   * or reclaim — only the WebRTC swarm. Default 1 hour.
    */
-  cacheDir: string
-  /**
-   * Soft cap on the ciphertext cache's total size in bytes. When a new entry
-   * would push the cache over this, least-recently-used entries are evicted
-   * (never one that's actively being seeded). 0 disables the cap. Default 8 GiB.
-   */
-  cacheMaxBytes: number
-  /**
-   * How long a ciphertext cache entry must sit unused — not actively seeded and
-   * not fetched — before the hourly cleanup task deletes it. Reclaims disk from
-   * files that are no longer being transferred, well before the byte cap would.
-   * Default 1 hour.
-   */
-  cacheIdleMs: number
-  /** How often the cache cleanup task sweeps for idle entries. Default 1 hour. */
-  cacheCleanupIntervalMs: number
+  seedIdleMs: number
+  /** How often the seed reaper sweeps for idle torrents. Default 1 hour. */
+  seedSweepIntervalMs: number
   /**
    * Whether to mark auth cookies `Secure`. 'auto' (default) derives it from
    * the effective external scheme (P2F_PUBLIC_URL and, with P2F_TRUST_PROXY
@@ -66,13 +54,6 @@ function parseBool (value: string | undefined, fallback: boolean): boolean {
   if (value === '1' || value === 'true' || value === 'on') return true
   if (value === '0' || value === 'false' || value === 'off') return false
   throw new Error(`expected a boolean (on/off), got: ${value}`)
-}
-
-function parseBytes (value: string | undefined, fallback: number): number {
-  if (value === undefined || value === '') return fallback
-  const n = Number(value)
-  if (!Number.isFinite(n) || n < 0) throw new Error(`invalid byte size: ${value}`)
-  return n
 }
 
 function parseMs (value: string | undefined, fallback: number): number {
@@ -123,11 +104,8 @@ function parsePort (value: string | undefined, fallback: number): number {
  *                    <origin>/tracker and takes precedence over P2F_PUBLIC_HOST
  *   P2F_DB           SQLite database path for users/sessions/API tokens and
  *                    download history (default ./p2f.db)
- *   P2F_CACHE_DIR    directory for the on-demand transfer-encryption
- *                    ciphertext cache (default ./p2f-cache)
- *   P2F_CACHE_MAX_BYTES  soft cap on the ciphertext cache size (default 8 GiB)
- *   P2F_CACHE_IDLE_MS    idle time before an unused cache entry is reaped (default 1h)
- *   P2F_CACHE_CLEANUP_INTERVAL_MS  how often the cache reaper runs (default 1h)
+ *   P2F_SEED_IDLE_MS         idle time (no peers) before a seeded torrent is dropped (default 1h)
+ *   P2F_SEED_SWEEP_INTERVAL_MS  how often the seed reaper runs (default 1h)
  *   P2F_SECURE_COOKIES   'auto' (default), 'on' or 'off' — mark auth cookies Secure
  *   P2F_TRUST_PROXY  'on'/'off' (default off) — trust X-Forwarded-* from a proxy
  */
@@ -151,10 +129,8 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
     publicHost: env.P2F_PUBLIC_HOST || null,
     publicUrl: parsePublicUrl(env.P2F_PUBLIC_URL),
     dbPath: env.P2F_DB || path.resolve('./p2f.db'),
-    cacheDir: env.P2F_CACHE_DIR || path.resolve('./p2f-cache'),
-    cacheMaxBytes: parseBytes(env.P2F_CACHE_MAX_BYTES, 8 * 1024 * 1024 * 1024),
-    cacheIdleMs: parseMs(env.P2F_CACHE_IDLE_MS, 60 * 60 * 1000),
-    cacheCleanupIntervalMs: parseMs(env.P2F_CACHE_CLEANUP_INTERVAL_MS, 60 * 60 * 1000),
+    seedIdleMs: parseMs(env.P2F_SEED_IDLE_MS, 60 * 60 * 1000),
+    seedSweepIntervalMs: parseMs(env.P2F_SEED_SWEEP_INTERVAL_MS, 60 * 60 * 1000),
     secureCookies: parseSecureCookies(env.P2F_SECURE_COOKIES),
     trustProxy: parseBool(env.P2F_TRUST_PROXY, false)
   }

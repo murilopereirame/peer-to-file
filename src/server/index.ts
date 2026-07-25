@@ -6,8 +6,8 @@ import { WebSocketServer } from 'ws'
 import TrackerServer from 'bittorrent-tracker/server'
 import { loadConfig, type Config } from './config.ts'
 import { createTorrentStore } from './torrents.ts'
-import { createCipherCache } from './cipherCache.ts'
-import { startCacheCleanup } from './cacheCleanup.ts'
+import { createCipherKeys } from './cipherKeys.ts'
+import { startSeedReaper } from './seedReaper.ts'
 import { createKeyExchange } from './keyExchange.ts'
 import { createSeeder } from './seeder.ts'
 import { createApp, bracketHost } from './app.ts'
@@ -109,26 +109,23 @@ export async function startServer (
       })
     })
   }
-  const cipherCache = createCipherCache(config.cacheDir, db.cipherMasterSecret(), {
-    maxBytes: config.cacheMaxBytes,
-    isPinned: cachePath => seeder.isSeeding(cachePath)
-  })
+  const cipherKeys = createCipherKeys(db.cipherMasterSecret())
   const keyExchange = createKeyExchange(db.ecdhPrivateKey())
 
-  // Hourly reaper: stop seeding files no one is transferring and delete their
-  // ciphertext cache entries, so a busy server doesn't accumulate encrypted
-  // copies until it hits the byte cap (or fills the disk). See cacheCleanup.ts.
-  const cacheCleanup = startCacheCleanup({
+  // Hourly reaper: stop seeding files no one is transferring, so a busy server
+  // doesn't accumulate idle torrents in the WebTorrent client forever. Transfer
+  // encryption is streamed on the fly now, so there's no ciphertext cache to
+  // reclaim — only the swarm. See seedReaper.ts.
+  const seedReaper = startSeedReaper({
     seeder,
-    cipherCache,
     activity,
     log,
-    idleMs: config.cacheIdleMs,
-    intervalMs: config.cacheCleanupIntervalMs
+    idleMs: config.seedIdleMs,
+    intervalMs: config.seedSweepIntervalMs
   })
 
-  const store = createTorrentStore(cipherCache)
-  const app = createApp({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version, log, setupToken })
+  const store = createTorrentStore(cipherKeys)
+  const app = createApp({ config, store, seeder, auth, activity, db, cipherKeys, keyExchange, version, log, setupToken })
   const server = http.createServer(app)
 
   // Serve the tracker WebSocket on the main HTTP port too (at /tracker), so
@@ -204,7 +201,7 @@ export async function startServer (
   log.info(`WebRTC seeding: ${seeder.enabled ? 'enabled' : 'DISABLED (webseed fallback only)'}`)
 
   async function close (): Promise<void> {
-    cacheCleanup.stop()
+    seedReaper.stop()
     await withTimeout(
       new Promise<void>(resolve => tracker.close(() => resolve())),
       3000, 'tracker.close()', log

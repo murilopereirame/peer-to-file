@@ -79,9 +79,7 @@ const config = () => ({
   trackerPort: TRACKER_PORT,
   publicHost: null,
   publicUrl: null,
-  authEnabled: true,
-  dbPath: path.join(dbDir, 'p2f.db'),
-  cacheDir: path.join(root, '.p2f-cache')
+  dbPath: path.join(dbDir, 'p2f.db')
 })
 
 let running: RunningServer = await startServer(config(), consoleLogger)

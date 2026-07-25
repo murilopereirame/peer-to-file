@@ -2,6 +2,7 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import crypto from 'node:crypto'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import express, { type Request, type Response, type NextFunction, type Express } from 'express'
 import {
@@ -18,7 +19,7 @@ import { createFixedWindowLimiter, createTokenBucketLimiter } from './rateLimit.
 import type { Config } from './config.ts'
 import type { Seeder } from './seeder.ts'
 import type { AuthDb } from './db.ts'
-import type { CipherCache } from './cipherCache.ts'
+import type { CipherKeys } from './cipherKeys.ts'
 import { KeyExchangeError, type KeyExchange } from './keyExchange.ts'
 import type { Logger } from './log.ts'
 
@@ -29,12 +30,41 @@ export interface AppDeps {
   auth: AuthService
   activity: ActivityLog
   db: AuthDb
-  cipherCache: CipherCache
+  cipherKeys: CipherKeys
   keyExchange: KeyExchange
   version: string
   log: Logger
   /** One-time first-run setup token (F1a); null once an admin account exists. */
   setupToken: string | null
+}
+
+/**
+ * Parse a single-range HTTP `Range: bytes=…` header against a known size.
+ * Returns null when there's no range (serve the whole thing), 'unsatisfiable'
+ * for a syntactically fine but out-of-bounds range (→ 416), and a clamped
+ * inclusive {start,end} otherwise. Only single ranges are supported — that's
+ * all WebTorrent's webseed client and browsers' media fetches ever ask for.
+ */
+export function parseSingleRange (header: string | undefined, size: number): null | 'unsatisfiable' | { start: number, end: number } {
+  if (!header) return null
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!match) return null // ignore multi-range / malformed: fall back to full body
+  const [, rawStart, rawEnd] = match
+  if (rawStart === '' && rawEnd === '') return null
+  let start: number
+  let end: number
+  if (rawStart === '') {
+    // suffix range: last N bytes
+    const suffix = Number(rawEnd)
+    if (suffix === 0) return 'unsatisfiable'
+    start = Math.max(0, size - suffix)
+    end = size - 1
+  } else {
+    start = Number(rawStart)
+    end = rawEnd === '' ? size - 1 : Math.min(Number(rawEnd), size - 1)
+  }
+  if (start > end || start >= size) return 'unsatisfiable'
+  return { start, end }
 }
 
 const clientDist = fileURLToPath(new URL('../../client/dist', import.meta.url))
@@ -72,7 +102,7 @@ const wrap = (fn: AsyncHandler) =>
     fn(req, res).catch(next)
   }
 
-export function createApp ({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version, log, setupToken }: AppDeps): Express {
+export function createApp ({ config, store, seeder, auth, activity, db, cipherKeys, keyExchange, version, log, setupToken }: AppDeps): Express {
   const app = express()
   app.disable('x-powered-by')
   // F12: honor X-Forwarded-* only when explicitly told there's a trusted proxy.
@@ -264,17 +294,42 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
     if (webseedLogOnce(`${req.ip}:${relQuery}`)) {
       activity.add('webseed', `serving "${relQuery}" to ${req.ip}`, { path: relQuery, ip: req.ip })
     }
-    // Serve the ciphertext cache entry, not the plaintext file — this is the
-    // encrypted-at-rest-and-in-transit copy the torrent's piece hashes were
-    // computed against (see cipherCache.ts / torrents.ts).
-    const { cachePath } = await cipherCache.getEntry(abs)
-    await new Promise<void>((resolve, reject) => {
-      res.sendFile(cachePath, {
-        dotfiles: 'allow',
-        cacheControl: false,
-        headers: { 'Cache-Control': 'no-store' }
-      }, err => err ? reject(err) : resolve())
-    })
+    // Serve ciphertext, not the plaintext file — the same encrypted bytes the
+    // torrent's piece hashes were computed against — but encrypt the requested
+    // byte range on the fly (cipherKeys) rather than from a cached copy, so
+    // nothing but a small rolling buffer is ever held. CTR is length-preserving,
+    // so the ciphertext size equals the plaintext size and Range math is exact.
+    const { key, iv, size } = await cipherKeys.getKeys(abs)
+    const range = parseSingleRange(req.headers.range, size)
+    res.setHeader('Accept-Ranges', 'bytes')
+    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Cache-Control', 'no-store')
+    if (range === 'unsatisfiable') {
+      res.setHeader('Content-Range', `bytes */${size}`)
+      res.status(416).end()
+      return
+    }
+    const start = range ? range.start : 0
+    const end = range ? range.end : Math.max(0, size - 1)
+    const length = size === 0 ? 0 : end - start + 1
+    if (range) {
+      res.status(206).setHeader('Content-Range', `bytes ${start}-${end}/${size}`)
+    }
+    res.setHeader('Content-Length', String(length))
+    if (req.method === 'HEAD' || length === 0) {
+      res.end()
+      return
+    }
+    const stream = cipherKeys.encryptedRange(abs, key, iv, start, end)
+    try {
+      await pipeline(stream, res)
+    } catch (err) {
+      // Client hang-ups (aborted download, seek) surface as premature-close /
+      // EPIPE — expected for a webseed, not an error worth logging.
+      stream.destroy()
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ERR_STREAM_PREMATURE_CLOSE' && code !== 'EPIPE' && !res.writableEnded) throw err
+    }
   }))
 
   // --- everything below requires a session cookie or Bearer token -------------
@@ -527,7 +582,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
     if (!clientKey) throw new BrowseError(400, 'missing ck (client ECDH public key)')
 
     const abs = await resolveInsideRoot(config.root, req.query.path ?? '')
-    const meta = await store.getMeta(abs)
+    const { meta, plainSha256 } = await store.getMeta(abs)
     const rel = path.relative(config.root, abs)
 
     // The webseed carries a path-bound transfer token and the announce an
@@ -557,8 +612,8 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       webseed = `http://${httpHostPort}/api/raw?${rawQuery(rel)}`
     }
 
-    const cipherEntry = await cipherCache.getEntry(abs)
-    seeder.ensureSeeding(cipherEntry.cachePath, meta)
+    const { key, iv } = await cipherKeys.getKeys(abs)
+    seeder.ensureSeeding(abs, meta, key, iv)
 
     const requester = (res.locals as { user?: { username: string } }).user
     activity.add('torrent', `metadata requested for "${rel}"${requester ? ` by ${requester.username}` : ''}`, {
@@ -579,8 +634,8 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherCa
       // carries, ECDH-wrapped for `clientKey` (keyExchange.ts) — the client
       // unwraps this, then decrypts transparently after WebTorrent's own
       // piece verification passes (see packages/shared/src/browserCrypto.ts).
-      encKeyWrapped: wrapOrBadRequest(clientKey, Buffer.concat([cipherEntry.key, cipherEntry.iv])),
-      plainSha256: cipherEntry.plainSha256
+      encKeyWrapped: wrapOrBadRequest(clientKey, Buffer.concat([key, iv])),
+      plainSha256
     })
   }))
 
