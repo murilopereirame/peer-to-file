@@ -53,6 +53,14 @@ files, same as today.
   the existing resume behavior intact. Both the HTTP webseed and WebRTC peers serve this
   ciphertext; BitTorrent's own per-piece SHA-1 verification runs against it unchanged. The
   web and desktop clients decrypt transparently as they save.
+
+  The whole ciphertext is written once (not streamed on the fly) because the WebRTC seeder
+  and BitTorrent piece hashing both need random access to the complete ciphertext. To keep
+  those copies from piling up on a busy server, an hourly reaper stops seeding any file with
+  no connected peers that has gone idle and deletes its cache entry — well before the byte
+  cap would. Because the key is derived deterministically, an unchanged file re-encrypts to
+  byte-identical ciphertext (same infohash) on its next request, so reaping never breaks
+  resume. Tune it with `P2F_CACHE_IDLE_MS` / `P2F_CACHE_CLEANUP_INTERVAL_MS`.
 - **Uploads**: the client generates a fresh one-time key per upload and encrypts the file
   before it leaves the device, plus a plaintext SHA-256 the server verifies after
   decrypting — closing the integrity gap CTR alone doesn't cover (uploads had no integrity
@@ -309,6 +317,8 @@ the backend.
 | `P2F_DB`           | `./p2f.db`  | SQLite database for users/sessions/API tokens/download history (`/config/p2f.db` in Docker) |
 | `P2F_CACHE_DIR`    | `./p2f-cache` | Ciphertext cache for transfer encryption (`/config/cache` in Docker) — see "Transfer encryption" below |
 | `P2F_CACHE_MAX_BYTES` | `8589934592` | Soft cap (bytes) on the ciphertext cache; least-recently-used entries are evicted over it (`0` disables). Default 8 GiB |
+| `P2F_CACHE_IDLE_MS` | `3600000` | Idle time (ms) before an unused cache entry — not seeded, not fetched — is reaped by the hourly cleanup task. Default 1 h |
+| `P2F_CACHE_CLEANUP_INTERVAL_MS` | `3600000` | How often (ms) the cache cleanup task sweeps for idle entries. Default 1 h |
 | `P2F_SECURE_COOKIES` | `auto`    | Mark auth cookies `Secure`: `auto` (derive from the effective scheme), `on`, or `off` |
 | `P2F_TRUST_PROXY`  | `off`       | Trust `X-Forwarded-*` from a front proxy (needed for correct client IPs / `Secure` behind nginx) |
 

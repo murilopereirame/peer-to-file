@@ -16,8 +16,23 @@ export interface CipherEntry {
   plainSha256: string
 }
 
+export interface ReapResult {
+  /** Number of cache entry directories deleted. */
+  removed: number
+  /** Total bytes reclaimed from disk. */
+  bytesFreed: number
+}
+
 export interface CipherCache {
   getEntry (absPath: string): Promise<CipherEntry>
+  /**
+   * Delete every cache entry that is neither pinned (actively seeded) nor
+   * touched within the last `idleMs` — i.e. files no longer being transferred.
+   * An evicted file is simply re-encrypted, deterministically, on its next
+   * request, so this is safe to run on a timer (see cacheCleanup.ts). Returns
+   * how much was reclaimed.
+   */
+  reapIdle (idleMs: number): Promise<ReapResult>
 }
 
 export interface CipherCacheOptions {
@@ -87,20 +102,27 @@ export function createCipherCache (
     return promise
   }
 
-  /**
-   * Best-effort LRU eviction: when the on-disk cache exceeds maxBytes, delete
-   * the least-recently-used entry directories until back under the cap, never
-   * touching one that's currently pinned (actively seeded). An evicted file is
-   * simply re-encrypted on its next request, so this is safe to get wrong.
-   */
-  async function evictIfNeeded (): Promise<void> {
+  interface DiskEntry {
+    idHash: string
+    dir: string
+    size: number
+    cacheFile: string | null
+    /** Best available "last used" timestamp: the in-memory LRU hint if we have
+     * one, else the newest file mtime so an entry that survived a restart (no
+     * in-memory hint) is aged from when its ciphertext was written, not treated
+     * as infinitely old. */
+    atime: number
+  }
+
+  /** Enumerate on-disk cache entries with their size and best-known age. */
+  async function scanEntries (): Promise<{ entries: DiskEntry[], total: number }> {
     let dirs: string[]
     try {
       dirs = await fs.readdir(cacheDir)
     } catch {
-      return
+      return { entries: [], total: 0 }
     }
-    const entries: Array<{ idHash: string, dir: string, size: number, cacheFile: string | null, atime: number }> = []
+    const entries: DiskEntry[] = []
     let total = 0
     for (const idHash of dirs) {
       const dir = path.join(cacheDir, idHash)
@@ -112,32 +134,68 @@ export function createCipherCache (
       }
       let size = 0
       let cacheFile: string | null = null
+      let newestMtime = 0
       for (const f of files) {
         try {
           const st = await fs.stat(path.join(dir, f))
           size += st.size
+          if (st.mtimeMs > newestMtime) newestMtime = st.mtimeMs
           if (!f.endsWith('.sha256')) cacheFile = path.join(dir, f)
         } catch { /* vanished mid-scan */ }
       }
       total += size
-      entries.push({ idHash, dir, size, cacheFile, atime: lastAccess.get(idHash) ?? 0 })
+      entries.push({ idHash, dir, size, cacheFile, atime: lastAccess.get(idHash) ?? newestMtime })
     }
+    return { entries, total }
+  }
+
+  /** Delete one entry directory and drop the in-memory bookkeeping pointing at
+   * it, so the next request rebuilds it instead of returning a stale path. */
+  async function removeEntry (e: DiskEntry): Promise<void> {
+    await fs.rm(e.dir, { recursive: true, force: true })
+    lastAccess.delete(e.idHash)
+    const identity = idHashToIdentity.get(e.idHash)
+    if (identity) { cache.delete(identity); idHashToIdentity.delete(e.idHash) }
+  }
+
+  /**
+   * Best-effort LRU eviction: when the on-disk cache exceeds maxBytes, delete
+   * the least-recently-used entry directories until back under the cap, never
+   * touching one that's currently pinned (actively seeded). An evicted file is
+   * simply re-encrypted on its next request, so this is safe to get wrong.
+   */
+  async function evictIfNeeded (): Promise<void> {
+    const { entries, total } = await scanEntries()
     if (total <= maxBytes) return
+    let remaining = total
     // Oldest first.
     entries.sort((a, b) => a.atime - b.atime)
     for (const e of entries) {
-      if (total <= maxBytes) break
+      if (remaining <= maxBytes) break
       if (e.cacheFile && isPinned(e.cacheFile)) continue
       try {
-        await fs.rm(e.dir, { recursive: true, force: true })
-        total -= e.size
-        lastAccess.delete(e.idHash)
-        // Drop the in-memory promise pointing at this evicted dir, so the next
-        // request rebuilds it instead of returning a path that no longer exists.
-        const identity = idHashToIdentity.get(e.idHash)
-        if (identity) { cache.delete(identity); idHashToIdentity.delete(e.idHash) }
+        await removeEntry(e)
+        remaining -= e.size
       } catch { /* eviction is best-effort */ }
     }
+  }
+
+  async function reapIdle (idleMs: number): Promise<ReapResult> {
+    const { entries } = await scanEntries()
+    const now = Date.now()
+    let removed = 0
+    let bytesFreed = 0
+    for (const e of entries) {
+      // Keep anything still in use: currently seeded, or touched recently.
+      if (now - e.atime < idleMs) continue
+      if (e.cacheFile && isPinned(e.cacheFile)) continue
+      try {
+        await removeEntry(e)
+        removed++
+        bytesFreed += e.size
+      } catch { /* best-effort */ }
+    }
+    return { removed, bytesFreed }
   }
 
   async function buildEntry (absPath: string, identity: string): Promise<CipherEntry> {
@@ -182,7 +240,7 @@ export function createCipherCache (
     }
   }
 
-  return { getEntry }
+  return { getEntry, reapIdle }
 }
 
 /** Transform that passes chunks through unchanged while feeding them into `hash` — lets the plaintext be hashed and encrypted in the same read pass instead of two. */

@@ -14,6 +14,8 @@ export function testConfig (overrides: Partial<Config> & Pick<Config, 'root' | '
     publicUrl: null,
     dbPath: ':memory:',
     cacheMaxBytes: 0,
+    cacheIdleMs: 60 * 60 * 1000,
+    cacheCleanupIntervalMs: 60 * 60 * 1000,
     secureCookies: 'off',
     trustProxy: false,
     ...overrides

@@ -7,6 +7,7 @@ import TrackerServer from 'bittorrent-tracker/server'
 import { loadConfig, type Config } from './config.ts'
 import { createTorrentStore } from './torrents.ts'
 import { createCipherCache } from './cipherCache.ts'
+import { startCacheCleanup } from './cacheCleanup.ts'
 import { createKeyExchange } from './keyExchange.ts'
 import { createSeeder } from './seeder.ts'
 import { createApp, bracketHost } from './app.ts'
@@ -113,6 +114,19 @@ export async function startServer (
     isPinned: cachePath => seeder.isSeeding(cachePath)
   })
   const keyExchange = createKeyExchange(db.ecdhPrivateKey())
+
+  // Hourly reaper: stop seeding files no one is transferring and delete their
+  // ciphertext cache entries, so a busy server doesn't accumulate encrypted
+  // copies until it hits the byte cap (or fills the disk). See cacheCleanup.ts.
+  const cacheCleanup = startCacheCleanup({
+    seeder,
+    cipherCache,
+    activity,
+    log,
+    idleMs: config.cacheIdleMs,
+    intervalMs: config.cacheCleanupIntervalMs
+  })
+
   const store = createTorrentStore(cipherCache)
   const app = createApp({ config, store, seeder, auth, activity, db, cipherCache, keyExchange, version, log, setupToken })
   const server = http.createServer(app)
@@ -190,6 +204,7 @@ export async function startServer (
   log.info(`WebRTC seeding: ${seeder.enabled ? 'enabled' : 'DISABLED (webseed fallback only)'}`)
 
   async function close (): Promise<void> {
+    cacheCleanup.stop()
     await withTimeout(
       new Promise<void>(resolve => tracker.close(() => resolve())),
       3000, 'tracker.close()', log

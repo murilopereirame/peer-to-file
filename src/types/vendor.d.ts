@@ -105,6 +105,11 @@ declare module 'webtorrent' {
       opts?: AddTorrentOptions,
       ontorrent?: (torrent: NodeTorrent) => void
     ): NodeTorrent
+    remove (
+      torrentId: Uint8Array | string,
+      opts?: { destroyStore?: boolean },
+      callback?: (err: Error | null) => void
+    ): void
     destroy (callback?: (err: Error | null) => void): void
   }
 }
