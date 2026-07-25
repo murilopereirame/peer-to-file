@@ -65,6 +65,29 @@ test('a pinned (actively-seeded) entry is never evicted (F2)', async () => {
   await assert.doesNotReject(fs.access(entry.cachePath), 'pinned entry was evicted')
 })
 
+test('a file larger than the whole cap is not evicted by its own build (ENOENT regression)', async () => {
+  // Cap is smaller than a single entry: the eviction triggered right after the
+  // build must not delete the entry the caller is about to use.
+  const cache = createCipherCache(cacheDir, secret, { maxBytes: 1024 })
+  const big = await makeFile('over-cap.bin', 8192)
+  const entry = await cache.getEntry(big)
+  // The ciphertext the caller was handed back must actually exist on disk.
+  await assert.doesNotReject(fs.access(entry.cachePath), 'over-cap entry was evicted mid-use')
+})
+
+test('building an over-cap file still evicts other unpinned entries', async () => {
+  const cache = createCipherCache(cacheDir, secret, { maxBytes: 1024 })
+  const small = await makeFile('old-small.bin', 512)
+  await cache.getEntry(small)
+  const big = await makeFile('new-big.bin', 8192)
+  const bigEntry = await cache.getEntry(big)
+
+  await new Promise(r => setTimeout(r, 50))
+  // The over-cap entry survives; the older small one is evicted to reclaim space.
+  await assert.doesNotReject(fs.access(bigEntry.cachePath))
+  assert.ok(await cacheEntryCount() <= 1, 'the older entry should have been evicted')
+})
+
 test('reapIdle removes entries idle past the window, keeps fresh ones', async () => {
   const cache = createCipherCache(cacheDir, secret) // no byte cap
   const a = await makeFile('idle.bin', 4096)

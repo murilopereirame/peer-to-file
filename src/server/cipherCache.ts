@@ -91,7 +91,13 @@ export function createCipherCache (
     let promise = cache.get(identity)
     if (!promise) {
       promise = buildEntry(absPath, identity).then(async entry => {
-        if (maxBytes > 0) await evictIfNeeded().catch(() => {})
+        // Protect the entry we just built from the eviction it triggers: a file
+        // larger than the whole cache cap would otherwise be deleted the instant
+        // it finishes encrypting (it's over cap and not yet pinned by the
+        // seeder), and the caller would stat a path that no longer exists
+        // (ENOENT in torrents.ts buildMeta). It's reclaimed later once idle —
+        // by a subsequent over-cap build or the hourly reaper — not mid-use.
+        if (maxBytes > 0) await evictIfNeeded(idHash).catch(() => {})
         return entry
       })
       promise.catch(() => {
@@ -161,10 +167,11 @@ export function createCipherCache (
   /**
    * Best-effort LRU eviction: when the on-disk cache exceeds maxBytes, delete
    * the least-recently-used entry directories until back under the cap, never
-   * touching one that's currently pinned (actively seeded). An evicted file is
+   * touching one that's currently pinned (actively seeded) nor `protectIdHash`
+   * (the entry a just-finished build is about to return). An evicted file is
    * simply re-encrypted on its next request, so this is safe to get wrong.
    */
-  async function evictIfNeeded (): Promise<void> {
+  async function evictIfNeeded (protectIdHash?: string): Promise<void> {
     const { entries, total } = await scanEntries()
     if (total <= maxBytes) return
     let remaining = total
@@ -172,6 +179,7 @@ export function createCipherCache (
     entries.sort((a, b) => a.atime - b.atime)
     for (const e of entries) {
       if (remaining <= maxBytes) break
+      if (e.idHash === protectIdHash) continue
       if (e.cacheFile && isPinned(e.cacheFile)) continue
       try {
         await removeEntry(e)
