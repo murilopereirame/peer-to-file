@@ -154,8 +154,8 @@ export class TorrentDownloadManager {
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length, infoHash: meta.infoHash })
 
-      // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
-      // torrents.ts server-side) — register the key so the patched File
+      // The wire carries AES-256-CTR ciphertext (encrypted on the fly
+      // server-side, see torrents.ts) — register the key so the patched File
       // iterator (below) decrypts transparently, same as the web client.
       const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
       transferKeys.set(meta.infoHash, {
@@ -260,11 +260,21 @@ export class TorrentDownloadManager {
   /** Once a download is truly finished (saved or failed), drop it from both
    * our own tracking and WebTorrent's client registry — otherwise it lingers
    * forever and a later re-download of the same file hits the stale-torrent
-   * bug forgetExisting()/the progress>=1 guard above exist to work around. */
+   * bug forgetExisting()/the progress>=1 guard above exist to work around.
+   *
+   * `destroyStore: true` is essential, not incidental: WebTorrent's default
+   * browser store keeps the downloaded *ciphertext* in OPFS (on disk), and it
+   * is only wiped wholesale on the next app launch. Destroying without it frees
+   * the torrent but leaves that full second copy of every finished file sitting
+   * on disk for the rest of the session — so a few large downloads balloon to
+   * ~2x their size on disk. Freeing the store here (as cancel() already does)
+   * reclaims the ciphertext the moment the save is done, back down to 1x. This
+   * runs only after save() has fully written and checksummed the file, so the
+   * pieces are no longer needed. */
   private forgetTracked (path: string, torrent: WTTorrent): void {
     this.tracked.delete(path)
     transferKeys.delete(torrent.infoHash)
-    if (!torrent.destroyed) torrent.destroy()
+    if (!torrent.destroyed) torrent.destroy({ destroyStore: true })
   }
 
   pause (path: string): void {
