@@ -27,8 +27,7 @@ before(async () => {
 
   running = await startServer(testConfig({
     root,
-    dbPath: path.join(dbDir, 'p2f.db'),
-    cacheDir: path.join(root, '.p2f-cache')
+    dbPath: path.join(dbDir, 'p2f.db')
   }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
   running.db.createUser('alice', 'correct horse battery')

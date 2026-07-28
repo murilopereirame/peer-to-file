@@ -6,7 +6,7 @@
     "lib": ["ES2022", "WebWorker"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "rootDir": "client/src",
+    "allowImportingTsExtensions": true,
     "noEmit": true
   },
   "include": ["client/src/lib/opfsWorker.ts"]

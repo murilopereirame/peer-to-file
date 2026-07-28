@@ -28,7 +28,7 @@ export interface KeyExchange {
 
 /**
  * ECDH-based key wrapping: the AES-256-CTR key/IV that actually encrypts a
- * transfer (cipherCache.ts for downloads, client-generated for uploads)
+ * transfer (cipher.ts for downloads, client-generated for uploads)
  * still has to reach the other side somehow. Sending it as plain JSON/
  * headers alongside the ciphertext — which earlier revisions of this
  * feature did — gives a passive network observer everything they need in

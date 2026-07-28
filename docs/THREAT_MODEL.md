@@ -39,7 +39,6 @@ itself the largest single risk (see F0).
 | Transfer-token HMAC secret | `meta.transfer_secret` (SQLite, hex) | Forge webseed/tracker tokens. |
 | Cipher master secret | `meta.cipher_secret` (SQLite) | Derive every file's transfer-encryption key. |
 | Server ECDH private key | `meta.ecdh_private_key` (SQLite) | Unwrap transfer keys off the wire. |
-| Ciphertext cache | `P2F_CACHE_DIR` on disk | A second at-rest copy of every downloaded file (encrypted). |
 | Activity log | In-memory ring buffer | Usernames, IPs, file paths, infohashes. |
 
 Note that the SQLite database is the crown jewels: it holds the three long-lived secrets
@@ -63,10 +62,10 @@ file's filesystem permissions are part of the trust boundary.
                       ┌────────────────────────────┴───────────────────────────┐
                       │ Server process (drops from root → node in Docker)        │
                       │   express app  ── browse.ts (path-traversal gate)        │
-                      │   cipherCache  ── AES-256-CTR at-rest/in-transit copy     │
+                      │   cipher       ── AES-256-CTR, streamed (no cached copy)  │
                       │   AuthDb       ── SQLite: users, sessions, tokens, secrets│
-                      │   seeder       ── WebTorrent (WebRTC), reads ciphertext   │
-                      │   FS access    ── P2F_ROOT (ro or rw), P2F_CACHE_DIR (rw) │
+                      │   seeder       ── WebTorrent (WebRTC), encrypts on demand │
+                      │   FS access    ── P2F_ROOT (ro or rw)                     │
                       └──────────────────────────────────────────────────────────┘
 ```
 
@@ -127,8 +126,9 @@ but is a boundary that silently disappears the moment a third account exists (se
 - Full read of every file under `P2F_ROOT`; full write if the mount is rw.
 - Can read the global activity log (`/api/logs`) — other users' IPs, usernames, paths
   (F4).
-- Can exhaust CPU/disk: `/api/torrent` hashes + encrypts arbitrary files into the cache
-  with no size cap or eviction; no endpoint is rate-limited (F2).
+- Can exhaust CPU: `/api/torrent` streams arbitrary files through SHA + AES-256-CTR to
+  build metadata (nothing is written to disk — encryption is streamed on demand); the
+  expensive endpoints are token-bucket throttled (F2).
 - No privilege escalation path *within* the app is needed because there are no
   privilege levels — every user already has everything.
 
@@ -151,8 +151,8 @@ but is a boundary that silently disappears the moment a third account exists (se
 > **Remediation status (2026-07):** F0–F12 have since been addressed. Highlights:
 > the `P2F_AUTH=off` mode was removed (authentication is always on, F0/F10); login is
 > rate-limited with fail2ban-friendly logging and a 12-char password floor (F1); the
-> ciphertext cache is size-capped with LRU eviction and the expensive endpoints are
-> throttled (F2); tracker tokens are infohash-bound with a shortened TTL and optional
+> transfer encryption is streamed on demand with nothing written to disk, and the
+> expensive endpoints are throttled (F2); tracker tokens are infohash-bound with a shortened TTL and optional
 > `Sec-WebSocket-Protocol` carriage (F3); cookie-authenticated mutations require an
 > `X-P2F-Csrf` header (F5); a `P2F_SECURE_COOKIES` knob plus `P2F_TRUST_PROXY` fix the
 > cookie/scheme handling (F6/F12); the upload SHA-256 moved inside the authenticated
@@ -203,13 +203,13 @@ setup, whoever POSTs `/api/setup` first becomes admin. On a correctly VPN-bound 
 window is small and trusted; on a mis-exposed host it is a takeover. Consider a one-time
 setup token printed to the server log, or binding setup to loopback.
 
-**F2 — Resource exhaustion.** *(`app.ts:423`, `cipherCache.ts`)* `/api/torrent` for a
-not-yet-cached file streams the whole file through SHA + AES-256-CTR into
-`P2F_CACHE_DIR`. There is no cap on cache size and no eviction — an authenticated user
-can force the cache to grow to the sum of every file they request, filling the disk (the
-cache is deliberately outside the possibly-read-only root, so it *is* writable). No
-endpoint is rate-limited; `/api/list` on a huge directory and repeated `/api/torrent`
-calls are cheap to issue and expensive to serve.
+**F2 — Resource exhaustion.** *(`app.ts:423`, `torrents.ts`)* `/api/torrent` for an
+uncached file streams the whole file through SHA + AES-256-CTR to build its metadata.
+This is CPU-bound but no longer disk-bound: encryption is streamed on the fly (webseed
+ranges and WebRTC pieces are produced on demand), so nothing accumulates on disk — the
+original disk-filling concern here (an unbounded on-disk ciphertext cache) no longer
+applies. The remaining exposure is CPU/repeat-work; `/api/list` on a huge directory and
+repeated `/api/torrent` calls are cheap to issue and expensive to serve.
 
 **F3 — Transfer/tracker tokens.** *(`auth.ts:114`–`122`, `app.ts:437`)* Two token
 scopes: `raw:<path>` (bound to one file — good) and `tracker` (bound to nothing —

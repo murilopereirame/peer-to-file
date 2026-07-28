@@ -2,10 +2,10 @@ import type { Config } from '../src/server/config.ts'
 
 /**
  * Builds a server Config for tests with sensible defaults, so individual tests
- * only specify what they care about (root, cacheDir, dbPath, publicUrl, ...).
+ * only specify what they care about (root, dbPath, publicUrl, ...).
  * Auth is always on now; there is no toggle.
  */
-export function testConfig (overrides: Partial<Config> & Pick<Config, 'root' | 'cacheDir'>): Config {
+export function testConfig (overrides: Partial<Config> & Pick<Config, 'root'>): Config {
   return {
     host: '127.0.0.1',
     port: 0,
@@ -13,7 +13,8 @@ export function testConfig (overrides: Partial<Config> & Pick<Config, 'root' | '
     publicHost: null,
     publicUrl: null,
     dbPath: ':memory:',
-    cacheMaxBytes: 0,
+    seedIdleMs: 60 * 60 * 1000,
+    seedSweepIntervalMs: 60 * 60 * 1000,
     secureCookies: 'off',
     trustProxy: false,
     ...overrides

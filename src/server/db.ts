@@ -339,8 +339,8 @@ export class AuthDb {
   }
 
   /**
-   * Stable random master secret the ciphertext cache (cipherCache.ts) derives
-   * per-file transfer-encryption keys from, created on first use. Must be
+   * Stable random master secret the transfer-encryption layer (cipher.ts)
+   * derives per-file keys from, created on first use. Must be
    * stable across restarts — deriving a *different* key per process would
    * re-encrypt unchanged files to different ciphertext, and with it a
    * different infohash, breaking the "resume after a server restart"
