@@ -14,7 +14,8 @@
     "noEmit": true,
     "skipLibCheck": true,
     "paths": {
-      "@p2f/shared": ["./node_modules/@p2f/shared/src/index.ts"]
+      "@p2f/shared": ["./node_modules/@p2f/shared/src/index.ts"],
+      "@p2f/shared/*": ["./node_modules/@p2f/shared/*"]
     }
   },
   "include": ["src", "src/vite-env.d.ts"]

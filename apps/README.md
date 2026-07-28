@@ -147,9 +147,13 @@ without them.
 ## Known limitations (v1)
 
 - Downloads don't persist an in-progress transfer across quitting the app
-  entirely (no OPFS-equivalent piece store) — pause/resume/cancel all work
-  fine while the app is running, same as the web client, but closing the
-  app and reopening it starts a re-download rather than resuming mid-file.
+  entirely — pause/resume/cancel all work fine while the app is running,
+  same as the web client, but closing the app and reopening it starts a
+  re-download rather than resuming mid-file. (Pieces *are* held in the same
+  OPFS store the web client uses, but for space rather than persistence:
+  only a store the app owns can free pieces one at a time while the final
+  file is being written. Whatever a previous session left behind is wiped on
+  startup.)
 - Uploads read the whole file into memory before sending (there's no
   signed-token/streamed upload path the way there is for downloads) — fine
   for the file sizes this project targets, but worth knowing before
