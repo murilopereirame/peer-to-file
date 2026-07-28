@@ -196,11 +196,30 @@ described below (self-signed certificates are fine — once you've accepted the 
 warning once, the origin counts as secure).
 
 Path (2) has no JS-visible signal for when the browser actually finishes writing the
-file, so the on-disk piece store it streams from is kept around until every piece has
-been read back out at least once (real completion), not reclaimed on a fixed timer —
-otherwise a large or slow save could have its pieces deleted out from under it mid-
-stream, which shows up to the user as the browser abruptly stopping/failing the
-download partway through.
+file, so the torrent it streams from is kept alive until every decrypted byte has
+drained (real completion), not torn down on a fixed timer — otherwise a large or slow
+save could have its remaining pieces deleted out from under it mid-stream, which shows
+up to the user as the browser abruptly stopping/failing the download partway through.
+
+### Saving without running out of disk
+
+Memory isn't the only thing a big file can exhaust. The pieces arrive encrypted and are
+stored on disk as they're verified, so a naive save needs room for **two** full copies at
+once: the complete piece store plus the complete output file. On a machine with room for
+the file but not for twice the file, the download completes and then the save fails.
+
+All three save paths above avoid that by *draining*: the final file is assembled by a
+single sequential pass over the pieces, and each piece is deleted from the store the
+moment that pass moves past it. Disk use falls as the output grows, so the peak stays
+near 1x the file size instead of 2x. Both the web client and the desktop app use the
+same store (`packages/shared/src/opfsChunkStore.ts`) specifically because this needs a
+store that can release individual pieces — WebTorrent's built-in browser store can only
+be discarded whole, at the end.
+
+The trade-off is deliberate: once a save has started reading, its pieces are gone, so a
+save that fails partway through can't be retried from what's on disk and the file has to
+be fetched again. A save that fails *before* the read starts — the common case, a
+dismissed Save As dialog — leaves the pieces intact and can still be retried.
 
 All OPFS piece reads/writes run in a dedicated worker via `FileSystemSyncAccessHandle`
 rather than the main-thread `createWritable()` stream. A sync access handle holds an

@@ -1,9 +1,15 @@
 import {
-  establishKeyWrap, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, transferKeys,
-  unwrapKeyMaterial, type P2FClient
+  establishKeyWrap, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
+  opfsAvailable, setOpfsWorkerFactory, transferKeys, unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
 import { awaitDownloadCompletion, currentDownloadDir, hashFile, registerPendingDownload, settings } from './electronApi'
+
+// The store lives in @p2f/shared (the web client uses the same one), but the
+// worker it talks to has to be constructed from a URL inside this app's own
+// source tree for Vite to emit a worker chunk — so the app supplies the
+// factory.
+setOpfsWorkerFactory(() => new Worker(new URL('./opfsWorker.ts', import.meta.url), { type: 'module' }))
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
 export type ChecksumStatus = 'verifying' | 'ok' | 'mismatch' | 'unavailable'
@@ -80,9 +86,16 @@ function joinNativePath (dir: string, name: string): string {
  * Real P2P transfers, same engine and transport as the browser web client
  * (WebTorrent over WebRTC, HTTP webseed fallback) — this is what
  * distinguishes the desktop app from a plain HTTP client. Deliberately
- * trimmed relative to the browser client: no OPFS chunk store, so pause/
- * resume/cancel work for the lifetime of the app but a download doesn't
- * survive quitting the app entirely — see apps/README.md.
+ * trimmed relative to the browser client: an in-progress download isn't
+ * resumed after quitting the app, so pause/resume/cancel work for the
+ * lifetime of the app only — see apps/README.md.
+ *
+ * Pieces do go through the shared OPFS chunk store rather than WebTorrent's
+ * own default browser store. Not for persistence (init() wipes whatever the
+ * last session left behind) but for space: only a store we own can release
+ * individual pieces, which is what lets save() free the downloaded ciphertext
+ * as it writes the decrypted file instead of holding all of it until the save
+ * finishes. See OpfsChunkStore.startDraining.
  */
 export class TorrentDownloadManager {
   private client: InstanceType<typeof window.WebTorrent> | null = null
@@ -90,6 +103,9 @@ export class TorrentDownloadManager {
   private readonly snapshots = new Map<string, DownloadSnapshot>()
   private readonly tracked = new Map<string, Tracked>()
   private readonly listeners = new Set<() => void>()
+  // infoHash -> in-flight chunk-store teardown, so re-downloading the same
+  // file doesn't race the previous attempt's OPFS directory removal.
+  private readonly storeTeardown = new Map<string, Promise<void>>()
   // Cached, only rebuilt in notify() — list() is used as useSyncExternalStore's
   // getSnapshot in DownloadsContext.tsx, which calls it on every render to
   // check for changes; a fresh array on every call (even when nothing
@@ -99,6 +115,12 @@ export class TorrentDownloadManager {
 
   async init (onError: (msg: string) => void): Promise<void> {
     await loadWebTorrent()
+    // Downloads don't survive quitting the app, so anything still in OPFS at
+    // startup is dead weight from a previous session — a crash, a force-quit,
+    // or a save that never got to destroy its store. Reap it before adding
+    // anything new, so a machine that's already tight on space doesn't start
+    // the next download already carrying the last one's ciphertext.
+    if (opfsAvailable()) await OpfsChunkStore.reapAllExcept(new Set())
     this.client = new window.WebTorrent({ tracker: { rtcConfig: { iceServers: [] } } })
     this.client.on('error', (err) => { onError(errMessage(err)) })
     if (window.isSecureContext && 'serviceWorker' in navigator) {
@@ -174,8 +196,20 @@ export class TorrentDownloadManager {
       // leftover first guarantees add() always creates a genuinely new
       // torrent.
       await this.forgetExisting(meta.infoHash)
+      // ...and wait for that leftover's *store* to finish tearing down too.
+      // The OPFS store is one directory per infoHash, removed recursively and
+      // asynchronously; re-adding the same infoHash before that finishes would
+      // race the old directory removal against the new download's piece writes
+      // into the very same directory.
+      await this.storeTeardown.get(meta.infoHash)
 
-      this.client.add(torrentFile, { maxWebConns: 8 }, torrent => {
+      this.client.add(torrentFile, {
+        maxWebConns: 8,
+        // Our own store, so save() can drain it piece by piece (see the class
+        // comment); WebTorrent's default browser store can't release
+        // individual pieces.
+        ...(opfsAvailable() ? { store: OpfsChunkStore } : {})
+      }, torrent => {
         if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
         this.track(client, torrent, meta.webseed, path, meta.plainSha256)
       })
@@ -186,11 +220,26 @@ export class TorrentDownloadManager {
 
   private async forgetExisting (infoHash: string): Promise<void> {
     if (!this.client) return
-    try {
-      await this.client.remove(infoHash, { destroyStore: true })
-    } catch {
-      // nothing registered under this infoHash — nothing to clear
-    }
+    const existing = await this.client.get(infoHash).catch(() => null)
+    if (!existing || existing.destroyed) return
+    this.destroyAndTrackTeardown(existing)
+  }
+
+  /**
+   * Destroys a torrent along with its chunk store, and records a promise that
+   * resolves once the store teardown has actually completed — see the wait in
+   * start(). WebTorrent's own `remove()`/`destroy()` return as soon as the
+   * teardown is *scheduled*, so without this there is no way to know when the
+   * OPFS directory for an infoHash is really gone.
+   */
+  private destroyAndTrackTeardown (torrent: WTTorrent): void {
+    const { infoHash } = torrent
+    const done = new Promise<void>(resolve => {
+      torrent.destroy({ destroyStore: true }, () => resolve())
+    }).finally(() => {
+      if (this.storeTeardown.get(infoHash) === done) this.storeTeardown.delete(infoHash)
+    })
+    this.storeTeardown.set(infoHash, done)
   }
 
   private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string | undefined): void {
@@ -262,19 +311,19 @@ export class TorrentDownloadManager {
    * forever and a later re-download of the same file hits the stale-torrent
    * bug forgetExisting()/the progress>=1 guard above exist to work around.
    *
-   * `destroyStore: true` is essential, not incidental: WebTorrent's default
-   * browser store keeps the downloaded *ciphertext* in OPFS (on disk), and it
-   * is only wiped wholesale on the next app launch. Destroying without it frees
+   * `destroyStore: true` is essential, not incidental: the chunk store keeps
+   * the downloaded *ciphertext* in OPFS (on disk). Destroying without it frees
    * the torrent but leaves that full second copy of every finished file sitting
    * on disk for the rest of the session — so a few large downloads balloon to
-   * ~2x their size on disk. Freeing the store here (as cancel() already does)
-   * reclaims the ciphertext the moment the save is done, back down to 1x. This
-   * runs only after save() has fully written and checksummed the file, so the
-   * pieces are no longer needed. */
+   * ~2x their size on disk. This is now the *tail* of the cleanup rather than
+   * all of it: save() drains the store as it reads, so by the time this runs
+   * only the last piece or two is left. It still matters for the paths that
+   * never drain (a cancelled save-as dialog) and for whatever the drain's
+   * strictly-behind-the-read rule leaves over. */
   private forgetTracked (path: string, torrent: WTTorrent): void {
     this.tracked.delete(path)
     transferKeys.delete(torrent.infoHash)
-    if (!torrent.destroyed) torrent.destroy({ destroyStore: true })
+    if (!torrent.destroyed) this.destroyAndTrackTeardown(torrent)
   }
 
   pause (path: string): void {
@@ -296,7 +345,7 @@ export class TorrentDownloadManager {
     const t = this.tracked.get(path)
     if (t) {
       transferKeys.delete(t.torrent.infoHash)
-      t.torrent.destroy({ destroyStore: true })
+      if (!t.torrent.destroyed) this.destroyAndTrackTeardown(t.torrent)
     }
     this.tracked.delete(path)
     this.snapshots.delete(path)
@@ -349,6 +398,9 @@ export class TorrentDownloadManager {
         try {
           const handle = await window.showSaveFilePicker({ suggestedName: file.name })
           const writable = await handle.createWritable()
+          // Only after the picker produced a writable: a dismissed dialog
+          // throws above, and the fallback below still needs the pieces.
+          OpfsChunkStore.startDrainingFor(torrent.infoHash)
           await file.stream().pipeTo(writable)
           checksumStatus = plainSha256 ? await verifyBrowserFile(handle, plainSha256) : 'unavailable'
         } catch (err) {
@@ -358,7 +410,7 @@ export class TorrentDownloadManager {
       }
 
       if (!askBeforeSave || pickerFailed) {
-        const result = await this.saveAutomatically(file, plainSha256)
+        const result = await this.saveAutomatically(torrent, file, plainSha256)
         savedTo = result.savedTo
         checksumStatus = result.checksumStatus
       }
@@ -377,10 +429,15 @@ export class TorrentDownloadManager {
    * learn the real final save path (Electron may rename on a collision, so
    * this can differ from the `dir + file.name` guess) and to know when it's
    * safe to hash the result. */
-  private async saveAutomatically (file: WTFile, plainSha256: string | undefined): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
+  private async saveAutomatically (torrent: WTTorrent, file: WTFile, plainSha256: string | undefined): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
     const dir = await currentDownloadDir()
     const guessedPath = dir ? joinNativePath(dir, file.name) : undefined
     const ticketId = await registerPendingDownload()
+
+    // Free each stored ciphertext piece as the read below moves past it, so
+    // the OPFS store shrinks while the saved file grows instead of both
+    // sitting on disk at full size at the same time.
+    OpfsChunkStore.startDrainingFor(torrent.infoHash)
 
     if (this.streamServer) {
       // No `download` attribute: the service worker's response already
