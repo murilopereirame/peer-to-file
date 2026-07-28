@@ -236,11 +236,13 @@ try {
   await waitForProgress(0.1)
   // Average speed: "—" until real progress/elapsed time exists (checked right
   // after download started, above) — by now both do, so a real value must show.
+  // Read the value straight off its own cell: the details panel now also
+  // carries a speed graph whose "avg"/"peak" labels would satisfy a looser
+  // check on the panel's whole text.
   await page.waitForFunction(
     () => {
-      const text = document.querySelector('.dl-details')?.textContent ?? ''
-      const after = text.split('Average speed')[1] ?? ''
-      return /\d/.test(after) && /(B|KiB|MiB|GiB)\/s/.test(after)
+      const text = document.querySelector('.dl-details .avg-speed')?.textContent ?? ''
+      return /\d/.test(text) && /(B|KiB|MiB|GiB)\/s/.test(text)
     },
     undefined, { timeout: 10_000 }
   )

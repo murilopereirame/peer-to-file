@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useApi } from '../context/ApiContext'
 import { HttpError, errMessage } from '../lib/format'
+import { AlertIcon } from './icons'
 
 export function LoginScreen ({ onDone }: { onDone: () => void }): React.JSX.Element {
   const { apiFetch } = useApi()
@@ -35,22 +36,30 @@ export function LoginScreen ({ onDone }: { onDone: () => void }): React.JSX.Elem
   }
 
   return (
-    <section id="login" className="card narrow">
-      <h2>Sign in</h2>
-      <form id="login-form" className="field-group" onSubmit={submit}>
-        <input
-          id="login-user" type="text" placeholder="username" autoFocus
-          autoComplete="username" spellCheck={false} required
-          value={username} onChange={e => setUsername(e.target.value)}
-        />
-        <input
-          id="login-pass" type="password" placeholder="password"
-          autoComplete="current-password" required
-          value={password} onChange={e => setPassword(e.target.value)}
-        />
-        <button type="submit" className="primary block" disabled={busy}>Sign in</button>
-      </form>
-      <div id="login-status" className={`status ${status.kind}`}>{status.msg}</div>
+    <section id="login" className="card auth-card">
+      <div className="card-head"><h2 className="card-title">Sign in</h2></div>
+      <div className="card-body">
+        <form id="login-form" className="field-group" onSubmit={submit}>
+          <label htmlFor="login-user">Username</label>
+          <input
+            id="login-user" type="text" placeholder="username" autoFocus
+            autoComplete="username" spellCheck={false} required
+            value={username} onChange={e => setUsername(e.target.value)}
+          />
+          <label htmlFor="login-pass">Password</label>
+          <input
+            id="login-pass" type="password" placeholder="password"
+            autoComplete="current-password" required
+            value={password} onChange={e => setPassword(e.target.value)}
+          />
+          <button type="submit" className="btn primary block" disabled={busy}>
+            {busy ? 'Signing in…' : 'Sign in'}
+          </button>
+        </form>
+        <div id="login-status" className={`status ${status.kind}`}>
+          {status.kind === 'error' && <AlertIcon size={13} />} {status.msg}
+        </div>
+      </div>
     </section>
   )
 }

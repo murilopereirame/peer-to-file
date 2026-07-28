@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { errMessage, formatDateTime, type LogEntry } from '@p2f/shared'
 import { useApp, withUnauthorizedRetry } from '../context/AppContext'
 import { useToast } from '../context/ToastContext'
-import { Button, Card, ErrorText, Muted, Title } from '../components/Primitives'
+import { Button, ErrorText } from '../components/Primitives'
+import { DownloadIcon, RefreshIcon, SearchIcon, TerminalIcon } from '../components/icons'
 
 const KIND_OPTIONS: Array<{ value: string, label: string }> = [
   { value: '', label: 'all' },
@@ -52,29 +53,48 @@ export function LogsScreen (): React.JSX.Element {
   }
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-        <Title>Activity logs</Title>
-        <div className="btn-row" style={{ marginTop: 0 }}>
-          <Button variant="secondary" onClick={() => { void load() }}>Refresh</Button>
-          {visible.length > 0 && <Button variant="secondary" onClick={onExport}>Export logs</Button>}
-        </div>
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">
+          <TerminalIcon size={15} />
+          Server activity
+          {visible.length > 0 && <span className="muted-count">{visible.length}</span>}
+        </span>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 13 }}>
-        <label htmlFor="kind-filter" className="muted">kind</label>
-        <select id="kind-filter" className="input" style={{ width: 'auto' }} value={kindFilter} onChange={e => setKindFilter(e.target.value)}>
-          {KIND_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-        </select>
+
+      <div className="log-controls">
+        <label htmlFor="kind-filter">
+          kind
+          <select
+            id="kind-filter" className="input" value={kindFilter}
+            onChange={e => setKindFilter(e.target.value)}
+          >
+            {KIND_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+          </select>
+        </label>
+        <div className="spacer" />
+        <Button variant="secondary" className="sm" onClick={() => { void load() }}>
+          <RefreshIcon size={13} />Refresh
+        </Button>
+        <Button variant="secondary" className="sm" disabled={visible.length === 0} onClick={onExport}>
+          <DownloadIcon size={13} />Export logs
+        </Button>
       </div>
-      <ErrorText>{error}</ErrorText>
+
+      {error !== '' && <div className="card-body"><ErrorText>{error}</ErrorText></div>}
+
       {visible.length === 0 && (
-        <Muted>{entries.length === 0 ? 'No activity recorded yet.' : 'No entries match this filter.'}</Muted>
+        <div className="empty">
+          <SearchIcon className="empty-icon" size={26} />
+          {entries.length === 0 ? 'No activity recorded yet.' : 'No entries match this filter.'}
+        </div>
       )}
       {visible.map(e => (
-        <Card key={e.id} style={{ marginBottom: 6, padding: 10 }}>
-          <div className="muted" style={{ fontSize: 11 }}>{formatDateTime(e.ts)} · {e.kind}</div>
-          <div style={{ fontSize: 13 }}>{e.message}</div>
-        </Card>
+        <div key={e.id} className="log-row">
+          <span className="log-time">{formatDateTime(e.ts)}</span>
+          <span className="log-kind">{e.kind}</span>
+          <span className="log-msg">{e.message}</span>
+        </div>
       ))}
     </div>
   )

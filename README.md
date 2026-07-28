@@ -229,6 +229,20 @@ before `close()` returns — WebKit's async OPFS writes have been observed to le
 piece readable-but-truncated under concurrent access, which surfaced as path (2)
 streaming a 0-byte file on Safari with no error anywhere.
 
+### The interface
+
+The web client is a single app shell: a **sidebar** on the left (**Browse**, **Transfers**,
+**History**, **Logs**, with a badge counting transfers in flight), and a top bar carrying a
+search box that filters whatever the current view lists, plus live download/upload totals.
+The sidebar's footer holds the connection state (with a **Reconnect** button if the server
+goes away), the light/dark/**System** theme picker, and **Log out**.
+
+**Transfers** opens with two speed graphs — download and upload — sampled once a second and
+covering the last minute and a half, over the same combined totals shown in the top bar.
+Each download's **Details** panel carries its own graph for just that transfer, next to its
+properties and peer list. The desktop app follows the same layout (its uploads have no
+progress events, so it graphs the inbound side only).
+
 ### Download details
 
 Click a download row's **Details** button for its info hash, elapsed time, average
@@ -251,21 +265,21 @@ or the file's own availability.
 
 ### Activity logs
 
-The **View logs** link (top right, once connected) opens a dedicated tab showing recent
-server activity: connections, tracker announces, torrent metadata requests, and webseed
-hits, each with a timestamp and, where available, the remote IP. It polls
-`GET /api/logs` (same auth as everything else) and filters by kind. The log is an
+The **Logs** view (in the sidebar, once signed in) shows recent server activity:
+connections, tracker announces, torrent metadata requests, and webseed hits, each with a
+timestamp and, where available, the remote IP. It polls `GET /api/logs` (same auth as
+everything else) and filters by kind, by the top bar's search box, or both. The log is an
 in-memory ring buffer (~500 entries) — a restart clears it; this is for "what's
-happening / just happened", not a persisted audit trail. **Download logs** exports the
+happening / just happened", not a persisted audit trail. **Export logs** saves the
 currently filtered view as a `.txt` file (client-side only — nothing new to fetch).
 
 ### Managing files
 
 Every listing row has a **Download** button (files only) and a kebab (**⋮**) menu with
-**Rename**, **Move** and **Delete**. Folders/toolbar have an **Upload** button
+**Rename**, **Move** and **Delete**. The listing's toolbar has an **Upload** button
 (drag-and-drop onto the file listing works too, dropping into whichever folder is
-currently open) — uploads get their own card below the browser, separate from the file
-listing, so a batch of in-flight uploads doesn't push the listing itself around.
+currently open) — uploads get their own card on the **Transfers** view, separate from the
+file listing, so a batch of in-flight uploads doesn't push the listing itself around.
 
 - **Rename** turns the entry's name into an inline text field; submitting a bare name
   renames it in place via `POST /api/move`, which refuses to overwrite an existing entry.
@@ -278,8 +292,9 @@ listing, so a batch of in-flight uploads doesn't push the listing itself around.
 - **Upload** streams each selected (or dropped) file straight to disk via
   `POST /api/upload` — never buffered whole in memory, written to a temp file first and
   atomically renamed into place, so an aborted upload can't leave a partial file visible
-  in listings or clobber an existing one of the same name. Progress is shown per file in
-  the **Uploads** card; the listing refreshes automatically as each upload completes.
+  in listings or clobber an existing one of the same name. Progress, transferred bytes and
+  current speed are shown per file in the **Uploads** card on **Transfers**; the listing
+  refreshes automatically as each upload completes.
 
 All of these are gated by the same session/token authentication as everything else, and
 every mutation (delete, move, upload) is recorded in the activity log. They also require

@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiContext } from './context/ApiContext'
 import { ToastProvider } from './context/ToastContext'
 import { UploadsProvider } from './context/UploadsContext'
-import { useTheme } from './context/ThemeContext'
 import { HttpError, errMessage } from './lib/format'
 import { useDownloadManager, useDownloads } from './hooks/useDownloads'
 import { SetupScreen } from './components/SetupScreen'
 import { LoginScreen } from './components/LoginScreen'
 import { BrowserApp } from './components/BrowserApp'
+import { AuthLayout } from './components/AuthLayout'
 
 // The client is always served by the same origin as the API it talks to, so
 // there's nothing for a user to type in — see the "Managing files"/CORS
@@ -33,17 +33,6 @@ interface AuthInfo {
   required: boolean
   needsSetup: boolean
   authenticated: boolean
-}
-
-function ThemeToggle (): React.JSX.Element {
-  const { override, setOverride } = useTheme()
-  return (
-    <div className="theme-toggle">
-      <button type="button" className={override === null ? 'active' : ''} onClick={() => setOverride(null)}>System</button>
-      <button type="button" className={override === 'light' ? 'active' : ''} onClick={() => setOverride('light')}>Light</button>
-      <button type="button" className={override === 'dark' ? 'active' : ''} onClick={() => setOverride('dark')}>Dark</button>
-    </div>
-  )
 }
 
 export function App (): React.JSX.Element {
@@ -135,45 +124,26 @@ export function App (): React.JSX.Element {
     })()
   }, [apiFetch])
 
+  const retry = useCallback(() => { void checkSession() }, [checkSession])
+
   return (
     <ApiContext.Provider value={{ apiBase: API_BASE, apiFetch }}>
       <ToastProvider>
         <UploadsProvider>
-          <div className="app-shell">
-            <header className="app-header">
-              <div className="header-row">
-                <div className="brand">
-                  <img src="/icon.png" className="logo" alt="P2File" />
-                  <div>
-                    <h1>P2File</h1>
-                    <span className="tagline">self-hosted P2P file browser</span>
-                  </div>
-                </div>
-                <div className="header-actions">
-                  <ThemeToggle />
-                  {view === 'browser' && authed && <button id="logout" type="button" onClick={handleLogout}>Log out</button>}
-                </div>
-              </div>
-              {status.msg && (
-                <div id="conn-status" className={`status ${status.kind}`}>
-                  {status.msg}
-                  {status.kind === 'error' && (
-                    <button type="button" onClick={() => { void checkSession() }}>retry</button>
-                  )}
-                </div>
+          {view === 'browser'
+            ? (
+              <BrowserApp
+                manager={manager} downloads={downloads} doneCount={doneCount}
+                authed={authed} onLogout={handleLogout} status={status} onRetry={retry}
+              />
+              )
+            : (
+              <AuthLayout status={status} onRetry={retry}>
+                {view === 'setup' && <SetupScreen onDone={handleAuthenticated} />}
+                {view === 'login' && <LoginScreen onDone={handleAuthenticated} />}
+                {view === 'loading' && <div className="status">connecting to the server…</div>}
+              </AuthLayout>
               )}
-            </header>
-
-            <main>
-              {view === 'setup' && <SetupScreen onDone={handleAuthenticated} />}
-              {view === 'login' && <LoginScreen onDone={handleAuthenticated} />}
-              {view === 'browser' && <BrowserApp manager={manager} downloads={downloads} doneCount={doneCount} />}
-            </main>
-
-            <footer>
-              <p>chunked &amp; resumable downloads via <a href="https://webtorrent.io" rel="noopener">WebTorrent</a></p>
-            </footer>
-          </div>
         </UploadsProvider>
       </ToastProvider>
     </ApiContext.Provider>
