@@ -660,10 +660,13 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
   // fetch — unauthenticated by design (no session exists to attach yet) and
   // carrying no user data. Answering them the same way the service worker
   // would keeps that harmless race from surfacing as a 404.
-  app.get('/webtorrent/keepalive/*', (req, res) => {
+  // `{*splat}` is express 5's spelling of express 4's bare trailing `*`: the
+  // braces keep the tail optional, so a bare `/webtorrent/keepalive/` (which
+  // is exactly what the feature-detection probe requests) still matches.
+  app.get('/webtorrent/keepalive/{*splat}', (req, res) => {
     res.status(200).end()
   })
-  app.get('/webtorrent/cancel/*', (req, res) => {
+  app.get('/webtorrent/cancel/{*splat}', (req, res) => {
     res.status(200).end()
   })
 

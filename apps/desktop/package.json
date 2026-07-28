@@ -20,19 +20,19 @@
   },
   "dependencies": {
     "@p2f/shared": "file:../../packages/shared",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.1.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.3",
-    "electron": "^43.1.0",
+    "@vitejs/plugin-react": "^6.0.4",
+    "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
-    "typescript": "^5.7.0",
-    "vite": "^8.1.4",
-    "webtorrent": "^3.0.16"
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "webtorrent": "^3.0.21"
   },
   "build": {
     "appId": "dev.p2file.desktop",
