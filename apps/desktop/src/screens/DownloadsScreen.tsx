@@ -3,17 +3,32 @@ import { formatBytes, formatDuration } from '@p2f/shared'
 import { useDownloads } from '../context/DownloadsContext'
 import { useUploads } from '../context/UploadsContext'
 import type { DownloadSnapshot } from '../lib/torrentDownloads'
-import { Card, ErrorText, Muted, Title } from '../components/Primitives'
+import { SpeedChart } from '../components/SpeedChart'
+import { SPEED_HISTORY_SIZE, useSpeedHistory } from '../hooks/useSpeedHistory'
+import {
+  AlertIcon, ArrowDownIcon, CheckIcon, ClockIcon, DownloadIcon, GaugeIcon, UploadIcon, UsersIcon
+} from '../components/icons'
 
 function statusLabel (status: string): string {
   switch (status) {
     case 'preparing': return 'Preparing…'
-    case 'downloading': return 'Downloading…'
+    case 'downloading': return 'Downloading'
     case 'paused': return 'Paused'
     case 'saving': return 'Saving…'
     case 'done': return 'Done'
     case 'error': return 'Failed'
     default: return status
+  }
+}
+
+function statusTone (status: string): string {
+  switch (status) {
+    case 'downloading':
+    case 'saving': return 'accent'
+    case 'paused': return 'warning'
+    case 'done': return 'positive'
+    case 'error': return 'negative'
+    default: return ''
   }
 }
 
@@ -39,37 +54,56 @@ function checksumLabel (status: DownloadSnapshot['checksumStatus']): string {
 }
 
 function DownloadDetails ({ entry }: { entry: DownloadSnapshot }): React.JSX.Element {
+  // WebTorrent leaves the last rate on a finished/paused torrent; graphing it
+  // would keep drawing bandwidth that is no longer moving.
+  const speed = entry.status === 'downloading' ? entry.speedBytesPerSec : 0
+  // Keyed on the download's path so expanding a different row graphs that
+  // one's speed rather than continuing the previous series.
+  const history = useSpeedHistory(entry.path, speed, 0)
+
   return (
-    <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--color-border)', fontSize: 13 }}>
-      <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 10px', margin: 0 }}>
-        <dt className="muted">Info hash</dt><dd style={{ wordBreak: 'break-all' }}>{entry.infoHash ?? '—'}</dd>
-        <dt className="muted">Elapsed</dt><dd>{formatDuration(entry.elapsedMs)}</dd>
-        <dt className="muted">Average speed</dt><dd>{averageSpeed(entry)}</dd>
-        <dt className="muted">Size</dt><dd>{formatBytes(entry.length)}</dd>
-        {entry.savedTo && (<><dt className="muted">Saved to</dt><dd style={{ wordBreak: 'break-all' }}>{entry.savedTo}</dd></>)}
-        {entry.status === 'done' && (
-          <>
-            <dt className="muted">Checksum</dt>
-            <dd style={{ color: entry.checksumStatus === 'mismatch' ? 'var(--color-danger)' : undefined }}>
-              {checksumLabel(entry.checksumStatus)}
-            </dd>
-          </>
-        )}
-      </dl>
-      <div className="muted" style={{ marginTop: 8 }}>Peers ({entry.peers.length})</div>
-      {entry.peers.length === 0
-        ? <Muted>no active peers</Muted>
-        : (
-          <ul style={{ listStyle: 'none', padding: 0, margin: '4px 0 0' }}>
-            {entry.peers.map((peer, i) => (
-              <li key={i} style={{ display: 'flex', gap: 10, padding: '3px 0' }}>
-                <span className="muted" style={{ width: 60 }}>{peer.type}</span>
-                <span style={{ flex: 1 }}>{peer.addr}</span>
-                <span className="muted">{formatBytes(peer.speedBytesPerSec)}/s</span>
-              </li>
-            ))}
-          </ul>
+    <div className="detail-grid">
+      <div>
+        <dl>
+          <dt>Info hash</dt><dd>{entry.infoHash ?? '—'}</dd>
+          <dt>Elapsed</dt><dd>{formatDuration(entry.elapsedMs)}</dd>
+          <dt>Average speed</dt><dd>{averageSpeed(entry)}</dd>
+          <dt>Size</dt><dd>{formatBytes(entry.length)}</dd>
+          {entry.savedTo && (<><dt>Saved to</dt><dd>{entry.savedTo}</dd></>)}
+          {entry.status === 'done' && (
+            <>
+              <dt>Checksum</dt>
+              <dd style={{ color: entry.checksumStatus === 'mismatch' ? 'var(--negative)' : undefined }}>
+                {checksumLabel(entry.checksumStatus)}
+              </dd>
+            </>
           )}
+        </dl>
+      </div>
+
+      <div>
+        <SpeedChart
+          label="Speed" tone="download" compact icon={<GaugeIcon size={13} />}
+          values={history.map(s => s.down)} capacity={SPEED_HISTORY_SIZE} current={speed}
+        />
+      </div>
+
+      <div>
+        <div className="peers-title"><UsersIcon size={13} />Peers ({entry.peers.length})</div>
+        {entry.peers.length === 0
+          ? <div className="muted">no active peers</div>
+          : (
+            <ul className="peers">
+              {entry.peers.map((peer, i) => (
+                <li key={i}>
+                  <span className="badge accent">{peer.type}</span>
+                  <span className="peer-addr">{peer.addr}</span>
+                  <span className="peer-speed">{formatBytes(peer.speedBytesPerSec)}/s</span>
+                </li>
+              ))}
+            </ul>
+            )}
+      </div>
     </div>
   )
 }
@@ -79,51 +113,146 @@ export function DownloadsScreen (): React.JSX.Element {
   const uploads = useUploads()
   const [detailsFor, setDetailsFor] = useState<string | null>(null)
 
+  const downSpeed = downloads.downloads.reduce(
+    (sum, d) => sum + (d.status === 'downloading' ? d.speedBytesPerSec : 0), 0
+  )
+  // Sampled for the whole screen rather than per row, so the graph keeps its
+  // shape while individual downloads come and go. Uploads have no progress
+  // events on desktop (see UploadsContext), hence no outbound graph.
+  const history = useSpeedHistory('all-downloads', downSpeed, 0)
+  const activeUploads = uploads.uploads.filter(u => u.status === 'running').length
+
   return (
-    <div>
-      <Title>Transfers</Title>
+    <>
+      <div className="card">
+        <div className="card-body">
+          <SpeedChart
+            label="Download" tone="download" icon={<ArrowDownIcon size={13} />}
+            values={history.map(s => s.down)} capacity={SPEED_HISTORY_SIZE} current={downSpeed}
+          />
+        </div>
+      </div>
 
-      <h3>Uploads</h3>
-      {uploads.uploads.length === 0 && <Muted>No uploads yet.</Muted>}
-      {uploads.uploads.map(u => (
-        <Card key={u.id} style={{ marginBottom: 8 }}>
-          <strong>{u.name}</strong>
-          <Muted>{u.status === 'running' ? 'Uploading…' : u.status === 'done' ? 'Done' : 'Failed'}</Muted>
-          <ErrorText>{u.error}</ErrorText>
-          {(u.status === 'done' || u.status === 'error') && (
-            <button className="link-btn muted" onClick={() => uploads.remove(u.id)}>Clear</button>
-          )}
-        </Card>
-      ))}
-
-      <h3 style={{ marginTop: 20 }}>Downloads</h3>
-      {downloads.downloads.length === 0 && <Muted>No downloads yet — click Download next to a file in Browse.</Muted>}
-      {downloads.downloads.map(d => (
-        <Card key={d.path} style={{ marginBottom: 8 }}>
-          <strong>{d.name}</strong>
-          <Muted>
-            {statusLabel(d.status)} · {formatBytes(d.downloaded)}{d.length > 0 ? ` / ${formatBytes(d.length)}` : ''}
-            {d.status === 'downloading' && d.numPeers > 0 ? ` · ${d.numPeers} peer${d.numPeers === 1 ? '' : 's'} · ${formatBytes(d.speedBytesPerSec)}/s` : ''}
-            {etaLabel(d) ? ` · ${etaLabel(d)}` : ''}
-            {d.status === 'done' && d.checksumStatus === 'ok' ? ' · ✓ verified' : ''}
-            {d.status === 'done' && d.checksumStatus === 'mismatch' ? ' · ⚠ checksum mismatch' : ''}
-          </Muted>
-          <ErrorText>{d.message}</ErrorText>
-          {(d.status === 'downloading' || d.status === 'paused') && (
-            <div className="progress-bar"><div style={{ width: `${Math.round(d.progress * 100)}%` }} /></div>
-          )}
-          <div style={{ display: 'flex', gap: 14, marginTop: 8 }}>
-            {d.status === 'downloading' && <button className="link-btn" onClick={() => downloads.pause(d.path)}>Pause</button>}
-            {d.status === 'paused' && <button className="link-btn" onClick={() => downloads.resume(d.path)}>Resume</button>}
-            {(d.status === 'downloading' || d.status === 'paused') && <button className="link-btn danger" onClick={() => downloads.cancel(d.path)}>Cancel</button>}
-            {(d.status === 'done' || d.status === 'error') && <button className="link-btn muted" onClick={() => downloads.remove(d.path)}>Clear</button>}
-            <button className="link-btn muted" onClick={() => setDetailsFor(detailsFor === d.path ? null : d.path)}>
-              {detailsFor === d.path ? 'Hide details' : 'Details'}
-            </button>
+      <div className="card">
+        <div className="card-head">
+          <span className="card-title">
+            <UploadIcon size={15} />
+            Uploads
+            {uploads.uploads.length > 0 && <span className="muted-count">{uploads.uploads.length}</span>}
+          </span>
+          {activeUploads > 0 && <span className="badge accent">{activeUploads} in flight</span>}
+        </div>
+        {uploads.uploads.length === 0 && (
+          <div className="empty">
+            <UploadIcon className="empty-icon" size={26} />
+            no uploads yet — send files from the Browse view
           </div>
-          {detailsFor === d.path && <DownloadDetails entry={d} />}
-        </Card>
-      ))}
-    </div>
+        )}
+        {uploads.uploads.map(u => (
+          <div key={u.id} className="transfer-row">
+            <div className="transfer-head">
+              <span className="transfer-name">{u.name}</span>
+              <span
+                className={`badge ${u.status === 'done' ? 'positive' : u.status === 'error' ? 'negative' : 'accent'}`}
+                title={u.error}
+              >
+                {u.status === 'running' ? 'Uploading…' : u.status === 'done' ? 'Done' : 'Failed'}
+              </span>
+            </div>
+            <div className="transfer-foot">
+              <div className="transfer-stats">
+                {u.status === 'error' && u.error && (
+                  <span className="stat" style={{ color: 'var(--negative)' }}><AlertIcon size={13} />{u.error}</span>
+                )}
+                {u.status === 'done' && <span className="stat"><CheckIcon size={13} />sent to the server</span>}
+              </div>
+              <div className="transfer-actions">
+                {(u.status === 'done' || u.status === 'error') && (
+                  <button className="link-btn muted" onClick={() => uploads.remove(u.id)}>Clear</button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <span className="card-title">
+            <DownloadIcon size={15} />
+            Downloads
+            {downloads.downloads.length > 0 && <span className="muted-count">{downloads.downloads.length}</span>}
+          </span>
+        </div>
+        {downloads.downloads.length === 0 && (
+          <div className="empty">
+            <DownloadIcon className="empty-icon" size={26} />
+            no downloads yet — click Download next to a file in Browse
+          </div>
+        )}
+        {downloads.downloads.map(d => (
+          <div key={d.path} className="transfer-row">
+            <div className="transfer-head">
+              <span className="transfer-name">{d.name}</span>
+              {d.length > 0 && d.status !== 'error' && (
+                <span className="transfer-percent">{Math.round(d.progress * 100)}%</span>
+              )}
+              <span className={`badge ${statusTone(d.status)}`} title={d.message}>{statusLabel(d.status)}</span>
+            </div>
+
+            <div className={`progress-bar ${d.status === 'done' ? 'done' : d.status === 'paused' ? 'paused' : ''}`}>
+              <div style={{ width: `${Math.round(d.progress * 100)}%` }} />
+            </div>
+
+            <div className="transfer-foot">
+              <div className="transfer-stats">
+                <span className="stat">
+                  <DownloadIcon size={13} />
+                  {formatBytes(d.downloaded)}{d.length > 0 ? ` / ${formatBytes(d.length)}` : ''}
+                </span>
+                {d.status === 'downloading' && (
+                  <span className="stat"><ArrowDownIcon size={13} />{formatBytes(d.speedBytesPerSec)}/s</span>
+                )}
+                {etaLabel(d) !== null && <span className="stat"><ClockIcon size={13} />{etaLabel(d)}</span>}
+                {d.status === 'downloading' && d.numPeers > 0 && (
+                  <span className="stat"><UsersIcon size={13} />{d.numPeers} peer{d.numPeers === 1 ? '' : 's'}</span>
+                )}
+                {d.status === 'done' && d.checksumStatus === 'ok' && (
+                  <span className="stat" style={{ color: 'var(--positive)' }}><CheckIcon size={13} />verified</span>
+                )}
+                {d.status === 'done' && d.checksumStatus === 'mismatch' && (
+                  <span className="stat" style={{ color: 'var(--negative)' }}>
+                    <AlertIcon size={13} />checksum mismatch
+                  </span>
+                )}
+                {d.message !== undefined && d.message !== '' && (
+                  <span className="stat" style={{ color: 'var(--negative)' }}><AlertIcon size={13} />{d.message}</span>
+                )}
+              </div>
+
+              <div className="transfer-actions">
+                {d.status === 'downloading' && (
+                  <button className="link-btn" onClick={() => downloads.pause(d.path)}>Pause</button>
+                )}
+                {d.status === 'paused' && (
+                  <button className="link-btn" onClick={() => downloads.resume(d.path)}>Resume</button>
+                )}
+                {(d.status === 'downloading' || d.status === 'paused') && (
+                  <button className="link-btn danger" onClick={() => downloads.cancel(d.path)}>Cancel</button>
+                )}
+                {(d.status === 'done' || d.status === 'error') && (
+                  <button className="link-btn muted" onClick={() => downloads.remove(d.path)}>Clear</button>
+                )}
+                <button className="link-btn muted" onClick={() => setDetailsFor(detailsFor === d.path ? null : d.path)}>
+                  {detailsFor === d.path ? 'Hide details' : 'Details'}
+                </button>
+              </div>
+            </div>
+
+            {detailsFor === d.path && <DownloadDetails entry={d} />}
+          </div>
+        ))}
+      </div>
+    </>
   )
 }

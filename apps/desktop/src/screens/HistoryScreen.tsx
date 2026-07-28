@@ -4,7 +4,8 @@ import { useApp, withUnauthorizedRetry } from '../context/AppContext'
 import { useDownloads } from '../context/DownloadsContext'
 import { useUploads } from '../context/UploadsContext'
 import { useToast } from '../context/ToastContext'
-import { Button, Card, ErrorText, Muted, Title } from '../components/Primitives'
+import { Button, ErrorText } from '../components/Primitives'
+import { ClockIcon, DownloadIcon, GaugeIcon, HistoryIcon, TrashIcon, UploadIcon } from '../components/icons'
 
 function averageSpeed (length: number, durationMs: number | null): string | null {
   if (!durationMs || durationMs <= 0) return null
@@ -12,9 +13,10 @@ function averageSpeed (length: number, durationMs: number | null): string | null
 }
 
 function TransferHistoryList ({
-  title, kind, refreshSignal, showInfoHash
+  title, icon, kind, refreshSignal, showInfoHash
 }: {
   title: string
+  icon: React.ReactNode
   kind: 'download' | 'upload'
   refreshSignal: number
   showInfoHash: boolean
@@ -48,25 +50,41 @@ function TransferHistoryList ({
   }
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-        <h3 style={{ margin: 0 }}>{title}</h3>
-        {entries.length > 0 && <Button variant="secondary" onClick={() => { void onClear() }}>Clear</Button>}
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">
+          {icon}
+          {title}
+          {entries.length > 0 && <span className="muted-count">{entries.length}</span>}
+        </span>
+        {entries.length > 0 && (
+          <Button variant="secondary" className="sm" onClick={() => { void onClear() }}>
+            <TrashIcon size={13} />Clear
+          </Button>
+        )}
       </div>
-      <ErrorText>{error}</ErrorText>
-      {entries.length === 0 && <Muted>Nothing here yet.</Muted>}
+      {error !== '' && <div className="card-body"><ErrorText>{error}</ErrorText></div>}
+      {entries.length === 0 && (
+        <div className="empty">
+          <HistoryIcon className="empty-icon" size={26} />
+          Nothing here yet.
+        </div>
+      )}
       {entries.map(e => {
         const avgSpeed = averageSpeed(e.length, e.duration_ms)
         return (
-          <Card key={e.id} style={{ marginBottom: 8 }}>
-            <strong>{e.name}</strong>
-            <Muted>
-              {formatBytes(e.length)} · {formatDateTime(e.completed_at)}
-              {e.duration_ms ? ` · took ${formatDuration(e.duration_ms)}` : ''}
-              {avgSpeed ? ` · ${avgSpeed} avg` : ''}
-            </Muted>
-            {showInfoHash && e.info_hash && <Muted style={{ wordBreak: 'break-all', fontSize: 11 }}>Info hash: {e.info_hash}</Muted>}
-          </Card>
+          <div key={e.id} className="history-row">
+            <div className="history-main">
+              <div className="history-name">{e.name}</div>
+              <div className="history-meta">
+                <span>{formatDateTime(e.completed_at)}</span>
+                {e.duration_ms ? <span><ClockIcon size={12} /> took {formatDuration(e.duration_ms)}</span> : null}
+                {avgSpeed !== null ? <span><GaugeIcon size={12} /> {avgSpeed} avg</span> : null}
+              </div>
+              {showInfoHash && e.info_hash && <div className="history-hash">{e.info_hash}</div>}
+            </div>
+            <span className="history-size">{formatBytes(e.length)}</span>
+          </div>
         )
       })}
     </div>
@@ -80,12 +98,15 @@ export function HistoryScreen (): React.JSX.Element {
   const doneUploads = uploads.filter(u => u.status === 'done').length
 
   return (
-    <div>
-      <Title>History</Title>
-      <TransferHistoryList title="Downloads" kind="download" refreshSignal={doneDownloads} showInfoHash />
-      <div style={{ marginTop: 24 }}>
-        <TransferHistoryList title="Uploads" kind="upload" refreshSignal={doneUploads} showInfoHash={false} />
-      </div>
-    </div>
+    <>
+      <TransferHistoryList
+        title="Download history" icon={<DownloadIcon size={15} />}
+        kind="download" refreshSignal={doneDownloads} showInfoHash
+      />
+      <TransferHistoryList
+        title="Upload history" icon={<UploadIcon size={15} />}
+        kind="upload" refreshSignal={doneUploads} showInfoHash={false}
+      />
+    </>
   )
 }

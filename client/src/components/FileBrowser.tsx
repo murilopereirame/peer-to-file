@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
 import { requestNotificationPermission } from '@p2f/shared'
 import { useApi } from '../context/ApiContext'
 import { errMessage, formatBytes, HttpError } from '../lib/format'
@@ -7,6 +7,10 @@ import { useUploads } from '../context/UploadsContext'
 import { useToast } from '../context/ToastContext'
 import { MoveModal } from './MoveModal'
 import { NewFolderModal } from './NewFolderModal'
+import {
+  DownloadIcon, FileIcon, FolderIcon, FolderPlusIcon, LevelUpIcon, MoreIcon, MoveIcon, PencilIcon,
+  RefreshIcon, SearchIcon, TrashIcon, UploadIcon
+} from './icons'
 
 interface DirEntry {
   name: string
@@ -20,7 +24,13 @@ interface Listing {
   entries: DirEntry[]
 }
 
-export function FileBrowser ({ manager }: { manager: DownloadManager }): React.JSX.Element {
+export function FileBrowser ({
+  manager, search = ''
+}: {
+  manager: DownloadManager
+  /** Free-text filter from the top bar; matches entry names in this folder. */
+  search?: string
+}): React.JSX.Element {
   const { apiFetch } = useApi()
   const notify = useToast()
   const [path, setPath] = useState('')
@@ -111,6 +121,11 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
   }
 
   const segments = path === '' ? [] : path.split('/')
+  const query = search.trim().toLowerCase()
+  const visible = useMemo(
+    () => (query === '' ? listing?.entries : listing?.entries.filter(e => e.name.toLowerCase().includes(query))),
+    [listing, query]
+  )
 
   return (
     <>
@@ -133,9 +148,20 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
             )
           })}
         </nav>
-        <button type="button" onClick={() => setCreatingFolder(true)}>New folder</button>
-        <button type="button" onClick={() => load(path)}>Refresh</button>
-        <button type="button" onClick={() => fileInputRef.current?.click()}>Upload</button>
+        <div className="toolbar-actions">
+          <button type="button" className="btn ghost sm" onClick={() => setCreatingFolder(true)}>
+            <FolderPlusIcon size={14} />
+            New folder
+          </button>
+          <button type="button" className="btn ghost sm" onClick={() => load(path)}>
+            <RefreshIcon size={14} />
+            Refresh
+          </button>
+          <button type="button" className="btn primary sm" onClick={() => fileInputRef.current?.click()}>
+            <UploadIcon size={14} />
+            Upload
+          </button>
+        </div>
         <input
           ref={fileInputRef} type="file" multiple hidden
           onChange={(e: ChangeEvent<HTMLInputElement>) => {
@@ -147,24 +173,45 @@ export function FileBrowser ({ manager }: { manager: DownloadManager }): React.J
 
       {dragging && <div className="drop-hint">drop files to upload to {path === '' ? 'root' : path}</div>}
 
+      <div className="listing-head">
+        <span>Name</span>
+        <span className="num">Size</span>
+        <span className="col-mtime">Modified</span>
+        <span />
+      </div>
+
       <ul id="listing">
         {path !== '' && (
           <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
-            <span className="entry-icon">⬆️</span>
-            <span className="entry-name">../</span>
+            <div className="entry-main">
+              <span className="entry-icon"><LevelUpIcon /></span>
+              <span className="entry-name">../</span>
+            </div>
           </li>
         )}
         {loading && <li className="empty loading">loading…</li>}
         {!loading && error && (
           <li className="empty error">
             failed to load folder: {error}{' '}
-            <button type="button" onClick={() => load(path)}>retry</button>
+            <button type="button" className="btn outline sm" onClick={() => load(path)}>
+              <RefreshIcon size={13} />
+              retry
+            </button>
           </li>
         )}
         {!loading && !error && listing?.entries.length === 0 && (
-          <li className="empty">empty folder</li>
+          <li className="empty">
+            <FolderIcon className="empty-icon" size={26} />
+            empty folder
+          </li>
         )}
-        {!loading && !error && listing?.entries.map(entry => (
+        {!loading && !error && (listing?.entries.length ?? 0) > 0 && visible?.length === 0 && (
+          <li className="empty">
+            <SearchIcon className="empty-icon" size={26} />
+            nothing in this folder matches &ldquo;{search.trim()}&rdquo;
+          </li>
+        )}
+        {!loading && !error && visible?.map(entry => (
           <ListingRow
             key={entry.name} entry={entry} path={path}
             onOpenDir={load} onChanged={refresh} manager={manager} apiFetch={apiFetch}
@@ -195,9 +242,6 @@ function ListingRow ({
 }): React.JSX.Element {
   const notify = useToast()
   const entryPath = path === '' ? entry.name : `${path}/${entry.name}`
-  const meta = entry.type === 'file'
-    ? `${formatBytes(entry.size ?? 0)} · ${new Date(entry.mtime).toLocaleDateString()}`
-    : new Date(entry.mtime).toLocaleDateString()
 
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState(entry.name)
@@ -320,44 +364,53 @@ function ListingRow ({
       className={entry.type}
       onClick={!renaming && entry.type === 'dir' ? () => onOpenDir(entryPath) : undefined}
     >
-      <span className="entry-icon">{entry.type === 'dir' ? '📁' : '📄'}</span>
-      {renaming
-        ? (
-          <input
-            className="rename-input" autoFocus value={renameValue} disabled={busy}
-            onClick={e => e.stopPropagation()}
-            onChange={e => setRenameValue(e.target.value)}
-            onKeyDown={onRenameKeyDown}
-            onBlur={onRenameBlur}
-          />
-          )
-        : <span className="entry-name">{entry.name}</span>}
-      <span className="entry-meta">{rowError ? <span className="entry-error">{rowError}</span> : meta}</span>
+      <div className="entry-main">
+        <span className="entry-icon">{entry.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span>
+        {renaming
+          ? (
+            <input
+              className="rename-input" autoFocus value={renameValue} disabled={busy}
+              onClick={e => e.stopPropagation()}
+              onChange={e => setRenameValue(e.target.value)}
+              onKeyDown={onRenameKeyDown}
+              onBlur={onRenameBlur}
+            />
+            )
+          : (
+            <span className="entry-text">
+              <span className="entry-name">{entry.name}</span>
+              {rowError && <span className="entry-error">{rowError}</span>}
+            </span>
+            )}
+      </div>
+      <span className="entry-size">{entry.type === 'file' ? formatBytes(entry.size ?? 0) : '—'}</span>
+      <span className="entry-mtime">{new Date(entry.mtime).toLocaleDateString()}</span>
       <div className="entry-actions">
         {entry.type === 'file' && (
           <button
-            type="button" className="primary"
+            type="button" className="btn outline sm"
             onClick={(e) => {
               e.stopPropagation()
               void manager.start(entryPath, entry.name, apiFetch)
               notify(`Added "${entry.name}" to the download queue`)
             }}
           >
+            <DownloadIcon size={13} />
             Download
           </button>
         )}
         <div className="kebab-wrap" ref={menuRef}>
           <button
-            type="button" className="kebab-btn" disabled={busy} aria-label="more actions" aria-haspopup="true"
+            type="button" className="kebab-btn icon-btn" disabled={busy} aria-label="more actions" aria-haspopup="true"
             onClick={e => { e.stopPropagation(); setMenuOpen(v => !v) }}
           >
-            ⋮
+            <MoreIcon />
           </button>
           {menuOpen && (
             <div className="kebab-menu" onClick={e => e.stopPropagation()}>
-              <button type="button" onClick={startRename}>Rename</button>
-              <button type="button" onClick={startMove}>Move</button>
-              <button type="button" onClick={deleteEntry}>Delete</button>
+              <button type="button" onClick={startRename}><PencilIcon size={14} />Rename</button>
+              <button type="button" onClick={startMove}><MoveIcon size={14} />Move</button>
+              <button type="button" className="danger" onClick={deleteEntry}><TrashIcon size={14} />Delete</button>
             </div>
           )}
         </div>

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useApp } from '../context/AppContext'
+import { RefreshIcon, WifiIcon, WifiOffIcon } from './icons'
 
 export function ConnectionBadge (): React.JSX.Element {
   const { connected, serverUrl, retry } = useApp()
@@ -11,12 +12,17 @@ export function ConnectionBadge (): React.JSX.Element {
   }
 
   return (
-    <div className="badge">
-      <span className="dot" style={{ background: connected ? 'var(--color-success)' : 'var(--color-danger)' }} />
-      {connected ? 'Connected' : 'Disconnected'} · {serverUrl.replace(/^https?:\/\//, '')}
+    <div className={`conn-pill${connected ? '' : ' offline'}`}>
+      <span className="conn-label">
+        {connected ? <WifiIcon size={14} /> : <WifiOffIcon size={14} />}
+        <span className="conn-host" title={serverUrl}>{serverUrl.replace(/^https?:\/\//, '')}</span>
+      </span>
       {!connected && (
-        <button className="link-btn" disabled={reconnecting} onClick={() => { void onReconnect() }}>
-          {reconnecting ? 'Reconnecting…' : 'Reconnect'}
+        <button
+          className="icon-btn" disabled={reconnecting} title="Reconnect" aria-label="Reconnect"
+          onClick={() => { void onReconnect() }}
+        >
+          <RefreshIcon size={14} />
         </button>
       )}
     </div>

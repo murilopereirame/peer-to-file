@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { errMessage } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
-import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
+import { Button, Card, ErrorText, Input, Muted } from '../components/Primitives'
 
 export function AuthScreen ({ mode }: { mode: 'setup' | 'login' }): React.JSX.Element {
   const { completeSetup, completeLogin, changeServer, serverUrl } = useApp()
@@ -29,8 +29,13 @@ export function AuthScreen ({ mode }: { mode: 'setup' | 'login' }): React.JSX.El
 
   return (
     <div className="centered">
-      <Card style={{ width: 420 }}>
-        <Title>{mode === 'setup' ? 'Create the admin account' : 'Sign in'}</Title>
+      <div className="auth-brand">
+        <h1>P2File</h1>
+        <span className="tagline">self-hosted P2P file browser</span>
+      </div>
+      <Card className="auth-card">
+        <div className="card-head"><span className="card-title">{mode === 'setup' ? 'Create the admin account' : 'Sign in'}</span></div>
+        <div className="card-body">
         <Muted>
           {mode === 'setup'
             ? `No account exists on ${serverUrl.replace(/^https?:\/\//, '')} yet — enter the one-time setup token from the server log, then pick a username and password for the admin account.`
@@ -57,6 +62,7 @@ export function AuthScreen ({ mode }: { mode: 'setup' | 'login' }): React.JSX.El
           <Button onClick={() => { void onSubmit() }} loading={loading} disabled={!username.trim() || !password || (mode === 'setup' && !setupToken.trim())}>
             {mode === 'setup' ? 'Create account' : 'Sign in'}
           </Button>
+        </div>
         </div>
       </Card>
     </div>

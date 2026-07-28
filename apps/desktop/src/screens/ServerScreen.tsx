@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
 import { errMessage } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
-import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
+import { Button, Card, ErrorText, Input, Muted } from '../components/Primitives'
+import { ServerIcon } from '../components/icons'
 
 export function ServerScreen (): React.JSX.Element {
   const { connectToServer } = useApp()
@@ -24,8 +25,13 @@ export function ServerScreen (): React.JSX.Element {
 
   return (
     <div className="centered">
-      <Card style={{ width: 420 }}>
-        <Title>Connect to a server</Title>
+      <div className="auth-brand">
+        <h1>P2File</h1>
+        <span className="tagline">self-hosted P2P file browser</span>
+      </div>
+      <Card className="auth-card">
+        <div className="card-head"><span className="card-title"><ServerIcon size={15} />Connect to a server</span></div>
+        <div className="card-body">
         <Muted>
           peer-to-file has no built-in server discovery — enter the address of the
           peer-to-file server you (or someone on your network) is already running,
@@ -43,6 +49,7 @@ export function ServerScreen (): React.JSX.Element {
         <ErrorText>{error}</ErrorText>
         <div className="btn-row">
           <Button onClick={() => { void onConnect() }} loading={loading} disabled={!url.trim()}>Connect</Button>
+        </div>
         </div>
       </Card>
     </div>

@@ -8,7 +8,12 @@ export type UploadStatus = 'uploading' | 'done' | 'error'
 export interface UploadEntry {
   id: string
   name: string
+  /** Plaintext size of the selected file, known up front from the File. */
+  size: number
+  loaded: number
   progress: number
+  /** Smoothed wire speed, derived from XHR upload progress events. */
+  speedBytesPerSec: number
   status: UploadStatus
   message?: string
 }
@@ -39,6 +44,9 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
   const notify = useToast()
   const [uploads, setUploads] = useState<UploadEntry[]>([])
   const inFlight = useRef(new Map<string, XMLHttpRequest>())
+  // Last progress event per upload, to turn XHR's cumulative byte counts into
+  // a rate for the speed readout/graph.
+  const lastProgress = useRef(new Map<string, { at: number, loaded: number, speed: number }>())
 
   // Abort any still-running uploads if the browser view unmounts (e.g. the
   // user signs out mid-upload) instead of leaving them running to completion
@@ -56,7 +64,10 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
     if (!apiBase) return
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     const startedAt = Date.now()
-    setUploads(list => [...list, { id, name: file.name, progress: 0, status: 'uploading' }])
+    setUploads(list => [
+      ...list,
+      { id, name: file.name, size: file.size, loaded: 0, progress: 0, speedBytesPerSec: 0, status: 'uploading' }
+    ])
 
     // Encrypted client-side (AES-256-CTR, key/IV generated per upload, then
     // ECDH-wrapped so the wire never carries the key either) — see the doc
@@ -79,11 +90,22 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
       xhr.setRequestHeader('X-P2F-Csrf', '1') // F5: CSRF guard on cookie-authed mutations
       for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value)
       xhr.upload.addEventListener('progress', e => {
-        if (e.lengthComputable) patch(id, { progress: e.loaded / e.total })
+        if (!e.lengthComputable) return
+        // Exponentially smoothed so the graph shows a trend rather than the
+        // sawtooth of however large a chunk the browser last flushed.
+        const now = performance.now()
+        const previous = lastProgress.current.get(id)
+        let speed = previous?.speed ?? 0
+        if (previous && now > previous.at) {
+          const instant = (e.loaded - previous.loaded) / ((now - previous.at) / 1000)
+          speed = previous.speed === 0 ? instant : previous.speed * 0.6 + instant * 0.4
+        }
+        lastProgress.current.set(id, { at: now, loaded: e.loaded, speed })
+        patch(id, { loaded: e.loaded, progress: e.loaded / e.total, speedBytesPerSec: Math.max(0, speed) })
       })
       xhr.addEventListener('load', () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          patch(id, { progress: 1, status: 'done' })
+          patch(id, { progress: 1, loaded: file.size, speedBytesPerSec: 0, status: 'done' })
           void apiFetch('/api/uploads/history', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -99,14 +121,20 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
             const responseBody = JSON.parse(xhr.responseText) as { error?: string }
             if (responseBody.error) message = responseBody.error
           } catch { /* non-JSON error body */ }
-          patch(id, { status: 'error', message })
+          patch(id, { status: 'error', speedBytesPerSec: 0, message })
         }
       })
-      xhr.addEventListener('error', () => patch(id, { status: 'error', message: 'network error' }))
-      xhr.addEventListener('loadend', () => { inFlight.current.delete(id); onSettled?.() })
+      xhr.addEventListener('error', () => patch(id, { status: 'error', speedBytesPerSec: 0, message: 'network error' }))
+      xhr.addEventListener('loadend', () => {
+        inFlight.current.delete(id)
+        lastProgress.current.delete(id)
+        onSettled?.()
+      })
       xhr.send(body)
     }, err => {
-      patch(id, { status: 'error', message: err instanceof Error ? err.message : 'encryption failed' })
+      patch(id, {
+        status: 'error', speedBytesPerSec: 0, message: err instanceof Error ? err.message : 'encryption failed'
+      })
       onSettled?.()
     })
   }, [apiBase, apiFetch, patch, notify])

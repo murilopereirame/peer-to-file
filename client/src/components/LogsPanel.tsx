@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useToast } from '../context/ToastContext'
+import { DownloadIcon, SearchIcon, TerminalIcon, TrashIcon } from './icons'
 
 interface LogEntry {
   id: number
@@ -24,7 +25,12 @@ const KIND_OPTIONS: Array<{ value: string, label: string }> = [
   { value: 'server', label: 'server' }
 ]
 
-export function LogsPanel (): React.JSX.Element {
+export function LogsPanel ({
+  search = ''
+}: {
+  /** Free-text filter from the top bar; matches the log message. */
+  search?: string
+}): React.JSX.Element {
   const notify = useToast()
   const [status, setStatus] = useState<{ msg: string, kind: '' | 'ok' | 'error' }>({ msg: '', kind: '' })
   const [entries, setEntries] = useState<LogEntry[]>([])
@@ -74,7 +80,11 @@ export function LogsPanel (): React.JSX.Element {
     // runs once on mount
   }, [])
 
-  const visible = kindFilter ? entries.filter(e => e.kind === kindFilter) : entries
+  const query = search.trim().toLowerCase()
+  const visible = entries.filter(e =>
+    (kindFilter === '' || e.kind === kindFilter) &&
+    (query === '' || e.message.toLowerCase().includes(query))
+  )
 
   const onExport = (): void => {
     const lines = visible.map(e => `[${new Date(e.ts).toISOString()}] ${e.kind.toUpperCase()}: ${e.message}`)
@@ -92,7 +102,15 @@ export function LogsPanel (): React.JSX.Element {
 
   return (
     <section className="card">
-      {status.msg && <div id="conn-status" className={`status ${status.kind}`}>{status.msg}</div>}
+      <div className="card-head">
+        <h2 className="card-title">
+          <TerminalIcon size={15} />
+          Server activity
+          {visible.length > 0 && <span className="muted-count">{visible.length}</span>}
+        </h2>
+        {status.msg !== '' && <span id="conn-status" className={`status ${status.kind}`}>{status.msg}</span>}
+      </div>
+
       <section id="logs-controls">
         <label>
           kind
@@ -107,15 +125,26 @@ export function LogsPanel (): React.JSX.Element {
           />
           auto-refresh
         </label>
-        <button id="clear-view" type="button" onClick={() => setEntries([])}>Clear view</button>
-        <button id="export-logs" type="button" disabled={visible.length === 0} onClick={onExport}>
+        <div className="spacer" />
+        <button id="clear-view" type="button" className="btn ghost sm" onClick={() => setEntries([])}>
+          <TrashIcon size={13} />
+          Clear view
+        </button>
+        <button
+          id="export-logs" type="button" className="btn outline sm"
+          disabled={visible.length === 0} onClick={onExport}
+        >
+          <DownloadIcon size={13} />
           Export logs
         </button>
       </section>
 
       <ul id="log-list">
         {visible.length === 0 && (
-          <li className="empty">{entries.length === 0 ? 'no activity yet' : 'no entries match this filter'}</li>
+          <li className="empty">
+            <SearchIcon className="empty-icon" size={26} />
+            {entries.length === 0 ? 'no activity yet' : 'no entries match this filter'}
+          </li>
         )}
         {visible.map(entry => (
           <li key={entry.id}>

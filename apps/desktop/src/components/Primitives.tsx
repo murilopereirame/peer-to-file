@@ -1,7 +1,9 @@
 import React from 'react'
 
-export function Card ({ children, style }: { children: React.ReactNode, style?: React.CSSProperties }): React.JSX.Element {
-  return <div className="card" style={style}>{children}</div>
+export function Card ({
+  children, className, style
+}: { children: React.ReactNode, className?: string, style?: React.CSSProperties }): React.JSX.Element {
+  return <div className={`card ${className ?? ''}`.trim()} style={style}>{children}</div>
 }
 
 export function Title ({ children }: { children: React.ReactNode }): React.JSX.Element {

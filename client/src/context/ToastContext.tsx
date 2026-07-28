@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useRef, useState } from 'react'
+import { AlertIcon, CheckIcon, InfoIcon } from '../components/icons'
 
 export type ToastKind = 'success' | 'error' | 'info'
 
@@ -31,7 +32,12 @@ export function ToastProvider ({ children }: { children: React.ReactNode }): Rea
       {children}
       <div className="toast-stack">
         {toasts.map(t => (
-          <div key={t.id} className={`toast ${t.kind}`} onClick={() => dismiss(t.id)}>{t.message}</div>
+          <div key={t.id} className={`toast ${t.kind}`} role="status" onClick={() => dismiss(t.id)}>
+            <span className="toast-icon">
+              {t.kind === 'error' ? <AlertIcon size={15} /> : t.kind === 'info' ? <InfoIcon size={15} /> : <CheckIcon size={15} />}
+            </span>
+            {t.message}
+          </div>
         ))}
       </div>
     </ToastContext.Provider>

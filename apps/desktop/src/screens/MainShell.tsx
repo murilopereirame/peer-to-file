@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { notifyOS } from '@p2f/shared'
+import { formatBytes, notifyOS } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
 import { DownloadsProvider, useDownloads } from '../context/DownloadsContext'
 import { UploadsProvider, useUploads } from '../context/UploadsContext'
 import { ToastProvider, useToast } from '../context/ToastContext'
 import { setSystemKeepAwake } from '../lib/electronApi'
 import { ConnectionBadge } from '../components/ConnectionBadge'
+import { ActivityIcon, ArrowDownIcon, FolderIcon, HistoryIcon, SettingsIcon, TerminalIcon } from '../components/icons'
 import { BrowserScreen } from './BrowserScreen'
 import { DownloadsScreen } from './DownloadsScreen'
 import { HistoryScreen } from './HistoryScreen'
@@ -14,25 +15,49 @@ import { SettingsScreen } from './SettingsScreen'
 
 type Tab = 'browse' | 'transfers' | 'history' | 'logs' | 'settings'
 
-const TABS: Array<{ key: Tab, label: string }> = [
-  { key: 'browse', label: 'Browse' },
-  { key: 'transfers', label: 'Transfers' },
-  { key: 'history', label: 'History' },
-  { key: 'logs', label: 'Logs' },
-  { key: 'settings', label: 'Settings' }
+const TABS: Array<{ key: Tab, label: string, Icon: typeof FolderIcon, subtitle: string }> = [
+  { key: 'browse', label: 'Browse', Icon: FolderIcon, subtitle: 'The server\'s shared folder' },
+  { key: 'transfers', label: 'Transfers', Icon: ActivityIcon, subtitle: 'Downloads and uploads in flight' },
+  { key: 'history', label: 'History', Icon: HistoryIcon, subtitle: 'Transfers this server has finished' },
+  { key: 'logs', label: 'Logs', Icon: TerminalIcon, subtitle: 'Live server activity' },
+  { key: 'settings', label: 'Settings', Icon: SettingsIcon, subtitle: 'Server, downloads and appearance' }
 ]
 
-function TabBar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => void }): React.JSX.Element {
+function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => void }): React.JSX.Element {
   const { downloads } = useDownloads()
-  const busyCount = downloads.filter(d => d.status === 'downloading' || d.status === 'paused' || d.status === 'preparing').length
+  const { uploads } = useUploads()
+  const busyCount =
+    downloads.filter(d => d.status === 'downloading' || d.status === 'paused' || d.status === 'preparing').length +
+    uploads.filter(u => u.status === 'running').length
+
   return (
-    <nav className="tabs">
-      {TABS.map(tab => (
-        <button key={tab.key} className={`tab ${active === tab.key ? 'active' : ''}`} onClick={() => onChange(tab.key)}>
-          {tab.label}{tab.key === 'transfers' && busyCount > 0 ? ` (${busyCount})` : ''}
-        </button>
-      ))}
-    </nav>
+    <aside className="sidebar">
+      <div className="sidebar-brand">
+        <div>
+          <strong>P2File</strong>
+          <span className="tagline">self-hosted P2P files</span>
+        </div>
+      </div>
+
+      <nav className="sidebar-nav" aria-label="views">
+        {TABS.map(({ key, label, Icon }) => (
+          <button
+            key={key}
+            type="button"
+            className={`nav-item${active === key ? ' active' : ''}`}
+            aria-current={active === key ? 'page' : undefined}
+            onClick={() => onChange(key)}
+          >
+            <span className="nav-label"><Icon />{label}</span>
+            {key === 'transfers' && busyCount > 0 && <span className="count">{busyCount}</span>}
+          </button>
+        ))}
+      </nav>
+
+      <div className="sidebar-footer">
+        <ConnectionBadge />
+      </div>
+    </aside>
   )
 }
 
@@ -77,26 +102,47 @@ function useKeepAwake (): void {
   useEffect(() => () => { void setSystemKeepAwake(false) }, [])
 }
 
+function TopBar ({ tab }: { tab: Tab }): React.JSX.Element {
+  const { downloads } = useDownloads()
+  const meta = TABS.find(t => t.key === tab)
+  // Uploads have no progress events on desktop (see UploadsContext), so only
+  // the inbound side has a rate to show.
+  const downSpeed = downloads.reduce((sum, d) => sum + (d.status === 'downloading' ? d.speedBytesPerSec : 0), 0)
+
+  return (
+    <div className="topbar">
+      <div className="topbar-title">
+        <strong>{meta?.label}</strong>
+        <span className="subtitle">{meta?.subtitle}</span>
+      </div>
+      <div className="speed-readout">
+        <span className="rate down" title="Total download speed">
+          <ArrowDownIcon size={15} />{formatBytes(downSpeed)}/s
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function Shell (): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('browse')
   useDownloadCompletionNotifier()
   useKeepAwake()
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <strong>P2File</strong>
-        <ConnectionBadge />
-      </header>
-      <main className="app-main">
-        <div className="app-main-inner">
-          {tab === 'browse' && <BrowserScreen />}
-          {tab === 'transfers' && <DownloadsScreen />}
-          {tab === 'history' && <HistoryScreen />}
-          {tab === 'logs' && <LogsScreen />}
-          {tab === 'settings' && <SettingsScreen />}
-        </div>
-      </main>
-      <TabBar active={tab} onChange={setTab} />
+      <Sidebar active={tab} onChange={setTab} />
+      <div className="app-body">
+        <TopBar tab={tab} />
+        <main className="app-main">
+          <div className="app-main-inner">
+            {tab === 'browse' && <BrowserScreen />}
+            {tab === 'transfers' && <DownloadsScreen />}
+            {tab === 'history' && <HistoryScreen />}
+            {tab === 'logs' && <LogsScreen />}
+            {tab === 'settings' && <SettingsScreen />}
+          </div>
+        </main>
+      </div>
     </div>
   )
 }
