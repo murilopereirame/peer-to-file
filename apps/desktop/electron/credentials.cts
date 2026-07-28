@@ -3,7 +3,9 @@ import { JsonStore } from './store.cjs'
 
 export interface StoredCredentials {
   username: string
-  password: string
+  /** A long-lived refresh token (F9), not the password — the raw password is
+   *  never persisted. Used to silently mint a fresh session on next launch. */
+  refreshToken: string
 }
 
 // One JSON entry per server URL, so switching servers doesn't clobber a
@@ -14,11 +16,11 @@ export interface StoredCredentials {
 // disk, rather than being one more plaintext field in the settings file.
 const credentialsStore = new JsonStore('credentials.json')
 
-export function saveCredentials (server: string, username: string, password: string): void {
+export function saveCredentials (server: string, username: string, refreshToken: string): void {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('OS-level credential encryption is unavailable on this machine')
   }
-  const encrypted = safeStorage.encryptString(JSON.stringify({ username, password }))
+  const encrypted = safeStorage.encryptString(JSON.stringify({ username, refreshToken }))
   credentialsStore.set(server, encrypted.toString('base64'))
 }
 

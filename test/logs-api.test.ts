@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 import { silentLogger } from '../src/server/log.ts'
+import { testConfig } from './support.ts'
 
 let root: string
 let dbDir: string
@@ -24,17 +25,10 @@ before(async () => {
   await fs.writeFile(path.join(root, 'file.bin'), crypto.randomBytes(32 * 1024))
   dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-logsdb-'))
 
-  running = await startServer({
+  running = await startServer(testConfig({
     root,
-    host: '127.0.0.1',
-    port: 0,
-    trackerPort: 0,
-    publicHost: null,
-    publicUrl: null,
-    authEnabled: true,
-    dbPath: path.join(dbDir, 'p2f.db'),
-    cacheDir: path.join(root, '.p2f-cache')
-  }, silentLogger)
+    dbPath: path.join(dbDir, 'p2f.db')
+  }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
   running.db.createUser('alice', 'correct horse battery')
 })

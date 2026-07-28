@@ -39,8 +39,7 @@ ENV P2F_ROOT=/data \
     P2F_HOST=0.0.0.0 \
     P2F_PORT=8000 \
     P2F_TRACKER_PORT=8001 \
-    P2F_DB=/config/p2f.db \
-    P2F_CACHE_DIR=/config/cache
+    P2F_DB=/config/p2f.db
 
 EXPOSE 8000 8001
 VOLUME /config

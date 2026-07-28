@@ -7,11 +7,19 @@ import path from 'node:path'
 import parseTorrent from 'parse-torrent'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 import { silentLogger } from '../src/server/log.ts'
+import { testConfig } from './support.ts'
 
 let root: string
 let running: RunningServer
 let base: string
+let apiToken: string
 const fileContent = crypto.randomBytes(64 * 1024)
+
+// Bearer-token auth for the whole suite. Bearer clients are exempt from the
+// CSRF header requirement (they don't ride ambient cookies), so this is all a
+// scripted client needs.
+const auth = (): Record<string, string> => ({ Authorization: `Bearer ${apiToken}` })
+const authJson = (): Record<string, string> => ({ ...auth(), 'Content-Type': 'application/json' })
 
 before(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-api-')))
@@ -19,18 +27,10 @@ before(async () => {
   await fs.mkdir(path.join(root, 'docs'))
   await fs.writeFile(path.join(root, 'docs', 'readme.md'), '# hi\n')
 
-  running = await startServer({
-    root,
-    host: '127.0.0.1',
-    port: 0,
-    trackerPort: 0,
-    publicHost: null,
-    publicUrl: null,
-    authEnabled: false,
-    dbPath: ':memory:',
-    cacheDir: path.join(root, '.p2f-cache')
-  }, silentLogger)
+  running = await startServer(testConfig({ root }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
+  running.db.createUser('alice', 'correct horse battery')
+  apiToken = running.db.createApiToken('alice', 'test')
 })
 
 after(async () => {
@@ -79,15 +79,21 @@ async function fetchTorrentMeta (relPath: string): Promise<{ meta: any, key: Buf
   const info = await (await fetch(`${base}/api/info`)).json() as any
   const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
   const res = await fetch(
-    `${base}/api/torrent?path=${encodeURIComponent(relPath)}&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`
+    `${base}/api/torrent?path=${encodeURIComponent(relPath)}&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`,
+    { headers: auth() }
   )
   const meta = await res.json() as any
   const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
   return { meta, key: keyMaterial.subarray(0, 32), iv: keyMaterial.subarray(32, 48) }
 }
 
-/** Encrypts an upload payload the way a real client does, returning ready-to-send headers. */
-async function encryptUpload (payload: Buffer): Promise<{ body: Buffer, headers: Record<string, string> }> {
+/**
+ * Encrypts an upload payload the way a real client does. F7: the plaintext
+ * SHA-256 goes *inside* the ECDH-wrapped blob (key||iv||sha256 = 80 bytes),
+ * not a cleartext header. `tamperSha` corrupts the embedded hash for the
+ * integrity-failure test.
+ */
+async function encryptUpload (payload: Buffer, tamperSha = false): Promise<{ body: Buffer, headers: Record<string, string> }> {
   const info = await (await fetch(`${base}/api/info`)).json() as any
   const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
 
@@ -95,16 +101,16 @@ async function encryptUpload (payload: Buffer): Promise<{ body: Buffer, headers:
   const iv = crypto.randomBytes(16)
   const cipher = crypto.createCipheriv('aes-256-ctr', key, iv)
   const body = Buffer.concat([cipher.update(payload), cipher.final()])
-  const plainSha256 = crypto.createHash('sha256').update(payload).digest('hex')
-  const wrappedKey = await wrapKeyMaterial(keyWrap.wrapKey, Buffer.concat([key, iv]))
+  const sha = tamperSha ? crypto.randomBytes(32) : crypto.createHash('sha256').update(payload).digest()
+  const wrappedKey = await wrapKeyMaterial(keyWrap.wrapKey, Buffer.concat([key, iv, sha]))
 
   return {
     body,
     headers: {
+      ...auth(),
       'Content-Type': 'application/octet-stream',
       'X-P2F-Enc-Client-Pubkey': keyWrap.clientPublicKeyBase64,
-      'X-P2F-Enc-Key-Wrapped': wrappedKey,
-      'X-P2F-Plain-Sha256': plainSha256
+      'X-P2F-Enc-Key-Wrapped': wrappedKey
     }
   }
 }
@@ -119,7 +125,7 @@ test('GET /api/info identifies the server', async () => {
 })
 
 test('GET /api/list returns the directory listing', async () => {
-  const res = await fetch(`${base}/api/list?path=`)
+  const res = await fetch(`${base}/api/list?path=`, { headers: auth() })
   assert.equal(res.status, 200)
   const body = await res.json() as any
   assert.equal(body.path, '')
@@ -130,7 +136,7 @@ test('GET /api/list returns the directory listing', async () => {
 })
 
 test('GET /api/list rejects traversal', async () => {
-  const res = await fetch(`${base}/api/list?path=${encodeURIComponent('../')}`)
+  const res = await fetch(`${base}/api/list?path=${encodeURIComponent('../')}`, { headers: auth() })
   assert.equal(res.status, 403)
   const body = await res.json() as any
   assert.match(body.error, /escapes/)
@@ -142,7 +148,8 @@ test('GET /api/torrent returns consistent, webseed-carrying metadata', async () 
   assert.equal(body.name, 'big.bin')
   assert.equal(body.length, fileContent.length)
   assert.match(body.infoHash, /^[0-9a-f]{40}$/)
-  assert.deepEqual(body.announce, [`ws://127.0.0.1:${running.config.trackerPort}`])
+  // announce goes through the token-gated /tracker, bound to this infohash (F3)
+  assert.ok(body.announce[0].startsWith(`ws://127.0.0.1:${running.config.port}/tracker?ih=${body.infoHash}&t=`))
   assert.ok(body.webseed.startsWith(`http://127.0.0.1:${running.config.port}/api/raw?path=`))
   assert.ok(body.magnet.startsWith(`magnet:?xt=urn:btih:${body.infoHash}`))
 
@@ -164,7 +171,7 @@ test('GET /api/torrent returns consistent, webseed-carrying metadata', async () 
 })
 
 test('GET /api/torrent without ck (client ECDH public key) is a 400', async () => {
-  const res = await fetch(`${base}/api/torrent?path=big.bin`)
+  const res = await fetch(`${base}/api/torrent?path=big.bin`, { headers: auth() })
   assert.equal(res.status, 400)
 })
 
@@ -172,7 +179,8 @@ test('GET /api/torrent on a directory is a 400', async () => {
   const info = await (await fetch(`${base}/api/info`)).json() as any
   const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
   const res = await fetch(
-    `${base}/api/torrent?path=docs&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`
+    `${base}/api/torrent?path=docs&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`,
+    { headers: auth() }
   )
   assert.equal(res.status, 400)
 })
@@ -195,7 +203,7 @@ test('GET /api/raw serves AES-256-CTR ciphertext with Range support (webseed)', 
     return Buffer.concat([decipher.update(padded), decipher.final()]).subarray(blockOffset)
   }
 
-  const whole = await fetch(`${base}/api/raw?path=big.bin`)
+  const whole = await fetch(`${base}/api/raw?path=big.bin`, { headers: auth() })
   assert.equal(whole.status, 200)
   assert.equal(whole.headers.get('accept-ranges'), 'bytes')
   const wholeCipher = Buffer.from(await whole.arrayBuffer())
@@ -204,7 +212,7 @@ test('GET /api/raw serves AES-256-CTR ciphertext with Range support (webseed)', 
   assert.deepEqual(decrypt(wholeCipher, 0), fileContent)
 
   const res = await fetch(`${base}/api/raw?path=big.bin`, {
-    headers: { Range: 'bytes=10-13' }
+    headers: { ...auth(), Range: 'bytes=10-13' }
   })
   assert.equal(res.status, 206)
   assert.equal(res.headers.get('content-range'), `bytes 10-13/${fileContent.length}`)
@@ -212,10 +220,15 @@ test('GET /api/raw serves AES-256-CTR ciphertext with Range support (webseed)', 
   assert.deepEqual(decrypt(rangeCipher, 10), fileContent.subarray(10, 14))
 })
 
+test('GET /api/raw requires auth or a valid transfer token', async () => {
+  const noAuth = await fetch(`${base}/api/raw?path=big.bin`)
+  assert.equal(noAuth.status, 401)
+})
+
 test('GET /api/raw rejects traversal and missing files', async () => {
-  const evil = await fetch(`${base}/api/raw?path=${encodeURIComponent('../../etc/passwd')}`)
+  const evil = await fetch(`${base}/api/raw?path=${encodeURIComponent('../../etc/passwd')}`, { headers: auth() })
   assert.equal(evil.status, 403)
-  const missing = await fetch(`${base}/api/raw?path=nope.bin`)
+  const missing = await fetch(`${base}/api/raw?path=nope.bin`, { headers: auth() })
   assert.equal(missing.status, 404)
 })
 
@@ -228,7 +241,7 @@ test('POST /api/delete removes a file', async () => {
   await fs.writeFile(path.join(root, 'scratch.txt'), 'delete me')
   const res = await fetch(`${base}/api/delete`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ path: 'scratch.txt' })
   })
   assert.equal(res.status, 200)
@@ -238,14 +251,14 @@ test('POST /api/delete removes a file', async () => {
 test('POST /api/delete rejects traversal and missing files', async () => {
   const escape = await fetch(`${base}/api/delete`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ path: '../escape.txt' })
   })
   assert.equal(escape.status, 403)
 
   const missing = await fetch(`${base}/api/delete`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ path: 'nope.bin' })
   })
   assert.equal(missing.status, 404)
@@ -256,7 +269,7 @@ test('POST /api/move renames and moves entries', async () => {
 
   const rename = await fetch(`${base}/api/move`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ from: 'movable.txt', to: 'renamed.txt' })
   })
   assert.equal(rename.status, 200)
@@ -265,7 +278,7 @@ test('POST /api/move renames and moves entries', async () => {
 
   const move = await fetch(`${base}/api/move`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ from: 'renamed.txt', to: 'docs/renamed.txt' })
   })
   assert.equal(move.status, 200)
@@ -279,7 +292,7 @@ test('POST /api/move refuses to overwrite an existing entry', async () => {
   await fs.writeFile(path.join(root, 'src-move.txt'), 'a')
   const res = await fetch(`${base}/api/move`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ from: 'src-move.txt', to: 'big.bin' })
   })
   assert.equal(res.status, 409)
@@ -289,7 +302,7 @@ test('POST /api/move refuses to overwrite an existing entry', async () => {
 test('POST /api/mkdir creates a folder', async () => {
   const res = await fetch(`${base}/api/mkdir`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ path: 'a-new-folder' })
   })
   assert.equal(res.status, 200)
@@ -303,7 +316,7 @@ test('POST /api/mkdir creates a folder', async () => {
 test('POST /api/mkdir refuses to overwrite an existing entry', async () => {
   const res = await fetch(`${base}/api/mkdir`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authJson(),
     body: JSON.stringify({ path: 'docs' })
   })
   assert.equal(res.status, 409)
@@ -326,10 +339,9 @@ test('POST /api/upload streams a file to disk', async () => {
   await fs.rm(path.join(root, 'uploaded.bin'))
 })
 
-test('POST /api/upload rejects a bad plaintext checksum', async () => {
+test('POST /api/upload rejects a bad plaintext checksum (F7: hash is inside the wrapped blob)', async () => {
   const payload = crypto.randomBytes(1024)
-  const { body, headers } = await encryptUpload(payload)
-  headers['X-P2F-Plain-Sha256'] = crypto.randomBytes(32).toString('hex')
+  const { body, headers } = await encryptUpload(payload, true)
   const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('bad-checksum.bin')}`, {
     method: 'POST',
     headers,
@@ -343,7 +355,7 @@ test('POST /api/upload rejects a bad plaintext checksum', async () => {
 test('POST /api/upload rejects missing encryption headers', async () => {
   const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('no-headers.bin')}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
+    headers: { ...auth(), 'Content-Type': 'application/octet-stream' },
     body: crypto.randomBytes(1024),
     duplex: 'half'
   } as RequestInit)
@@ -387,56 +399,6 @@ test('POST /api/upload rejects an invalid name and an existing target', async ()
   assert.equal(collision.status, 409)
   // the original file must survive an attempted overwrite
   assert.deepEqual(await fs.readFile(path.join(root, 'big.bin')), fileContent)
-})
-
-test('download history works without auth as a single shared, unscoped list', async () => {
-  const record = await fetch(`${base}/api/downloads/history`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: 'big.bin', name: 'big.bin', length: fileContent.length })
-  })
-  assert.equal(record.status, 201)
-
-  const list = await (await fetch(`${base}/api/downloads/history`)).json() as any
-  assert.deepEqual(list.entries.map((e: any) => e.name), ['big.bin'])
-
-  const clear = await fetch(`${base}/api/downloads/history/clear`, { method: 'POST' })
-  assert.equal(clear.status, 200)
-  const after = await (await fetch(`${base}/api/downloads/history`)).json() as any
-  assert.deepEqual(after.entries, [])
-})
-
-test('upload history is tracked separately from download history', async () => {
-  const recordDownload = await fetch(`${base}/api/downloads/history`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: 'big.bin', name: 'downloaded.bin', length: fileContent.length })
-  })
-  assert.equal(recordDownload.status, 201)
-
-  const recordUpload = await fetch(`${base}/api/uploads/history`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: 'big.bin', name: 'uploaded.bin', length: fileContent.length, durationMs: 1500 })
-  })
-  assert.equal(recordUpload.status, 201)
-
-  const downloads = await (await fetch(`${base}/api/downloads/history`)).json() as any
-  assert.deepEqual(downloads.entries.map((e: any) => e.name), ['downloaded.bin'])
-
-  const uploads = await (await fetch(`${base}/api/uploads/history`)).json() as any
-  assert.deepEqual(uploads.entries.map((e: any) => e.name), ['uploaded.bin'])
-  assert.equal(uploads.entries[0].duration_ms, 1500)
-
-  // clearing one kind must not touch the other
-  const clearUploads = await fetch(`${base}/api/uploads/history/clear`, { method: 'POST' })
-  assert.equal(clearUploads.status, 200)
-  const uploadsAfter = await (await fetch(`${base}/api/uploads/history`)).json() as any
-  assert.deepEqual(uploadsAfter.entries, [])
-  const downloadsAfter = await (await fetch(`${base}/api/downloads/history`)).json() as any
-  assert.deepEqual(downloadsAfter.entries.map((e: any) => e.name), ['downloaded.bin'])
-
-  await fetch(`${base}/api/downloads/history/clear`, { method: 'POST' })
 })
 
 test('serves the web client and the WebTorrent bundle', async () => {

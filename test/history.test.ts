@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 import { silentLogger } from '../src/server/log.ts'
+import { testConfig } from './support.ts'
 
 let root: string
 let dbDir: string
@@ -19,17 +20,10 @@ before(async () => {
   await fs.writeFile(path.join(root, 'file.bin'), crypto.randomBytes(1024))
   dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-historydb-'))
 
-  running = await startServer({
+  running = await startServer(testConfig({
     root,
-    host: '127.0.0.1',
-    port: 0,
-    trackerPort: 0,
-    publicHost: null,
-    publicUrl: null,
-    authEnabled: true,
-    dbPath: path.join(dbDir, 'p2f.db'),
-    cacheDir: path.join(root, '.p2f-cache')
-  }, silentLogger)
+    dbPath: path.join(dbDir, 'p2f.db')
+  }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
 
   running.db.createUser('alice', 'correct horse battery')
@@ -67,7 +61,7 @@ test('unauthenticated history requests are rejected', async () => {
 test('recording validates its body', async () => {
   const res = await fetch(`${base}/api/downloads/history`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Cookie: aliceCookie },
+    headers: { 'Content-Type': 'application/json', Cookie: aliceCookie, 'X-P2F-Csrf': '1' },
     body: JSON.stringify({ path: 'file.bin' })
   })
   assert.equal(res.status, 400)
@@ -77,7 +71,7 @@ test('download history is recorded and scoped per user', async () => {
   const record = async (cookie: string, name: string): Promise<void> => {
     const res = await fetch(`${base}/api/downloads/history`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-P2F-Csrf': '1' },
       body: JSON.stringify({ path: name, name, length: 1024 })
     })
     assert.equal(res.status, 201)
@@ -95,7 +89,7 @@ test('download history is recorded and scoped per user', async () => {
 test('clearing history only clears the requesting user\'s own entries', async () => {
   const clear = await fetch(`${base}/api/downloads/history/clear`, {
     method: 'POST',
-    headers: { Cookie: aliceCookie }
+    headers: { Cookie: aliceCookie, 'X-P2F-Csrf': '1' }
   })
   assert.equal(clear.status, 200)
 

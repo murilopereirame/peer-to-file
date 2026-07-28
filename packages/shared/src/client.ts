@@ -48,7 +48,10 @@ export class P2FClient {
     try {
       res = await this.fetchImpl(`${this.baseUrl}${pathname}`, {
         credentials: 'include',
-        ...init
+        ...init,
+        // F5: CSRF guard header the server requires on cookie-authenticated
+        // mutations. Harmless on GETs; set centrally so every call carries it.
+        headers: { 'X-P2F-Csrf': '1', ...(init?.headers as Record<string, string> | undefined) }
       })
     } catch (err) {
       throw new ApiError(0, err instanceof Error ? err.message : 'network request failed')
@@ -81,16 +84,25 @@ export class P2FClient {
     return await this.requestJson<ServerInfo>('/api/info')
   }
 
-  async setup (username: string, password: string): Promise<{ username: string }> {
-    return await this.requestJson('/api/setup', P2FClient.jsonInit('POST', { username, password }))
+  async setup (username: string, password: string, setupToken?: string): Promise<{ username: string }> {
+    return await this.requestJson('/api/setup', P2FClient.jsonInit('POST', { username, password, setupToken }))
   }
 
   async login (username: string, password: string): Promise<{ username: string }> {
     return await this.requestJson('/api/login', P2FClient.jsonInit('POST', { username, password }))
   }
 
+  /** F9: rotate the refresh cookie into a fresh access+refresh pair. */
+  async refresh (): Promise<{ username: string }> {
+    return await this.requestJson('/api/refresh', { method: 'POST' })
+  }
+
   async logout (): Promise<void> {
     await this.request('/api/logout', { method: 'POST' })
+  }
+
+  async logoutAll (): Promise<void> {
+    await this.request('/api/logout-all', { method: 'POST' })
   }
 
   async me (): Promise<{ username: string | null }> {

@@ -5,7 +5,7 @@ import { extname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { pathToFileURL } from 'node:url'
 import { clearCredentials, loadCredentials, saveCredentials } from './credentials.cjs'
-import { clearCookiesForOrigin, performFetch, type FetchRequest } from './netFetch.cjs'
+import { clearCookiesForOrigin, getCookie, setCookie, performFetch, type FetchRequest } from './netFetch.cjs'
 import { JsonStore } from './store.cjs'
 
 const APP_SCHEME = 'p2file'
@@ -147,14 +147,19 @@ app.on('activate', () => {
 
 // --- IPC surface, exposed to the renderer via electron/preload.cts --------
 
-ipcMain.handle('credentials:save', (_e, server: string, username: string, password: string) => {
-  saveCredentials(server, username, password)
+ipcMain.handle('credentials:save', (_e, server: string, username: string, refreshToken: string) => {
+  saveCredentials(server, username, refreshToken)
 })
 ipcMain.handle('credentials:load', (_e, server: string) => loadCredentials(server))
 ipcMain.handle('credentials:clear', (_e, server: string) => {
   clearCredentials(server)
   clearCookiesForOrigin(new URL(server).origin)
 })
+
+// Read/seed the main-process cookie jar — used to persist and restore the
+// refresh token (p2f_refresh) across app restarts (F9).
+ipcMain.handle('net:getCookie', (_e, origin: string, name: string) => getCookie(origin, name) ?? null)
+ipcMain.handle('net:setCookie', (_e, origin: string, name: string, value: string) => { setCookie(origin, name, value) })
 
 ipcMain.handle('downloads:defaultDir', () => app.getPath('downloads'))
 ipcMain.handle('downloads:pickFolder', async () => {

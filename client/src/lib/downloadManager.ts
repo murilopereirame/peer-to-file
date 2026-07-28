@@ -5,12 +5,16 @@
 // lifecycles. React consumes it as an external store (see
 // hooks/useDownloads.ts) via subscribe()/getSnapshot().
 import type { WTTorrent, WTServer } from './webtorrent-types'
-import { OpfsChunkStore } from './opfsChunkStore'
 import { errMessage } from './format'
 import {
-  establishKeyWrap, ensureFileDecryptionPatched, getServerEcdhPublicKey, importCtrKey, transferDrainCallbacks,
-  transferKeys, unwrapKeyMaterial
+  establishKeyWrap, ensureFileDecryptionPatched, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
+  opfsAvailable, setOpfsWorkerFactory, transferDrainCallbacks, transferKeys, unwrapKeyMaterial
 } from '@p2f/shared'
+
+// The store lives in @p2f/shared (both apps use it), but the worker it talks
+// to has to be constructed from a URL inside this app's own source tree for
+// Vite to emit a worker chunk — so the app supplies the factory.
+setOpfsWorkerFactory(() => new Worker(new URL('./opfsWorker.ts', import.meta.url), { type: 'module' }))
 
 export type DownloadStatus =
   | 'preparing' | 'downloading' | 'waiting' | 'paused' | 'saving' | 'done' | 'error'
@@ -346,12 +350,11 @@ export class DownloadManager {
         iv: keyMaterial.subarray(32, 48)
       })
 
-      const opfsAvailable = typeof navigator.storage?.getDirectory === 'function'
       this.client.add(torrentFile, {
         // more parallel webseed connections: smoother, higher throughput
         maxWebConns: 8,
         // persist verified pieces so a refreshed tab resumes, not restarts
-        ...(opfsAvailable ? { store: OpfsChunkStore } : {})
+        ...(opfsAvailable() ? { store: OpfsChunkStore } : {})
       }, torrent => {
         if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
         this.track(torrent, meta.webseed, entryPath, startPaused)
@@ -536,12 +539,17 @@ export class DownloadManager {
    *     browser's native download with no Blob ever created (this is what
    *     actually fixes Safari, whose Blob size limit is the reason a whole
    *     download can OOM there). There is no JS-visible "finished" signal
-   *     for an anchor-triggered download, so the piece store is reclaimed
+   *     for an anchor-triggered download, so the torrent itself is torn down
    *     after a grace period instead of immediately.
    *  3. Both of the above need a secure context; on plain HTTP a Blob is the
    *     only remaining option, built from the file's individual chunks
    *     (skips the extra full-size copy `file.blob()` does internally, but
    *     the memory footprint is still proportional to the file size).
+   *
+   * All three drain the OPFS piece store as they read (see startDraining):
+   * every piece is deleted the moment the save's sequential, single-pass read
+   * moves past it, so disk use falls as the output file grows instead of the
+   * two full copies a hold-everything-until-done save needs.
    */
   private async saveFile (torrent: WTTorrent, entryPath: string): Promise<void> {
     this.setEntry(entryPath, { status: 'saving' })
@@ -553,21 +561,15 @@ export class DownloadManager {
         console.debug('[p2f] save tier 1: File System Access API')
         const handle = await window.showSaveFilePicker({ suggestedName: file.name })
         const writable = await handle.createWritable()
-        // Drain the OPFS piece store as this sequential read walks through it,
-        // so each piece is freed the moment the save moves past it. Without
-        // this the whole piece store lives until the save finishes and is only
-        // then destroyed wholesale, so completing a save needs room for the
-        // full download twice over (every stored piece plus the full output
-        // file). Draining keeps the peak near 1x instead. Only the File System
-        // Access tier does this: it has a real completion promise (the pipeTo
-        // below) and controls its own write, whereas the service-worker tier
-        // has no JS-visible finish signal and must keep pieces re-readable for
-        // its whole grace period.
-        OpfsChunkStore.instances.get(torrent.infoHash)?.startDraining()
+        // Drain only once the picker has actually produced a writable: a
+        // dismissed save-as dialog throws above, leaving the pieces intact so
+        // a reload can offer the finished download again.
+        OpfsChunkStore.startDrainingFor(torrent.infoHash)
         await file.stream().pipeTo(writable)
         this.completeSave(torrent, entryPath, true)
       } else if (this.streamServer) {
         console.debug('[p2f] save tier 2: service worker stream, url =', file.streamURL)
+        OpfsChunkStore.startDrainingFor(torrent.infoHash)
         // No `download` attribute here: the service worker's response
         // already carries Content-Disposition: attachment, so setting the
         // HTML attribute too makes Chromium cancel the download outright —
@@ -576,6 +578,7 @@ export class DownloadManager {
         this.completeSave(torrent, entryPath, false)
       } else {
         console.debug('[p2f] save tier 3: chunked blob fallback')
+        OpfsChunkStore.startDrainingFor(torrent.infoHash)
         const chunks: Uint8Array<ArrayBuffer>[] = []
         for await (const chunk of file) chunks.push(chunk as Uint8Array<ArrayBuffer>)
         const url = URL.createObjectURL(new Blob(chunks, { type: file.type }))
@@ -585,14 +588,13 @@ export class DownloadManager {
         this.completeSave(torrent, entryPath, true)
       }
     } catch (err) {
-      // The torrent (and its OPFS pieces) is left intact on failure — e.g.
-      // the user cancelled a save-as dialog — so reloading the page picks
-      // the already-complete download back up and offers to save it again.
-      // Note the File System Access tier drains pieces as it writes (see
-      // above), so a failure *after* the pipe started streaming may have
-      // already freed earlier pieces; the resume-from-OPFS fallback only fully
-      // applies when the save fails before that (e.g. the picker was
-      // dismissed), which is the common cancellation case.
+      // The torrent is left intact on failure so a reload picks the
+      // already-complete download back up. Its OPFS pieces only survive if the
+      // save failed *before* the read started (e.g. the save-as picker was
+      // dismissed, the common cancellation case) — once draining is on, a
+      // failure partway through has already freed everything the read passed,
+      // and the download has to be fetched again. That is the deliberate
+      // trade for not needing room for two full copies of the file.
       this.setEntry(entryPath, { status: 'error', message: `save failed: ${errMessage(err)}` })
     }
   }
@@ -647,11 +649,14 @@ export class DownloadManager {
 
     // The service-worker-streamed save (the no-completion-signal path this
     // branch handles) has no JS-visible "finished" event of its own —
-    // previously this store was reclaimed on a flat 2-minute timer
+    // previously this torrent was torn down on a flat 2-minute timer
     // regardless of file size, which for a large/slow download destroyed the
-    // pieces (and broke the still-in-flight stream, which Safari surfaces as
-    // a "stopped" download, or worse a 404 if the torrent itself was already
-    // destroyed) well before the browser had actually finished saving it.
+    // remaining pieces (and broke the still-in-flight stream, which Safari
+    // surfaces as a "stopped" download, or worse a 404 if the torrent itself
+    // was already destroyed) well before the browser had actually finished
+    // saving it. Draining (see saveFile) reclaims each piece as the stream
+    // passes it, so what this timer still guards is the torrent object and
+    // the tail end of the read, not the bulk of the disk space.
     //
     // The real completion signal used here is the *decrypted* file
     // iterator's own drain (see ensureFileDecryptionPatched/

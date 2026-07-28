@@ -28,6 +28,10 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: npm test
+      # F11: surface known-vulnerable production dependencies. Non-blocking for
+      # now (|| true) so a fresh advisory doesn't wedge unrelated PRs; tighten
+      # to a hard fail once the baseline is clean.
+      - run: npm audit --omit=dev || true
 
   e2e:
     name: browser end-to-end

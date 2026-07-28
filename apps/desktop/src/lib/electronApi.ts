@@ -7,8 +7,9 @@ export type { StoredCredentials }
 // (server URL, download folder, theme) lives in the plain settings store
 // below.
 
-export async function saveCredentials (server: string, username: string, password: string): Promise<void> {
-  await window.p2f.saveCredentials(server, username, password)
+/** F9: `refreshToken`, not the password — the raw password is never persisted. */
+export async function saveCredentials (server: string, username: string, refreshToken: string): Promise<void> {
+  await window.p2f.saveCredentials(server, username, refreshToken)
 }
 
 export async function loadCredentials (server: string): Promise<StoredCredentials | null> {
@@ -17,6 +18,20 @@ export async function loadCredentials (server: string): Promise<StoredCredential
 
 export async function clearCredentials (server: string): Promise<void> {
   await window.p2f.clearCredentials(server)
+}
+
+// --- Refresh token (F9) -----------------------------------------------------
+// The session's refresh token lives as a cookie in the main-process jar. These
+// read it back out (to persist across restarts) and seed it on launch so
+// client.refresh() can mint a fresh session without the password.
+const REFRESH_COOKIE = 'p2f_refresh'
+
+export async function readRefreshToken (origin: string): Promise<string | null> {
+  return await window.p2f.getCookie(origin, REFRESH_COOKIE)
+}
+
+export async function restoreRefreshToken (origin: string, token: string): Promise<void> {
+  await window.p2f.setCookie(origin, REFRESH_COOKIE, token)
 }
 
 // --- Default download folder ------------------------------------------------

@@ -55,7 +55,8 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
     })()
       .then(async ({ body, headers }) => ipcFetch(client.uploadUrl(destDir, file.name), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream', ...headers },
+        // X-P2F-Csrf: F5 CSRF guard on cookie-authenticated mutations.
+        headers: { 'Content-Type': 'application/octet-stream', 'X-P2F-Csrf': '1', ...headers },
         body: await body.arrayBuffer()
       }))
       .then(res => {

@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 import { silentLogger } from '../src/server/log.ts'
+import { testConfig } from './support.ts'
 
 // First-run setup flow: the server starts with no users at all, and
 // /api/setup is the only way to create the initial (admin) account.
@@ -13,6 +14,7 @@ let root: string
 let dbDir: string
 let running: RunningServer
 let base: string
+let token: string
 
 before(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-setup-')))
@@ -20,18 +22,12 @@ before(async () => {
 
 beforeEach(async () => {
   dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'p2f-setup-db-'))
-  running = await startServer({
+  running = await startServer(testConfig({
     root,
-    host: '127.0.0.1',
-    port: 0,
-    trackerPort: 0,
-    publicHost: null,
-    publicUrl: null,
-    authEnabled: true,
-    dbPath: path.join(dbDir, 'p2f.db'),
-    cacheDir: path.join(root, '.p2f-cache')
-  }, silentLogger)
+    dbPath: path.join(dbDir, 'p2f.db')
+  }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
+  token = running.setupToken!
 })
 
 after(async () => {
@@ -50,11 +46,30 @@ test('a fresh server reports that setup is needed', async () => {
   await teardown()
 })
 
+test('setup requires the one-time setup token (F1a)', async () => {
+  const noToken = await fetch(`${base}/api/setup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'correct horse battery' })
+  })
+  assert.equal(noToken.status, 403)
+
+  const wrongToken = await fetch(`${base}/api/setup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'correct horse battery', setupToken: 'nope' })
+  })
+  assert.equal(wrongToken.status, 403)
+
+  assert.equal(running.db.userCount(), 0)
+  await teardown()
+})
+
 test('/api/setup creates the admin account and signs them in', async () => {
   const res = await fetch(`${base}/api/setup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'correct horse battery' })
+    body: JSON.stringify({ username: 'admin', password: 'correct horse battery', setupToken: token })
   })
   assert.equal(res.status, 200)
   assert.deepEqual(await res.json(), { username: 'admin' })
@@ -86,7 +101,7 @@ test('/api/setup is rejected once an account exists', async () => {
   await fetch(`${base}/api/setup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'correct horse battery' })
+    body: JSON.stringify({ username: 'admin', password: 'correct horse battery', setupToken: token })
   })
   const second = await fetch(`${base}/api/setup`, {
     method: 'POST',
@@ -113,14 +128,14 @@ test('/api/setup validates input', async () => {
   const missing = await fetch(`${base}/api/setup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin' })
+    body: JSON.stringify({ username: 'admin', setupToken: token })
   })
   assert.equal(missing.status, 400)
 
   const shortPassword = await fetch(`${base}/api/setup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'short' })
+    body: JSON.stringify({ username: 'admin', password: 'short', setupToken: token })
   })
   assert.equal(shortPassword.status, 400)
 
@@ -133,12 +148,12 @@ test('two concurrent setup requests only create one account', async () => {
     fetch(`${base}/api/setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'first', password: 'correct horse battery' })
+      body: JSON.stringify({ username: 'first', password: 'correct horse battery', setupToken: token })
     }),
     fetch(`${base}/api/setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'second', password: 'correct horse battery' })
+      body: JSON.stringify({ username: 'second', password: 'correct horse battery', setupToken: token })
     })
   ])
   const statuses = [a.status, b.status].sort()

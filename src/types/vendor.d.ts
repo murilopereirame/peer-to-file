@@ -13,7 +13,7 @@ declare module 'create-torrent' {
   }
 
   function createTorrent (
-    input: string,
+    input: string | NodeJS.ReadableStream,
     opts: CreateTorrentOptions,
     callback: (err: Error | null, torrent: Buffer) => void
   ): void
@@ -87,6 +87,10 @@ declare module 'webtorrent' {
     path?: string
     announce?: string[]
     skipVerify?: boolean
+    /** Custom chunk-store constructor: `new Store(pieceLength, { length, ... })`. */
+    store?: new (chunkLength: number, opts: { length: number }) => unknown
+    /** Extra options merged into the store constructor's second argument. */
+    storeOpts?: Record<string, unknown>
   }
 
   export interface NodeTorrent extends EventEmitter {
@@ -105,6 +109,11 @@ declare module 'webtorrent' {
       opts?: AddTorrentOptions,
       ontorrent?: (torrent: NodeTorrent) => void
     ): NodeTorrent
+    remove (
+      torrentId: Uint8Array | string,
+      opts?: { destroyStore?: boolean },
+      callback?: (err: Error | null) => void
+    ): void
     destroy (callback?: (err: Error | null) => void): void
   }
 }

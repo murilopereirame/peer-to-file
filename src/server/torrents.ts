@@ -1,34 +1,49 @@
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
+import crypto from 'node:crypto'
+import path from 'node:path'
+import { Transform } from 'node:stream'
 import createTorrent from 'create-torrent'
 import parseTorrent, { toMagnetURI, toTorrentFile, type ParsedTorrent } from 'parse-torrent'
 import { BrowseError } from './browse.ts'
-import type { CipherCache } from './cipherCache.ts'
+import { CIPHER_ALGO } from './cipher.ts'
+import type { CipherKeys } from './cipherKeys.ts'
 
 export interface RenderedTorrent {
   torrentFile: Uint8Array
   magnet: string
 }
 
+export interface TorrentMeta {
+  meta: ParsedTorrent
+  /** SHA-256 of the original plaintext (hex) — lets a client verify a finished
+   * download decrypted and saved correctly, independent of BitTorrent's own
+   * per-piece hashing (which only covers the ciphertext reaching the client). */
+  plainSha256: string
+}
+
 export interface TorrentStore {
-  getMeta (absPath: string): Promise<ParsedTorrent>
+  getMeta (absPath: string): Promise<TorrentMeta>
 }
 
 /**
  * On-demand torrent metadata store. Hashing a file is expensive, so parsed
- * metadata is cached per absolute path and invalidated when size/mtime
- * change. The info dict (and therefore the infohash) is deterministic for
- * unchanged file content, so it survives server restarts — a client holding
- * old metadata can keep downloading after the server comes back.
+ * metadata is cached per absolute path and invalidated when size/mtime change.
+ * The info dict (and therefore the infohash) is deterministic for unchanged
+ * file content, so it survives server restarts — a client holding old metadata
+ * can keep downloading after the server comes back.
  *
- * Metadata is built from the file's ciphertext cache entry (cipherCache.ts),
- * not the plaintext file itself — piece hashes (and the infohash) end up
- * computed over ciphertext, which is what the webseed and the WebRTC seeder
- * actually serve, so the wire never carries plaintext.
+ * Metadata is built over the file's *ciphertext*, streamed on the fly: the
+ * plaintext is read once, encrypted (cipherKeys' deterministic key/IV), and fed
+ * straight into create-torrent's piece hasher, which consumes it incrementally
+ * — so the piece hashes (and infohash) end up computed over exactly the bytes
+ * the webseed and WebRTC seeder serve, without ever materializing the whole
+ * ciphertext. The same pass hashes the plaintext for the end-to-end checksum.
  */
-export function createTorrentStore (cipherCache: CipherCache): TorrentStore {
-  const cache = new Map<string, { key: string, promise: Promise<ParsedTorrent> }>()
+export function createTorrentStore (cipherKeys: CipherKeys): TorrentStore {
+  const cache = new Map<string, { key: string, promise: Promise<TorrentMeta> }>()
 
-  async function getMeta (absPath: string): Promise<ParsedTorrent> {
+  async function getMeta (absPath: string): Promise<TorrentMeta> {
     const st = await fs.stat(absPath)
     if (!st.isFile()) {
       throw new BrowseError(400, 'not a file')
@@ -36,9 +51,9 @@ export function createTorrentStore (cipherCache: CipherCache): TorrentStore {
     const key = `${st.size}:${st.mtimeMs}`
     let entry = cache.get(absPath)
     if (!entry || entry.key !== key) {
-      const fresh: { key: string, promise: Promise<ParsedTorrent> } = {
+      const fresh: { key: string, promise: Promise<TorrentMeta> } = {
         key,
-        promise: buildMeta(absPath)
+        promise: buildMeta(absPath, st.size)
       }
       fresh.promise.catch(() => {
         // don't cache failures
@@ -50,19 +65,33 @@ export function createTorrentStore (cipherCache: CipherCache): TorrentStore {
     return entry.promise
   }
 
-  async function buildMeta (absPath: string): Promise<ParsedTorrent> {
-    const { cachePath } = await cipherCache.getEntry(absPath)
-    const { size } = await fs.stat(cachePath)
-    return new Promise((resolve, reject) => {
+  async function buildMeta (absPath: string, size: number): Promise<TorrentMeta> {
+    const { key, iv } = await cipherKeys.getKeys(absPath)
+    const plainHash = crypto.createHash('sha256')
+
+    const read = fsSync.createReadStream(absPath)
+    // Tap the plaintext for the end-to-end checksum as it flows past.
+    const tap = new Transform({
+      transform (chunk, _enc, cb) { plainHash.update(chunk as Buffer); cb(null, chunk) }
+    })
+    const cipher = crypto.createCipheriv(CIPHER_ALGO, key, iv)
+    read.on('error', err => cipher.destroy(err))
+    tap.on('error', err => cipher.destroy(err))
+    read.pipe(tap).pipe(cipher)
+
+    const meta = await new Promise<ParsedTorrent>((resolve, reject) => {
       // `private` keeps conforming clients off DHT/PEX; announce/urlList live
-      // outside the info dict and get filled in per request. Same basename as
-      // the source file (cipherCache preserves it), so `name` here still
-      // matches what the user asked to download.
-      createTorrent(cachePath, { private: true, pieceLength: pieceLengthFor(size) }, (err, buf) => {
-        if (err) return reject(err)
+      // outside the info dict and get filled in per request. `name` is the
+      // source basename (a stream has no filename of its own), so what the user
+      // asked to download still matches. create-torrent hashes the ciphertext
+      // stream incrementally — no whole-file buffer.
+      createTorrent(cipher, { name: path.basename(absPath), private: true, pieceLength: pieceLengthFor(size) }, (err, buf) => {
+        if (err) { read.destroy(); return reject(err) }
         parseTorrent(buf).then(resolve, reject)
       })
     })
+
+    return { meta, plainSha256: plainHash.digest('hex') }
   }
 
   return { getMeta }

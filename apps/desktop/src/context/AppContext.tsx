@@ -1,7 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, P2FClient, colorsFor, type ThemeColors, type ThemeMode } from '@p2f/shared'
 import { createClient } from '../lib/client'
-import { loadCredentials, saveCredentials, clearCredentials, settings } from '../lib/electronApi'
+import {
+  loadCredentials, saveCredentials, clearCredentials, settings,
+  readRefreshToken, restoreRefreshToken
+} from '../lib/electronApi'
 
 export type Phase = 'loading' | 'server' | 'setup' | 'login' | 'main'
 
@@ -21,7 +24,7 @@ export interface AppContextValue {
   setThemeOverridePref: (mode: ThemeMode | null) => Promise<void>
   connectToServer: (url: string) => Promise<void>
   changeServer: () => Promise<void>
-  completeSetup: (username: string, password: string, remember: boolean) => Promise<void>
+  completeSetup: (username: string, password: string, remember: boolean, setupToken?: string) => Promise<void>
   completeLogin: (username: string, password: string, remember: boolean) => Promise<void>
   logout: () => Promise<void>
   retry: () => Promise<void>
@@ -70,37 +73,49 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     }
   }, [scheme, colors])
 
+  // F9: after a login/setup/refresh, capture the rotated refresh token from the
+  // main-process cookie jar and persist it (in place of the raw password).
+  const persistRefreshToken = useCallback(async (c: P2FClient, user: string): Promise<void> => {
+    const token = await readRefreshToken(c.baseUrl)
+    if (token) await saveCredentials(c.baseUrl, user, token)
+  }, [])
+
+  // F9: silently mint a fresh session from a persisted refresh token. Returns
+  // the username on success, or null if there's nothing stored / it's expired.
+  const tryStoredRefresh = useCallback(async (c: P2FClient): Promise<string | null> => {
+    const creds = await loadCredentials(c.baseUrl)
+    if (!creds) return null
+    try {
+      await restoreRefreshToken(c.baseUrl, creds.refreshToken)
+      await c.refresh() // rotates: the jar now holds a new refresh token
+      await persistRefreshToken(c, creds.username)
+      return creds.username
+    } catch {
+      await clearCredentials(c.baseUrl)
+      return null
+    }
+  }, [persistRefreshToken])
+
   const evaluateAuth = useCallback(async (c: P2FClient): Promise<void> => {
     try {
       const info = await c.info()
       setConnected(true)
-      if (info.auth.required && info.auth.needsSetup) { setPhase('setup'); return }
-      if (info.auth.required && !info.auth.authenticated) {
-        const creds = await loadCredentials(c.baseUrl)
-        if (creds) {
-          try {
-            await c.login(creds.username, creds.password)
-            setUsername(creds.username)
-            setPhase('main')
-            return
-          } catch { /* stored password no longer valid */ }
-        }
+      if (info.auth.needsSetup) { setPhase('setup'); return }
+      if (!info.auth.authenticated) {
+        const user = await tryStoredRefresh(c)
+        if (user) { setUsername(user); setPhase('main'); return }
         setPhase('login')
         return
       }
-      if (info.auth.required) {
-        const me = await c.me()
-        setUsername(me.username)
-      } else {
-        setUsername(null)
-      }
+      const me = await c.me()
+      setUsername(me.username)
       setPhase('main')
     } catch {
       setConnected(false)
       const creds = await loadCredentials(c.baseUrl)
       setPhase(creds ? 'main' : 'server')
     }
-  }, [])
+  }, [tryStoredRefresh])
   const evaluateAuthRef = useRef(evaluateAuth)
   evaluateAuthRef.current = evaluateAuth
 
@@ -148,22 +163,22 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     setPhase('server')
   }, [client])
 
-  const completeSetup = useCallback(async (u: string, p: string, remember: boolean): Promise<void> => {
+  const completeSetup = useCallback(async (u: string, p: string, remember: boolean, setupToken?: string): Promise<void> => {
     if (!client) throw new Error('not connected')
-    await client.setup(u, p)
-    if (remember) await saveCredentials(client.baseUrl, u, p)
+    await client.setup(u, p, setupToken)
+    if (remember) await persistRefreshToken(client, u)
     setUsername(u)
     setPhase('main')
-  }, [client])
+  }, [client, persistRefreshToken])
 
   const completeLogin = useCallback(async (u: string, p: string, remember: boolean): Promise<void> => {
     if (!client) throw new Error('not connected')
     await client.login(u, p)
-    if (remember) await saveCredentials(client.baseUrl, u, p)
+    if (remember) await persistRefreshToken(client, u)
     else await clearCredentials(client.baseUrl)
     setUsername(u)
     setPhase('main')
-  }, [client])
+  }, [client, persistRefreshToken])
 
   const logout = useCallback(async (): Promise<void> => {
     try { await client?.logout() } catch { /* session already gone server-side */ }
@@ -178,12 +193,10 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
 
   const handleUnauthorized = useCallback(async (): Promise<void> => {
     if (!client) return
-    const creds = await loadCredentials(client.baseUrl)
-    if (creds) {
-      try { await client.login(creds.username, creds.password); return } catch { /* fall through */ }
-    }
+    const user = await tryStoredRefresh(client)
+    if (user) { setUsername(user); return }
     setPhase('login')
-  }, [client])
+  }, [client, tryStoredRefresh])
 
   const setDownloadDir = useCallback(async (dir: string | null): Promise<void> => {
     await settings.setDownloadDir(dir)
