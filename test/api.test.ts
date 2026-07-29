@@ -339,6 +339,45 @@ test('POST /api/upload streams a file to disk', async () => {
   await fs.rm(path.join(root, 'uploaded.bin'))
 })
 
+// The desktop client uploads a chunked, Content-Length-less body so the main
+// process can count the bytes as they go out and report upload progress (see
+// apps/desktop/electron/netFetch.cts) — the handler pipes the request straight
+// into the decipher and never reads Content-Length, and this pins that down.
+test('POST /api/upload accepts a chunked body with no Content-Length', async () => {
+  const payload = crypto.randomBytes(256 * 1024)
+  const { body, headers } = await encryptUpload(payload)
+
+  const chunkSize = 64 * 1024
+  const sent: number[] = []
+  let offset = 0
+  const stream = new ReadableStream<Uint8Array>({
+    pull (controller) {
+      if (offset >= body.length) { controller.close(); return }
+      const end = Math.min(offset + chunkSize, body.length)
+      controller.enqueue(new Uint8Array(body.subarray(offset, end)))
+      offset = end
+      sent.push(offset)
+    }
+  })
+
+  const res = await fetch(`${base}/api/upload?path=&name=${encodeURIComponent('chunked.bin')}`, {
+    method: 'POST',
+    headers,
+    body: stream,
+    duplex: 'half'
+  } as RequestInit)
+
+  assert.equal(res.status, 201)
+  const resBody = await res.json() as any
+  assert.equal(resBody.size, payload.length)
+  assert.deepEqual(await fs.readFile(path.join(root, 'chunked.bin')), payload)
+  // Progress is reported per chunk, monotonically, and ends at the full size.
+  assert.ok(sent.length > 1, 'body should go out in more than one chunk')
+  assert.deepEqual(sent, [...sent].sort((a, b) => a - b))
+  assert.equal(sent.at(-1), body.length)
+  await fs.rm(path.join(root, 'chunked.bin'))
+})
+
 test('POST /api/upload rejects a bad plaintext checksum (F7: hash is inside the wrapped blob)', async () => {
   const payload = crypto.randomBytes(1024)
   const { body, headers } = await encryptUpload(payload, true)

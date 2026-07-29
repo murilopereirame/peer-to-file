@@ -15,6 +15,17 @@ export interface DownloadCompletedInfo {
 const api = {
   fetch: (req: FetchRequest): Promise<FetchResult> => ipcRenderer.invoke('net:fetch', req),
 
+  /** Byte-level progress for a request sent with a matching `progressId`.
+   *  Returns an unsubscribe — call it once the request has settled, or the
+   *  listener outlives the upload it was watching. */
+  onUploadProgress: (progressId: string, cb: (sent: number, total: number) => void): (() => void) => {
+    const listener = (_e: unknown, id: string, sent: number, total: number): void => {
+      if (id === progressId) cb(sent, total)
+    }
+    ipcRenderer.on('net:uploadProgress', listener)
+    return () => { ipcRenderer.off('net:uploadProgress', listener) }
+  },
+
   saveCredentials: (server: string, username: string, refreshToken: string): Promise<void> =>
     ipcRenderer.invoke('credentials:save', server, username, refreshToken),
   loadCredentials: (server: string): Promise<StoredCredentials | null> =>

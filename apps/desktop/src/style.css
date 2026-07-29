@@ -487,6 +487,7 @@ table.listing .num { text-align: right; font-variant-numeric: tabular-nums; colo
 .speed-chart .chart-svg { display: block; width: 100%; height: 5rem; margin-top: .5rem; }
 .speed-chart.compact .chart-svg { height: 3.5rem; }
 .speed-chart .grid-line { stroke: var(--line-soft); }
+.speed-chart .grid-line.baseline { stroke: var(--line); }
 .speed-chart .chart-foot {
   display: flex;
   justify-content: space-between;

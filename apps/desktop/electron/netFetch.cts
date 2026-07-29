@@ -14,6 +14,10 @@ export interface FetchRequest {
   method?: string
   headers?: Record<string, string>
   body?: ArrayBuffer | string
+  /** Set to stream the body instead of handing it over in one piece, so the
+   *  renderer can be told how much of it has gone out (uploads have no other
+   *  progress signal here — see the `onProgress` parameter of performFetch). */
+  progressId?: string
 }
 
 export interface FetchSuccess {
@@ -74,15 +78,59 @@ export function setCookie (origin: string, name: string, value: string): void {
   jar.set(name, value)
 }
 
-export async function performFetch (req: FetchRequest): Promise<FetchResult> {
+/** How much of the body is handed to the socket at a time. Small enough that
+ *  progress ticks read as a live rate, large enough not to add measurable
+ *  overhead to a multi-gigabyte upload. */
+const UPLOAD_CHUNK_BYTES = 256 * 1024
+
+/**
+ * Feeds `buffer` out in chunks, reporting how many bytes have been taken.
+ *
+ * This is the only upload progress signal the desktop client can have: its
+ * requests are made here in the main process (see the header comment), and
+ * Node's `fetch` — unlike the browser's XHR the web client uses — exposes no
+ * upload progress events. Backpressure is what makes the number meaningful:
+ * `pull` is only called again once the previous chunk has been written out,
+ * so the rate derived from it tracks the socket rather than the loop.
+ */
+function progressStream (
+  buffer: ArrayBuffer, onProgress: (sent: number, total: number) => void
+): ReadableStream<Uint8Array> {
+  const bytes = new Uint8Array(buffer)
+  const total = bytes.byteLength
+  let sent = 0
+  return new ReadableStream<Uint8Array>({
+    pull (controller) {
+      if (sent >= total) { controller.close(); return }
+      const end = Math.min(sent + UPLOAD_CHUNK_BYTES, total)
+      controller.enqueue(bytes.subarray(sent, end))
+      sent = end
+      onProgress(sent, total)
+    }
+  })
+}
+
+export async function performFetch (
+  req: FetchRequest, onProgress?: (sent: number, total: number) => void
+): Promise<FetchResult> {
   const origin = new URL(req.url).origin
   const headers = new Headers(req.headers ?? {})
   const cookie = cookieHeaderFor(origin)
   if (cookie) headers.set('Cookie', cookie)
 
+  // A streamed body goes out chunked (the /api/upload handler pipes the
+  // request straight into the decipher and never reads Content-Length), so
+  // nothing else has to change to get progress out of it.
+  let requestBody: BodyInit | undefined = req.body
+  let duplex: 'half' | undefined
+  if (onProgress && req.body instanceof ArrayBuffer && req.body.byteLength > 0) {
+    requestBody = progressStream(req.body, onProgress)
+    duplex = 'half'
+  }
+
   let res: Response
   try {
-    res = await fetch(req.url, { method: req.method ?? 'GET', headers, body: req.body })
+    res = await fetch(req.url, { method: req.method ?? 'GET', headers, body: requestBody, duplex } as RequestInit)
   } catch (err) {
     return { networkError: err instanceof Error ? err.message : String(err) }
   }
