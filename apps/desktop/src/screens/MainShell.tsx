@@ -36,7 +36,11 @@ function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => voi
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <div>
+        {/* Same mark the web client's sidebar carries; copied into public/ at
+            build time by scripts/copy-vendor.mjs rather than committed a
+            second time. */}
+        <img src="/icon.png" className="logo" alt="" />
+        <div className="brand-text">
           <strong>P2File</strong>
           <span className="tagline">self-hosted P2P files</span>
         </div>

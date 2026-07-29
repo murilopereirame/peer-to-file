@@ -183,7 +183,15 @@ export function DownloadsScreen ({ history, downSpeed, upSpeed }: {
               </div>
             )}
 
-            <div className="transfer-foot">
+            {/* Actions first, labels second: `.stacked` gives the labels a
+                full-width line of their own, so they sit under Clear rather
+                than beside it. */}
+            <div className="transfer-foot stacked">
+              <div className="transfer-actions">
+                {(u.status === 'done' || u.status === 'error') && (
+                  <button className="link-btn muted" onClick={() => uploads.remove(u.id)}>Clear</button>
+                )}
+              </div>
               <div className="transfer-stats">
                 {u.status !== 'error' && (
                   <span className="stat">
@@ -201,11 +209,6 @@ export function DownloadsScreen ({ history, downSpeed, upSpeed }: {
                   <span className="stat" style={{ color: 'var(--negative)' }}><AlertIcon size={13} />{u.error}</span>
                 )}
                 {u.status === 'done' && <span className="stat"><CheckIcon size={13} />sent to the server</span>}
-              </div>
-              <div className="transfer-actions">
-                {(u.status === 'done' || u.status === 'error') && (
-                  <button className="link-btn muted" onClick={() => uploads.remove(u.id)}>Clear</button>
-                )}
               </div>
             </div>
           </div>
