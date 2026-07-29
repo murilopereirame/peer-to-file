@@ -548,9 +548,12 @@ table.listing .num { text-align: right; font-variant-numeric: tabular-nums; colo
   font-variant-numeric: tabular-nums;
 }
 .transfer-actions { display: flex; align-items: center; gap: .75rem; margin-left: auto; }
-/* Upload rows drop their labels onto their own line beneath the actions: a
-   rejected upload's message is long enough that sharing a line with Clear
-   crowds both and pushes the button around as the text changes. */
+/* A failed upload drops its message onto a line of its own beneath the
+   actions — it is long enough that sharing a line with Clear crowds both and
+   shifts the button as the text changes. Ordered in CSS rather than in the
+   markup so the message still precedes the button for anything reading the
+   DOM. Short labels stay on the button's line, unstacked. */
+.transfer-foot.stacked .transfer-actions { order: -1; }
 .transfer-foot.stacked .transfer-stats { flex-basis: 100%; }
 
 .progress-bar { height: 6px; margin: .5rem 0; border-radius: 999px; background: var(--raise-strong); overflow: hidden; }
