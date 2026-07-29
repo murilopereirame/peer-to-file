@@ -6,6 +6,13 @@
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
+    // rootDir is what tsc already infers from the inputs, but TypeScript 7
+    // (see the devDependency) requires it stated outright next to outDir
+    // rather than inferring the output layout. Keeping it at ./electron is
+    // what puts the entrypoint at dist-electron/main.cjs — the "main" this
+    // package.json declares, and what main.cts's `join(__dirname, '..',
+    // 'dist')` resolves the renderer against.
+    "rootDir": "electron",
     "outDir": "dist-electron"
   },
   "include": ["electron"]
