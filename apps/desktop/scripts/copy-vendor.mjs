@@ -10,9 +10,13 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 
+// The app mark shown in the sidebar is the same PNG electron-builder packages
+// as the window/desktop icon, so it is copied into public/ at build time
+// rather than committed a second time under a different name.
 const files = [
   ['node_modules/webtorrent/dist/webtorrent.min.js', 'public/vendor/webtorrent.min.js'],
-  ['node_modules/webtorrent/dist/sw.min.js', 'public/sw.js']
+  ['node_modules/webtorrent/dist/sw.min.js', 'public/sw.js'],
+  ['icon-source.png', 'public/icon.png']
 ]
 
 for (const [rel, destRel] of files) {

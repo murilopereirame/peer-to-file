@@ -1,12 +1,12 @@
 import React, { useState } from 'react'
 import { formatBytes, formatDuration } from '@p2f/shared'
 import { useDownloads } from '../context/DownloadsContext'
-import { useUploads } from '../context/UploadsContext'
+import { useUploads, type UploadEntry } from '../context/UploadsContext'
 import type { DownloadSnapshot } from '../lib/torrentDownloads'
 import { SpeedChart } from '../components/SpeedChart'
-import { SPEED_HISTORY_SIZE, useSpeedHistory } from '../hooks/useSpeedHistory'
+import { SPEED_HISTORY_SIZE, useSpeedHistory, type SpeedSample } from '../hooks/useSpeedHistory'
 import {
-  AlertIcon, ArrowDownIcon, CheckIcon, ClockIcon, DownloadIcon, GaugeIcon, UploadIcon, UsersIcon
+  AlertIcon, ArrowDownIcon, ArrowUpIcon, CheckIcon, ClockIcon, DownloadIcon, GaugeIcon, UploadIcon, UsersIcon
 } from '../components/icons'
 
 function statusLabel (status: string): string {
@@ -40,6 +40,13 @@ function averageSpeed (entry: DownloadSnapshot): string {
 function etaLabel (entry: DownloadSnapshot): string | null {
   if (entry.status !== 'downloading' || entry.speedBytesPerSec <= 0 || entry.length <= 0) return null
   const remaining = entry.length - entry.downloaded
+  if (remaining <= 0) return null
+  return `ETA ${formatDuration((remaining / entry.speedBytesPerSec) * 1000)}`
+}
+
+function uploadEta (entry: UploadEntry): string | null {
+  if (entry.speedBytesPerSec <= 0) return null
+  const remaining = entry.size - entry.sent
   if (remaining <= 0) return null
   return `ETA ${formatDuration((remaining / entry.speedBytesPerSec) * 1000)}`
 }
@@ -108,28 +115,37 @@ function DownloadDetails ({ entry }: { entry: DownloadSnapshot }): React.JSX.Ele
   )
 }
 
-export function DownloadsScreen (): React.JSX.Element {
+export function DownloadsScreen ({ history, downSpeed, upSpeed }: {
+  /** Sampled up in MainShell rather than here, so the series survives a tab
+   *  switch instead of restarting every time this screen mounts. */
+  history: SpeedSample[]
+  downSpeed: number
+  upSpeed: number
+}): React.JSX.Element {
   const downloads = useDownloads()
   const uploads = useUploads()
   const [detailsFor, setDetailsFor] = useState<string | null>(null)
 
-  const downSpeed = downloads.downloads.reduce(
-    (sum, d) => sum + (d.status === 'downloading' ? d.speedBytesPerSec : 0), 0
-  )
-  // Sampled for the whole screen rather than per row, so the graph keeps its
-  // shape while individual downloads come and go. Uploads have no progress
-  // events on desktop (see UploadsContext), hence no outbound graph.
-  const history = useSpeedHistory('all-downloads', downSpeed, 0)
   const activeUploads = uploads.uploads.filter(u => u.status === 'running').length
 
   return (
     <>
-      <div className="card">
-        <div className="card-body">
-          <SpeedChart
-            label="Download" tone="download" icon={<ArrowDownIcon size={13} />}
-            values={history.map(s => s.down)} capacity={SPEED_HISTORY_SIZE} current={downSpeed}
-          />
+      <div className="speed-charts">
+        <div className="card">
+          <div className="card-body">
+            <SpeedChart
+              label="Download" tone="download" icon={<ArrowDownIcon size={13} />}
+              values={history.map(s => s.down)} capacity={SPEED_HISTORY_SIZE} current={downSpeed}
+            />
+          </div>
+        </div>
+        <div className="card">
+          <div className="card-body">
+            <SpeedChart
+              label="Upload" tone="upload" icon={<ArrowUpIcon size={13} />}
+              values={history.map(s => s.up)} capacity={SPEED_HISTORY_SIZE} current={upSpeed}
+            />
+          </div>
         </div>
       </div>
 
@@ -152,6 +168,7 @@ export function DownloadsScreen (): React.JSX.Element {
           <div key={u.id} className="transfer-row">
             <div className="transfer-head">
               <span className="transfer-name">{u.name}</span>
+              {u.status === 'running' && <span className="transfer-percent">{Math.round(u.progress * 100)}%</span>}
               <span
                 className={`badge ${u.status === 'done' ? 'positive' : u.status === 'error' ? 'negative' : 'accent'}`}
                 title={u.error}
@@ -159,8 +176,31 @@ export function DownloadsScreen (): React.JSX.Element {
                 {u.status === 'running' ? 'Uploading…' : u.status === 'done' ? 'Done' : 'Failed'}
               </span>
             </div>
-            <div className="transfer-foot">
+
+            {u.status !== 'error' && (
+              <div className={`progress-bar ${u.status === 'done' ? 'done' : ''}`}>
+                <div style={{ width: `${Math.round(u.progress * 100)}%` }} />
+              </div>
+            )}
+
+            {/* Only a failure stacks: its message is long enough to crowd
+                Clear off the line. Everything else — the byte count, the
+                "sent to the server" tick — is short and reads better beside
+                the button. */}
+            <div className={`transfer-foot${u.status === 'error' ? ' stacked' : ''}`}>
               <div className="transfer-stats">
+                {u.status !== 'error' && (
+                  <span className="stat">
+                    <UploadIcon size={13} />
+                    {formatBytes(u.sent)} / {formatBytes(u.size)}
+                  </span>
+                )}
+                {u.status === 'running' && (
+                  <span className="stat"><ArrowUpIcon size={13} />{formatBytes(u.speedBytesPerSec)}/s</span>
+                )}
+                {u.status === 'running' && uploadEta(u) !== null && (
+                  <span className="stat"><ClockIcon size={13} />{uploadEta(u)}</span>
+                )}
                 {u.status === 'error' && u.error && (
                   <span className="stat" style={{ color: 'var(--negative)' }}><AlertIcon size={13} />{u.error}</span>
                 )}

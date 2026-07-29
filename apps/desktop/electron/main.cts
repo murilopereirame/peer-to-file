@@ -173,7 +173,17 @@ ipcMain.handle('settings:get', (_e, key: string) => settingsStore.get(key))
 ipcMain.handle('settings:set', (_e, key: string, value: unknown) => { settingsStore.set(key, value) })
 ipcMain.handle('settings:delete', (_e, key: string) => { settingsStore.delete(key) })
 
-ipcMain.handle('net:fetch', (_e, req: FetchRequest) => performFetch(req))
+// A request carrying a progressId gets its body streamed, and every chunk
+// handed to the socket is echoed back to the sender as an upload:progress
+// event — that's what drives the desktop client's upload rate and progress
+// bar (see src/context/UploadsContext.tsx).
+ipcMain.handle('net:fetch', (e, req: FetchRequest) => {
+  const { progressId } = req
+  if (progressId === undefined) return performFetch(req)
+  return performFetch(req, (sent, total) => {
+    if (!e.sender.isDestroyed()) e.sender.send('net:uploadProgress', progressId, sent, total)
+  })
+})
 
 // 'prevent-app-suspension' keeps the system from sleeping while transfers
 // are active without also forcing the display to stay on — starting an

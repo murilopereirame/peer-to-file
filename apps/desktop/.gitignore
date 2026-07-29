@@ -4,4 +4,5 @@ dist-electron/
 release/
 public/vendor/
 public/sw.js
+public/icon.png
 .DS_Store

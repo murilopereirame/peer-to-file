@@ -45,6 +45,11 @@
   --radius-xs: 6px;
   --shadow: 0 1px 2px rgb(15 23 42 / 0.06), 0 8px 24px -12px rgb(15 23 42 / 0.25);
 
+  /* One height for both halves of the window's top strip: the sidebar's brand
+     block and the main header. Comfortably clears the two lines of text each
+     holds, so both settle on exactly this and their bottom borders line up. */
+  --header-h: 3.9rem;
+
   /* Legacy aliases — a few screens still reach for these by name in inline
      styles; they now follow whichever theme is active. */
   --color-background: var(--background);
@@ -149,13 +154,26 @@ a { color: var(--accent); text-decoration: none; }
   border-right: 1px solid var(--line);
 }
 
+/* The brand block and the main header sit side by side across the top of the
+   window, so both are pinned to one height instead of each being sized by
+   whatever text it happens to hold — otherwise the taller of the two puts a
+   visible step in the line running across the window. */
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: .55rem;
-  padding: .9rem 1rem;
+  gap: .6rem;
+  min-height: var(--header-h);
+  padding: .65rem 1rem;
   border-bottom: 1px solid var(--line);
 }
+.sidebar-brand .logo {
+  display: block;
+  width: 2rem;
+  height: 2rem;
+  flex: none;
+  border-radius: 9px;
+}
+.sidebar-brand .brand-text { min-width: 0; }
 .sidebar-brand strong { font-size: 1rem; }
 .sidebar-brand .tagline { display: block; font-size: .68rem; color: var(--fg-subtle); }
 
@@ -200,6 +218,8 @@ a { color: var(--accent); text-decoration: none; }
   justify-content: space-between;
   gap: 1rem;
   flex: none;
+  /* Kept level with .sidebar-brand — see the note there. */
+  min-height: var(--header-h);
   padding: .65rem 1.25rem;
   border-bottom: 1px solid var(--line);
   background: var(--chrome);
@@ -470,6 +490,18 @@ table.listing .num { text-align: right; font-variant-numeric: tabular-nums; colo
 /* ------------------------------------------------------------ transfers -- */
 
 .speed-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: .85rem; }
+/* The charts sit side by side, so they have to read as one pair. `.card +
+   .card` stacks cards down a column elsewhere, but inside this grid that
+   margin only pushed the Upload card down and shortened it against its
+   neighbour; the grid's own gap already does the spacing. Stretching the body
+   then keeps both plots the same height even if one foot wraps to two lines. */
+.speed-charts .card + .card { margin-top: 0; }
+.speed-charts .card { display: flex; flex-direction: column; }
+.speed-charts .card-body { flex: 1 1 auto; display: flex; flex-direction: column; }
+.speed-charts .speed-chart { flex: 1 1 auto; }
+/* 1 1 auto, not `flex: 1`: a 0 basis would leave the plot with no height of
+   its own to contribute, and the row has nothing else to size against. */
+.speed-charts .speed-chart .chart-svg { flex: 1 1 auto; }
 
 .speed-chart { display: flex; flex-direction: column; }
 .speed-chart .chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; }
@@ -487,6 +519,7 @@ table.listing .num { text-align: right; font-variant-numeric: tabular-nums; colo
 .speed-chart .chart-svg { display: block; width: 100%; height: 5rem; margin-top: .5rem; }
 .speed-chart.compact .chart-svg { height: 3.5rem; }
 .speed-chart .grid-line { stroke: var(--line-soft); }
+.speed-chart .grid-line.baseline { stroke: var(--line); }
 .speed-chart .chart-foot {
   display: flex;
   justify-content: space-between;
@@ -515,6 +548,13 @@ table.listing .num { text-align: right; font-variant-numeric: tabular-nums; colo
   font-variant-numeric: tabular-nums;
 }
 .transfer-actions { display: flex; align-items: center; gap: .75rem; margin-left: auto; }
+/* A failed upload drops its message onto a line of its own beneath the
+   actions — it is long enough that sharing a line with Clear crowds both and
+   shifts the button as the text changes. Ordered in CSS rather than in the
+   markup so the message still precedes the button for anything reading the
+   DOM. Short labels stay on the button's line, unstacked. */
+.transfer-foot.stacked .transfer-actions { order: -1; }
+.transfer-foot.stacked .transfer-stats { flex-basis: 100%; }
 
 .progress-bar { height: 6px; margin: .5rem 0; border-radius: 999px; background: var(--raise-strong); overflow: hidden; }
 .progress-bar > div { height: 100%; background: var(--accent); transition: width .3s; }

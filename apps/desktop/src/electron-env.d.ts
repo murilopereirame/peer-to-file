@@ -13,6 +13,9 @@ export interface FetchRequest {
   method?: string
   headers?: Record<string, string>
   body?: ArrayBuffer | string
+  /** Streams the body and reports its progress under this id — see
+   *  `onUploadProgress` below. */
+  progressId?: string
 }
 
 export interface FetchSuccess {
@@ -37,6 +40,9 @@ export interface DownloadCompletedInfo {
 
 export interface P2FBridge {
   fetch: (req: FetchRequest) => Promise<FetchResult>
+  /** Subscribe to upload progress for a request sent with a matching
+   *  `progressId`; returns an unsubscribe. */
+  onUploadProgress: (progressId: string, cb: (sent: number, total: number) => void) => () => void
   saveCredentials: (server: string, username: string, refreshToken: string) => Promise<void>
   loadCredentials: (server: string) => Promise<StoredCredentials | null>
   clearCredentials: (server: string) => Promise<void>

@@ -5,8 +5,11 @@ import { DownloadsProvider, useDownloads } from '../context/DownloadsContext'
 import { UploadsProvider, useUploads } from '../context/UploadsContext'
 import { ToastProvider, useToast } from '../context/ToastContext'
 import { setSystemKeepAwake } from '../lib/electronApi'
+import { useSpeedHistory } from '../hooks/useSpeedHistory'
 import { ConnectionBadge } from '../components/ConnectionBadge'
-import { ActivityIcon, ArrowDownIcon, FolderIcon, HistoryIcon, SettingsIcon, TerminalIcon } from '../components/icons'
+import {
+  ActivityIcon, ArrowDownIcon, ArrowUpIcon, FolderIcon, HistoryIcon, SettingsIcon, TerminalIcon
+} from '../components/icons'
 import { BrowserScreen } from './BrowserScreen'
 import { DownloadsScreen } from './DownloadsScreen'
 import { HistoryScreen } from './HistoryScreen'
@@ -33,7 +36,11 @@ function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => voi
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <div>
+        {/* Same mark the web client's sidebar carries; copied into public/ at
+            build time by scripts/copy-vendor.mjs rather than committed a
+            second time. */}
+        <img src="/icon.png" className="logo" alt="" />
+        <div className="brand-text">
           <strong>P2File</strong>
           <span className="tagline">self-hosted P2P files</span>
         </div>
@@ -102,12 +109,23 @@ function useKeepAwake (): void {
   useEffect(() => () => { void setSystemKeepAwake(false) }, [])
 }
 
-function TopBar ({ tab }: { tab: Tab }): React.JSX.Element {
+/**
+ * Live totals across every transfer: WebTorrent's per-download rate inbound,
+ * the rate the main process reports as it feeds an upload to the socket
+ * outbound (see UploadsContext). Read by the top bar and, once sampled, by
+ * the graphs on the Transfers tab.
+ */
+function useTransferSpeeds (): { downSpeed: number, upSpeed: number } {
   const { downloads } = useDownloads()
+  const { uploads } = useUploads()
+  return {
+    downSpeed: downloads.reduce((sum, d) => sum + (d.status === 'downloading' ? d.speedBytesPerSec : 0), 0),
+    upSpeed: uploads.reduce((sum, u) => sum + (u.status === 'running' ? u.speedBytesPerSec : 0), 0)
+  }
+}
+
+function TopBar ({ tab, downSpeed, upSpeed }: { tab: Tab, downSpeed: number, upSpeed: number }): React.JSX.Element {
   const meta = TABS.find(t => t.key === tab)
-  // Uploads have no progress events on desktop (see UploadsContext), so only
-  // the inbound side has a rate to show.
-  const downSpeed = downloads.reduce((sum, d) => sum + (d.status === 'downloading' ? d.speedBytesPerSec : 0), 0)
 
   return (
     <div className="topbar">
@@ -119,6 +137,9 @@ function TopBar ({ tab }: { tab: Tab }): React.JSX.Element {
         <span className="rate down" title="Total download speed">
           <ArrowDownIcon size={15} />{formatBytes(downSpeed)}/s
         </span>
+        <span className="rate up" title="Total upload speed">
+          <ArrowUpIcon size={15} />{formatBytes(upSpeed)}/s
+        </span>
       </div>
     </div>
   )
@@ -128,15 +149,22 @@ function Shell (): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('browse')
   useDownloadCompletionNotifier()
   useKeepAwake()
+  const { downSpeed, upSpeed } = useTransferSpeeds()
+  // Sampled app-wide (not inside the Transfers tab) so switching tabs doesn't
+  // unmount the sampler and throw the graphs' history away.
+  const history = useSpeedHistory('all-transfers', downSpeed, upSpeed)
+
   return (
     <div className="app-shell">
       <Sidebar active={tab} onChange={setTab} />
       <div className="app-body">
-        <TopBar tab={tab} />
+        <TopBar tab={tab} downSpeed={downSpeed} upSpeed={upSpeed} />
         <main className="app-main">
           <div className="app-main-inner">
             {tab === 'browse' && <BrowserScreen />}
-            {tab === 'transfers' && <DownloadsScreen />}
+            {tab === 'transfers' && (
+              <DownloadsScreen history={history} downSpeed={downSpeed} upSpeed={upSpeed} />
+            )}
             {tab === 'history' && <HistoryScreen />}
             {tab === 'logs' && <LogsScreen />}
             {tab === 'settings' && <SettingsScreen />}
