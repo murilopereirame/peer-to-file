@@ -113,11 +113,17 @@ const authedUser = (res: Response): User => (res.locals as { user: User }).user
  * query-only upload/raw endpoints). Absent means "the default mount", so
  * every pre-multi-mount client and script keeps working unchanged.
  */
-function mountParamFromReq (req: Request): string | undefined {
-  if (typeof req.query.mount === 'string') return req.query.mount
-  const body = req.body as { mount?: unknown } | undefined
-  if (typeof body?.mount === 'string') return body.mount
+/** Normalizes a mount identifier from a query string (always a string already) or a JSON body field (a plain JSON client naturally sends a numeric id as a number, not a string). */
+function asMountParam (value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
   return undefined
+}
+
+function mountParamFromReq (req: Request): string | undefined {
+  const fromQuery = asMountParam(req.query.mount)
+  if (fromQuery !== undefined) return fromQuery
+  return asMountParam((req.body as { mount?: unknown } | undefined)?.mount)
 }
 
 function findMount (db: AuthDb, mountParam: string | undefined): Mount {
@@ -227,6 +233,16 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
   const jsonBody = express.json()
 
   // --- public endpoints ------------------------------------------------------
+
+  // Liveness/readiness probe for container orchestrators and load balancers —
+  // deliberately unauthenticated (a health checker rarely carries
+  // credentials) and deliberately minimal: it confirms the HTTP server is up
+  // and answering, not that every subsystem is healthy. No path/auth/DB
+  // details leak here — see /api/info (also public) for the small amount of
+  // non-secret server metadata that's meant to be exposed pre-auth.
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() })
+  })
 
   app.get('/api/info', (req, res) => {
     res.json({
@@ -444,7 +460,9 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     res.json({ username: user?.username ?? null, role: user?.role ?? null })
   })
 
-  app.get('/api/logs', (req, res) => {
+  // F4/item-14: activity log entries carry other users' IPs, usernames and
+  // paths accessed — admin-only, same as the other operator-facing views.
+  app.get('/api/logs', requireAdmin, (req, res) => {
     const limit = Number(req.query.limit)
     const sinceId = req.query.sinceId !== undefined ? Number(req.query.sinceId) : undefined
     res.json({
@@ -543,17 +561,30 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     res.json({ ok: true })
   }))
 
-  // Moves within the same mount only — `from`/`to` both resolve against it,
-  // there's no cross-mount move.
+  // `mount` (as usual) is the source; an optional `toMount` (id or name) is
+  // the destination — same as `mount` when omitted, so an ordinary same-
+  // mount move/rename needs no client change. The requester needs access to
+  // both ends of a cross-mount move, not just the source.
   app.post('/api/move', jsonBody, wrap(async (req, res) => {
-    const mount = resolveMountForRequest(db, req, res)
+    const user = authedUser(res)
+    const fromMount = resolveMountForRequest(db, req, res)
     const { from, to } = (req.body ?? {}) as { from?: unknown, to?: unknown }
-    const { fromRel, toRel } = await moveEntry(mount.path, from, to)
+    const toMountParam = asMountParam((req.body as { toMount?: unknown })?.toMount)
+    const toMount = toMountParam !== undefined && toMountParam !== ''
+      ? findMount(db, toMountParam)
+      : fromMount
+    if (toMount.id !== fromMount.id && !db.hasMountAccess(toMount, user.id, user.role === 'admin')) {
+      throw new BrowseError(403, 'no access to the destination mount')
+    }
+    const { fromRel, toRel } = await moveEntry(fromMount.path, from, toMount.path, to)
     const requester = (res.locals as { user?: { username: string } }).user
-    activity.add('browse', `moved "${fromRel}" to "${toRel}" on mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
-      from: fromRel, to: toRel, mount: mount.name, user: requester?.username, ip: req.ip
+    const mountDesc = fromMount.id === toMount.id
+      ? `on mount "${fromMount.name}"`
+      : `from mount "${fromMount.name}" to mount "${toMount.name}"`
+    activity.add('browse', `moved "${fromRel}" to "${toRel}" ${mountDesc}${requester ? ` by ${requester.username}` : ''}`, {
+      from: fromRel, to: toRel, fromMount: fromMount.name, toMount: toMount.name, user: requester?.username, ip: req.ip
     })
-    res.json({ ok: true, path: toRel })
+    res.json({ ok: true, path: toRel, mount: toMount.id })
   }))
 
   app.post('/api/mkdir', jsonBody, wrap(async (req, res) => {

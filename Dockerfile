@@ -43,6 +43,10 @@ ENV P2F_ROOT=/data \
 
 EXPOSE 8000 8001
 VOLUME /config
+# GET /api/health is unauthenticated and just confirms the HTTP server is up
+# and answering — node's built-in fetch avoids adding curl/wget to the image.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.P2F_PORT||8000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 # Stays root here: the entrypoint fixes /config ownership, then execs the
 # actual server as `node` — the app process itself never runs as root.
 ENTRYPOINT ["docker-entrypoint.sh"]

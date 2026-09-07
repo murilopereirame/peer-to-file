@@ -30,7 +30,9 @@ before(async () => {
     dbPath: path.join(dbDir, 'p2f.db')
   }), silentLogger)
   base = `http://127.0.0.1:${running.config.port}`
-  running.db.createUser('alice', 'correct horse battery')
+  // /api/logs is admin-only (F4/item 14) — alice needs the role to exercise it below.
+  running.db.createUser('alice', 'correct horse battery', 'admin')
+  running.db.createUser('bob', 'correct horse battery')
 })
 
 after(async () => {
@@ -42,6 +44,17 @@ after(async () => {
 test('GET /api/logs requires authentication', async () => {
   const res = await fetch(`${base}/api/logs`)
   assert.equal(res.status, 401)
+})
+
+test('GET /api/logs requires the admin role', async () => {
+  const login = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'bob', password: 'correct horse battery' })
+  })
+  const bobCookie = login.headers.get('set-cookie')!.split(';')[0]!
+  const res = await fetch(`${base}/api/logs`, { headers: { Cookie: bobCookie } })
+  assert.equal(res.status, 403)
 })
 
 test('server activity accumulates in the log, newest first', async () => {

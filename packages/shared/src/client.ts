@@ -125,9 +125,18 @@ export class P2FClient {
     await this.request('/api/delete', P2FClient.jsonInit('POST', { path, mount: mount === undefined ? undefined : String(mount) }))
   }
 
-  /** `from`/`to` resolve within the same mount — there is no cross-mount move. */
-  async move (from: string, to: string, mount?: number | string): Promise<{ path: string }> {
-    return await this.requestJson('/api/move', P2FClient.jsonInit('POST', { from, to, mount: mount === undefined ? undefined : String(mount) }))
+  /**
+   * `mount` is where `from` lives; `toMount` is where `to` should land (omit
+   * for a same-mount move/rename — the common case). The caller needs access
+   * to both when they differ.
+   */
+  async move (from: string, to: string, mount?: number | string, toMount?: number | string): Promise<{ path: string, mount: number }> {
+    return await this.requestJson('/api/move', P2FClient.jsonInit('POST', {
+      from,
+      to,
+      mount: mount === undefined ? undefined : String(mount),
+      toMount: toMount === undefined ? undefined : String(toMount)
+    }))
   }
 
   async mkdir (path: string, mount?: number | string): Promise<{ path: string }> {

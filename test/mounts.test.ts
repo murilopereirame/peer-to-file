@@ -226,3 +226,75 @@ test('a raw token minted for one mount does not authorize the same path in anoth
   const original = await fetch(`${base}/api/raw?path=extra-report.txt&mount=${extraMountId}&t=${encodeURIComponent(token)}`)
   assert.equal(original.status, 200)
 })
+
+test('POST /api/move moves a file across mounts when the caller has access to both', async () => {
+  const move = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: authJson(adminToken),
+    body: JSON.stringify({ from: 'root-report.txt', to: 'moved-report.txt', toMount: extraMountId })
+  })
+  assert.equal(move.status, 200)
+  const body = await move.json() as { path: string, mount: number }
+  assert.equal(body.path, 'moved-report.txt')
+  assert.equal(body.mount, extraMountId)
+
+  // gone from the default mount, present in the extra mount
+  const fromListing = await fetch(`${base}/api/list?path=`, { headers: authHeader(adminToken) })
+  const fromBody = await fromListing.json() as { entries: Array<{ name: string }> }
+  assert.ok(!fromBody.entries.some(e => e.name === 'root-report.txt'))
+
+  const toListing = await fetch(`${base}/api/list?path=&mount=${extraMountId}`, { headers: authHeader(adminToken) })
+  const toBody = await toListing.json() as { entries: Array<{ name: string }> }
+  assert.ok(toBody.entries.some(e => e.name === 'moved-report.txt'))
+
+  // move it back so later tests (and a rerun of this one) see the original layout
+  const moveBack = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: authJson(adminToken),
+    body: JSON.stringify({ from: 'moved-report.txt', mount: extraMountId, to: 'root-report.txt', toMount: 'default' })
+  })
+  assert.equal(moveBack.status, 200)
+})
+
+test('POST /api/move across mounts is refused without access to the destination mount', async () => {
+  // A fresh mount `member` has no access to.
+  const create = await fetch(`${base}/api/admin/mounts`, {
+    method: 'POST',
+    headers: authJson(adminToken),
+    body: JSON.stringify({ name: 'locked', path: extraDir })
+  })
+  assert.equal(create.status, 201)
+  const locked = await create.json() as { id: number }
+
+  const move = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: authJson(userToken),
+    body: JSON.stringify({ from: 'root-report.txt', to: 'wont-land.txt', toMount: locked.id })
+  })
+  assert.equal(move.status, 403)
+
+  // nothing moved
+  const listing = await fetch(`${base}/api/list?path=`, { headers: authHeader(userToken) })
+  const body = await listing.json() as { entries: Array<{ name: string }> }
+  assert.ok(body.entries.some(e => e.name === 'root-report.txt'))
+})
+
+test('POST /api/move without toMount stays a same-mount move (unchanged behavior)', async () => {
+  const move = await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: authJson(adminToken),
+    body: JSON.stringify({ from: 'root-report.txt', to: 'root-report-renamed.txt' })
+  })
+  assert.equal(move.status, 200)
+  const body = await move.json() as { mount: number }
+  const defaultMounts = await (await fetch(`${base}/api/mounts`, { headers: authHeader(adminToken) })).json() as
+    { mounts: Array<{ id: number, name: string }> }
+  assert.equal(body.mount, defaultMounts.mounts.find(m => m.name === 'default')!.id)
+
+  // rename back for good measure
+  await fetch(`${base}/api/move`, {
+    method: 'POST',
+    headers: authJson(adminToken),
+    body: JSON.stringify({ from: 'root-report-renamed.txt', to: 'root-report.txt' })
+  })
+})

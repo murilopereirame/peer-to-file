@@ -115,6 +115,14 @@ async function encryptUpload (payload: Buffer, tamperSha = false): Promise<{ bod
   }
 }
 
+test('GET /api/health is unauthenticated and reports ok', async () => {
+  const res = await fetch(`${base}/api/health`)
+  assert.equal(res.status, 200)
+  const body = await res.json() as { status: string, uptime: number }
+  assert.equal(body.status, 'ok')
+  assert.equal(typeof body.uptime, 'number')
+})
+
 test('GET /api/info identifies the server', async () => {
   const res = await fetch(`${base}/api/info`)
   assert.equal(res.status, 200)
