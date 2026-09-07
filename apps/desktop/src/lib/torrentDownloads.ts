@@ -160,7 +160,8 @@ export class TorrentDownloadManager {
     return this.listSnapshot
   }
 
-  async start (client: P2FClient, path: string, name: string): Promise<void> {
+  /** `mountId` (omitted for the default mount) is only needed up front to fetch the right torrent metadata — this manager doesn't persist downloads across restarts, so there's nothing to remember it for afterward. */
+  async start (client: P2FClient, path: string, name: string, mountId?: number): Promise<void> {
     if (!this.client) return
     const existing = this.snapshots.get(path)
     if (existing && existing.status !== 'done' && existing.status !== 'error') return
@@ -172,7 +173,7 @@ export class TorrentDownloadManager {
       const serverPublicKey = await getServerEcdhPublicKey(async () => client.info())
       const keyWrap = await establishKeyWrap(serverPublicKey)
 
-      const meta = await client.torrentMeta(path, keyWrap.clientPublicKeyBase64)
+      const meta = await client.torrentMeta(path, keyWrap.clientPublicKeyBase64, mountId)
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length, infoHash: meta.infoHash })
 

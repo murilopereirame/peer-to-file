@@ -4,7 +4,7 @@ import { TorrentDownloadManager, type DownloadSnapshot } from '../lib/torrentDow
 
 interface Ctx {
   downloads: DownloadSnapshot[]
-  start: (path: string, name: string) => void
+  start: (path: string, name: string, mountId?: number) => void
   pause: (path: string) => void
   resume: (path: string) => void
   cancel: (path: string) => void
@@ -34,7 +34,7 @@ export function DownloadsProvider ({ children }: { children: React.ReactNode }):
 
   const value = useMemo<Ctx>(() => ({
     downloads,
-    start: (path, name) => { if (app.client) void managerRef.current.start(app.client, path, name) },
+    start: (path, name, mountId) => { if (app.client) void managerRef.current.start(app.client, path, name, mountId) },
     pause: (path) => { managerRef.current.pause(path) },
     resume: (path) => { managerRef.current.resume(path) },
     cancel: (path) => { managerRef.current.cancel(path) },
