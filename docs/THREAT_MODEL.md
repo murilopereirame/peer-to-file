@@ -123,14 +123,21 @@ but is a boundary that silently disappears the moment a third account exists (se
 
 ### 5.4 Authenticated but malicious/curious user
 
-- Full read of every file under `P2F_ROOT`; full write if the mount is rw.
-- Can read the global activity log (`/api/logs`) — other users' IPs, usernames, paths
-  (F4).
+- Full read of every file under `P2F_ROOT` (the default mount); full write if the mount
+  is rw. This is unchanged by the role split — every authenticated account, admin or not,
+  has full access to the default mount by design.
+- A non-admin account has *no* access to any other mount (F4, item 13) unless an admin
+  explicitly grants it; an admin has full access to every mount, including creating,
+  deleting and re-granting them.
+- Can read the global activity log (`/api/logs`) — other users' IPs, usernames, paths.
+  Still true for every authenticated account regardless of role (F4, item 14 — not yet
+  gated to admins).
 - Can exhaust CPU: `/api/torrent` streams arbitrary files through SHA + AES-256-CTR to
   build metadata (nothing is written to disk — encryption is streamed on demand); the
   expensive endpoints are token-bucket throttled (F2).
-- No privilege escalation path *within* the app is needed because there are no
-  privilege levels — every user already has everything.
+- A non-admin user cannot escalate their own role or grant themselves mount access — only
+  an admin can call `/api/admin/*`. The last remaining admin cannot be demoted (by
+  themselves or another admin), so the app can't be left with zero admins.
 
 ### 5.5 Attacker who has compromised the server process / host
 
@@ -170,7 +177,7 @@ Severity is relative to the intended (VPN-bound, few trusted users) deployment.
 | F1a | Low | First-run `/api/setup` is a race to claim the admin account |
 | F2 | Medium | No rate limiting or resource caps → CPU/disk exhaustion |
 | F3 | Medium | Tracker transfer token is unscoped and long-lived; tokens ride in URLs |
-| F4 | Low–Medium | No per-user authorization; global log/file access for every account |
+| F4 | Low–Medium | Partially mitigated: a `user`/`admin` role now gates mount management and access to any mount beyond the default one (item 13); `/api/logs` and the default mount are still equally open to every account regardless of role (item 14) |
 | F5 | Low | No anti-CSRF token; wildcard CORS on `/api` |
 | F6 | Low | `Secure` cookie flag only set when `P2F_PUBLIC_URL` is https |
 | F7 | Low | Upload integrity SHA is cleartext & unauthenticated; CTR is malleable |
@@ -370,10 +377,21 @@ None of the P0/P1 items require architectural change; they harden the existing s
 12. **Setup hardening (F1a).** Gate `/api/setup` behind a one-time token printed to the
     server log on first boot, or restrict it to loopback. *Effort: ~half a day.*
 
-13. **Introduce a minimal role split (F4)** *(only if multi-user beyond two peers becomes
-    a goal):* a read-only vs read-write role, and restrict `/api/logs` to an admin role.
-    Until then, document loudly that every account is effectively admin. *Effort: larger;
-    defer unless the use case appears.*
+13. **Introduce a minimal role split (F4).** ~~Done~~ — `users.role` (`user`/`admin`) now
+    exists. The first account created (setup screen or `cli.ts add-user` pre-setup) is
+    admin; admins promote/demote others via `/api/admin/users/:username/role` or the CLI's
+    `set-role`. The role gates *mount* access specifically: additional shared directories
+    ("mounts") beyond the one named by `P2F_ROOT` are admin-created and admin-granted per
+    user (`/api/admin/mounts*`), while the original `P2F_ROOT` directory (now the "default
+    mount") stays implicitly readable/writable by every authenticated user, unchanged from
+    before this role split. `/api/logs` and every other pre-existing endpoint are
+    deliberately **not** gated by role — that remains flat trust among authenticated users
+    (see residual risk below), a narrower follow-up than this item originally scoped.
+
+14. **Restrict `/api/logs` to an admin role.** Not yet done — logs (connections, IPs,
+    paths accessed) are still visible to every authenticated user, not just admins. Now
+    that a role exists (#13), this is a small follow-up: gate the existing `/api/logs`
+    route the same way the new `/api/admin/*` routes are gated. *Effort: ~1 hour.*
 
 ### Documentation follow-ups (independent of code)
 
@@ -389,8 +407,11 @@ oversights:
 
 - The server can read plaintext files (not zero-knowledge storage).
 - No protection against an **active** on-path attacker without TLS/VPN.
-- Flat trust among authenticated users in the intended two-peer model (F4 — deferred
-  until a multi-user use case appears; every account is effectively admin until then).
+- Flat trust among authenticated users for everything *except* mount access: a minimal
+  role split now exists (F4, item 13) and gates admin-only actions (managing mounts,
+  granting/revoking mount access, promoting/demoting roles) and access to any mount beyond
+  the default one — but `/api/logs` and the default mount itself are still equally open to
+  every authenticated account regardless of role (item 14, deferred).
 - In-memory activity log is operational, not an audit trail.
 - An authorized tracker connection (infohash-bound token) could still announce a
   different infohash over that one socket — a minor swarm-metadata leak on a private

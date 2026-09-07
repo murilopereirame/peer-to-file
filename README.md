@@ -83,7 +83,8 @@ Passwords are stored as scrypt hashes, tokens and session ids as SHA-256 hashes.
 **First run**: with no users in the database yet, opening the web client shows a
 one-time **setup screen** instead of a login form — enter the **setup token** printed in
 the server log at first boot (`first-run setup token: …`), then pick a username and
-password and that becomes the admin account. `POST /api/setup` is the endpoint behind it;
+password and that becomes the **admin** account (see "Multiple mounts and admin access"
+below — admins can promote/demote other accounts later). `POST /api/setup` is the endpoint behind it;
 it requires that token while open and works exactly once (it 409s the moment any account
 exists, whether created through the screen or the CLI below), so there is no standing
 "create a user" endpoint — and no unauthenticated first-boot window — for an attacker to
@@ -107,7 +108,9 @@ curl -H "Authorization: Bearer p2f_..." "http://10.0.0.1:8000/api/list?path="
 ```
 
 Tokens default to a 90-day lifetime; `--ttl` accepts `90d`/`12h`/`30m` or `never`.
-`list-users`, `del-user`, `list-tokens`, `del-token` complete the set.
+`list-users`, `del-user`, `list-tokens`, `del-token`, `set-role`, and the mount commands
+(`list-mounts`, `add-mount`, `del-mount`, `grant-mount`, `revoke-mount` — see "Multiple
+mounts and admin access" below) complete the set.
 
 ### How the P2P transfer stays authenticated
 
@@ -232,10 +235,13 @@ streaming a 0-byte file on Safari with no error anywhere.
 ### The interface
 
 The web client is a single app shell: a **sidebar** on the left (**Browse**, **Transfers**,
-**History**, **Logs**, with a badge counting transfers in flight), and a top bar carrying a
-search box that filters whatever the current view lists, plus live download/upload totals.
-The sidebar's footer holds the connection state (with a **Reconnect** button if the server
-goes away), the light/dark/**System** theme picker, and **Log out**.
+**History**, **Logs**, plus **Admin** for admin accounts, with a badge counting transfers in
+flight), and a top bar carrying a search box, plus live download/upload totals. On most views
+the search box filters whatever's currently listed; on **Browse** it instead searches the
+whole active mount's folder tree (see **Searching** below). If more than one mount is
+reachable, the sidebar also carries a mount switcher above the nav. The sidebar's footer
+holds the connection state (with a **Reconnect** button if the server goes away), the
+light/dark/**System** theme picker, and **Log out**.
 
 **Transfers** opens with two speed graphs — download and upload — sampled once a second and
 covering the last minute and a half, over the same combined totals shown in the top bar.
@@ -302,6 +308,47 @@ the shared directory to be writable — the default Docker Compose setup mounts 
 read-only, which disables them cleanly (a permission error, not a crash); see the
 security note above before switching to a read-write mount.
 
+### Searching
+
+Typing in the top bar's search box while on **Browse** searches the *whole* active mount's
+folder tree by name (case-insensitive substring, folders and files both) via
+`GET /api/search`, debounced client-side — not just the folder currently open. Results show
+each match's full path; clicking one opens its containing folder, and files get a direct
+**Download** button. A very large tree is capped (result count and a scan budget) rather
+than searched exhaustively — the response says so (`truncated: true`) and the UI hints at it
+so a narrower query is the answer, not a longer wait. Scripts can call the endpoint directly:
+`GET /api/search?q=<query>&mount=<id-or-name>&path=<scope>&type=file|dir&limit=<n>`; omitting
+`mount` searches every mount the caller can reach at once, tagging each hit with which one it
+came from.
+
+## Multiple mounts and admin access
+
+Beyond the directory named by `P2F_ROOT` — always shared, seeded as the **default mount** on
+every boot, and browsable by every authenticated user — an **admin** can share additional
+directories ("mounts") and decide who else can browse each one. The first account ever
+created (via the setup screen or `cli.ts add-user` before any account exists) is the admin;
+admins can promote or demote other accounts later.
+
+- **Web/desktop clients**: signed-in admins get an **Admin** view (nav item / tab) to
+  promote/demote user roles, add or remove mounts, and grant or revoke a user's access to a
+  non-default mount. Everyone else only ever sees the mounts they're allowed into — the
+  default mount, plus anything explicitly granted.
+- **API**: `GET /api/mounts` lists what the caller can reach (admins see every mount, with
+  its path); `/api/admin/users`, `/api/admin/mounts`, and
+  `/api/admin/mounts/:id/access[/:userId]` (admin-only) manage roles, mounts and grants. Every
+  browse/upload/download/torrent/search endpoint takes an optional `mount` (id or name) —
+  omit it and it targets the default mount, so existing single-mount scripts keep working
+  unchanged.
+- **CLI**: `set-role <user> <user|admin>`, `list-mounts`, `add-mount <name> <path>`,
+  `del-mount <name>`, `grant-mount <name> <user>`, `revoke-mount <name> <user>` — see
+  `node src/server/cli.ts` with no arguments for the full list.
+
+A mount other than the default is just a second directory the server is told to serve — it
+doesn't need to sit under `P2F_ROOT`, but it does need to exist and be readable by the
+server process, same as `P2F_ROOT` itself. The default mount can't be deleted or access-
+restricted (that would silently break every existing client that doesn't pass `mount` at
+all); removing sharing for everyone means changing `P2F_ROOT` and restarting instead.
+
 ## Quick start
 
 ### Docker Compose (recommended)
@@ -339,7 +386,7 @@ the backend.
 
 | Variable           | Default     | Meaning                                                        |
 | ------------------ | ----------- | -------------------------------------------------------------- |
-| `P2F_ROOT`         | `./data`    | Directory to share (mounted read-only in Docker as `/data`)     |
+| `P2F_ROOT`         | `./data`    | Directory to share — seeds the **default mount** (see "Multiple mounts and admin access") on every boot; mounted read-only in Docker as `/data` |
 | `P2F_HOST`         | `127.0.0.1` | Bind address — **set this to your VPN IP**                      |
 | `P2F_PORT`         | `8000`      | HTTP port: API, webseed and the web client                      |
 | `P2F_TRACKER_PORT` | `8001`      | Legacy tracker port — no longer opened (the tracker is served only at `/tracker` on the main port); kept for compatibility |
@@ -442,3 +489,8 @@ build.
 - The activity log is in-memory and unauthenticated requests aren't attributed to a
   user (only an IP) — it's an operational aid, not a security audit trail.
 - No previews, no sync, no multi-peer swarming.
+- Moving a file/folder is within a single mount only — there's no cross-mount move.
+- Download/upload history isn't mount-scoped: the path shown is relative to whichever
+  mount the transfer happened in, without naming which one.
+- Search is a name substring match over the current mount's tree (or every mount you can
+  reach, via the API's `mount`-less form) — not file contents.
