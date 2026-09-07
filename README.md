@@ -271,13 +271,16 @@ or the file's own availability.
 
 ### Activity logs
 
-The **Logs** view (in the sidebar, once signed in) shows recent server activity:
-connections, tracker announces, torrent metadata requests, and webseed hits, each with a
-timestamp and, where available, the remote IP. It polls `GET /api/logs` (same auth as
-everything else) and filters by kind, by the top bar's search box, or both. The log is an
-in-memory ring buffer (~500 entries) — a restart clears it; this is for "what's
-happening / just happened", not a persisted audit trail. **Export logs** saves the
-currently filtered view as a `.txt` file (client-side only — nothing new to fetch).
+The **Logs** view (in the sidebar, admins only) shows recent server activity: connections,
+tracker announces, torrent metadata requests, webseed hits, and admin actions (role changes,
+mount create/delete/access grants), each with a timestamp and, where available, the remote
+IP. It polls `GET /api/logs`, which — like the rest of `/api/admin/*` — requires the admin
+role: entries carry other users' IPs, usernames and paths, so a non-admin account never sees
+this view at all (the nav item is hidden, and the endpoint itself 403s). It filters by kind,
+by the top bar's search box, or both. The log is an in-memory ring buffer (~500 entries) — a
+restart clears it; this is for "what's happening / just happened", not a persisted audit
+trail. **Export logs** saves the currently filtered view as a `.txt` file (client-side
+only — nothing new to fetch).
 
 ### Managing files
 
@@ -291,8 +294,14 @@ file listing, so a batch of in-flight uploads doesn't push the listing itself ar
   renames it in place via `POST /api/move`, which refuses to overwrite an existing entry.
 - **Move** opens a small modal with its own folder browser (breadcrumb + subfolder
   navigation, starting in the entry's current folder) — pick a destination and confirm
-  with **Move here**. Also goes through `POST /api/move`, which refuses to move a folder
-  into its own subtree.
+  with **Move here**. If more than one mount is reachable, the modal also carries a mount
+  picker, so a move can land in a different mount than the one the entry started in (the
+  caller needs access to both). Also goes through `POST /api/move`, which refuses to move a
+  folder into its own subtree (within the same mount — always well-defined across two
+  different mounts) or to overwrite an existing entry at the destination. A same-filesystem
+  move (the common case, same mount or not) is an instant, atomic rename; a move that
+  actually crosses filesystems falls back to copy-then-remove, which is not atomic — a
+  crash mid-move can leave both a partial copy and the original behind.
 - **Delete** asks for confirmation, then recursively removes the file or folder via
   `POST /api/delete`. There is no trash/undo — deletion is immediate and permanent.
 - **Upload** streams each selected (or dropped) file straight to disk via
@@ -338,7 +347,9 @@ admins can promote or demote other accounts later.
   `/api/admin/mounts/:id/access[/:userId]` (admin-only) manage roles, mounts and grants. Every
   browse/upload/download/torrent/search endpoint takes an optional `mount` (id or name) —
   omit it and it targets the default mount, so existing single-mount scripts keep working
-  unchanged.
+  unchanged. `POST /api/move` additionally takes an optional `toMount`, for a move that
+  lands in a different mount than the one `from` lives in (the caller needs access to both
+  when they differ; omit it for the ordinary same-mount case).
 - **CLI**: `set-role <user> <user|admin>`, `list-mounts`, `add-mount <name> <path>`,
   `del-mount <name>`, `grant-mount <name> <user>`, `revoke-mount <name> <user>` — see
   `node src/server/cli.ts` with no arguments for the full list.
@@ -348,6 +359,16 @@ doesn't need to sit under `P2F_ROOT`, but it does need to exist and be readable 
 server process, same as `P2F_ROOT` itself. The default mount can't be deleted or access-
 restricted (that would silently break every existing client that doesn't pass `mount` at
 all); removing sharing for everyone means changing `P2F_ROOT` and restarting instead.
+
+### Health checks
+
+`GET /api/health` is deliberately unauthenticated — a container orchestrator, load
+balancer, or `docker`/`docker compose`'s own health checking rarely carries credentials —
+and deliberately minimal (`{"status":"ok","uptime":<seconds>}`): it confirms the HTTP
+server itself is up and answering, not that every subsystem is healthy. It leaks nothing an
+unauthenticated request couldn't already learn from `/api/info` (also public — name,
+version, and non-secret auth/ECDH metadata clients need before signing in). The Docker
+image declares a `HEALTHCHECK` against it out of the box.
 
 ## Quick start
 
@@ -489,8 +510,11 @@ build.
 - The activity log is in-memory and unauthenticated requests aren't attributed to a
   user (only an IP) — it's an operational aid, not a security audit trail.
 - No previews, no sync, no multi-peer swarming.
-- Moving a file/folder is within a single mount only — there's no cross-mount move.
+- A cross-mount move (or one that otherwise spans filesystems) isn't atomic: it falls back
+  to copy-then-remove, so a crash mid-move can leave both a partial copy and the original.
 - Download/upload history isn't mount-scoped: the path shown is relative to whichever
   mount the transfer happened in, without naming which one.
 - Search is a name substring match over the current mount's tree (or every mount you can
   reach, via the API's `mount`-less form) — not file contents.
+- `/api/logs` is admin-only; there's no finer-grained log visibility (e.g. a non-admin
+  seeing only their own activity).
