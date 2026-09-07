@@ -83,7 +83,8 @@ Passwords are stored as scrypt hashes, tokens and session ids as SHA-256 hashes.
 **First run**: with no users in the database yet, opening the web client shows a
 one-time **setup screen** instead of a login form — enter the **setup token** printed in
 the server log at first boot (`first-run setup token: …`), then pick a username and
-password and that becomes the admin account. `POST /api/setup` is the endpoint behind it;
+password and that becomes the **admin** account (see "Multiple mounts and admin access"
+below — admins can promote/demote other accounts later). `POST /api/setup` is the endpoint behind it;
 it requires that token while open and works exactly once (it 409s the moment any account
 exists, whether created through the screen or the CLI below), so there is no standing
 "create a user" endpoint — and no unauthenticated first-boot window — for an attacker to
@@ -107,7 +108,9 @@ curl -H "Authorization: Bearer p2f_..." "http://10.0.0.1:8000/api/list?path="
 ```
 
 Tokens default to a 90-day lifetime; `--ttl` accepts `90d`/`12h`/`30m` or `never`.
-`list-users`, `del-user`, `list-tokens`, `del-token` complete the set.
+`list-users`, `del-user`, `list-tokens`, `del-token`, `set-role`, and the mount commands
+(`list-mounts`, `add-mount`, `del-mount`, `grant-mount`, `revoke-mount` — see "Multiple
+mounts and admin access" below) complete the set.
 
 ### How the P2P transfer stays authenticated
 
@@ -232,10 +235,13 @@ streaming a 0-byte file on Safari with no error anywhere.
 ### The interface
 
 The web client is a single app shell: a **sidebar** on the left (**Browse**, **Transfers**,
-**History**, **Logs**, with a badge counting transfers in flight), and a top bar carrying a
-search box that filters whatever the current view lists, plus live download/upload totals.
-The sidebar's footer holds the connection state (with a **Reconnect** button if the server
-goes away), the light/dark/**System** theme picker, and **Log out**.
+**History**, **Logs**, plus **Admin** for admin accounts, with a badge counting transfers in
+flight), and a top bar carrying a search box, plus live download/upload totals. On most views
+the search box filters whatever's currently listed; on **Browse** it instead searches the
+whole active mount's folder tree (see **Searching** below). If more than one mount is
+reachable, the sidebar also carries a mount switcher above the nav. The sidebar's footer
+holds the connection state (with a **Reconnect** button if the server goes away), the
+light/dark/**System** theme picker, and **Log out**.
 
 **Transfers** opens with two speed graphs — download and upload — sampled once a second and
 covering the last minute and a half, over the same combined totals shown in the top bar.
@@ -265,13 +271,16 @@ or the file's own availability.
 
 ### Activity logs
 
-The **Logs** view (in the sidebar, once signed in) shows recent server activity:
-connections, tracker announces, torrent metadata requests, and webseed hits, each with a
-timestamp and, where available, the remote IP. It polls `GET /api/logs` (same auth as
-everything else) and filters by kind, by the top bar's search box, or both. The log is an
-in-memory ring buffer (~500 entries) — a restart clears it; this is for "what's
-happening / just happened", not a persisted audit trail. **Export logs** saves the
-currently filtered view as a `.txt` file (client-side only — nothing new to fetch).
+The **Logs** view (in the sidebar, admins only) shows recent server activity: connections,
+tracker announces, torrent metadata requests, webseed hits, and admin actions (role changes,
+mount create/delete/access grants), each with a timestamp and, where available, the remote
+IP. It polls `GET /api/logs`, which — like the rest of `/api/admin/*` — requires the admin
+role: entries carry other users' IPs, usernames and paths, so a non-admin account never sees
+this view at all (the nav item is hidden, and the endpoint itself 403s). It filters by kind,
+by the top bar's search box, or both. The log is an in-memory ring buffer (~500 entries) — a
+restart clears it; this is for "what's happening / just happened", not a persisted audit
+trail. **Export logs** saves the currently filtered view as a `.txt` file (client-side
+only — nothing new to fetch).
 
 ### Managing files
 
@@ -285,8 +294,14 @@ file listing, so a batch of in-flight uploads doesn't push the listing itself ar
   renames it in place via `POST /api/move`, which refuses to overwrite an existing entry.
 - **Move** opens a small modal with its own folder browser (breadcrumb + subfolder
   navigation, starting in the entry's current folder) — pick a destination and confirm
-  with **Move here**. Also goes through `POST /api/move`, which refuses to move a folder
-  into its own subtree.
+  with **Move here**. If more than one mount is reachable, the modal also carries a mount
+  picker, so a move can land in a different mount than the one the entry started in (the
+  caller needs access to both). Also goes through `POST /api/move`, which refuses to move a
+  folder into its own subtree (within the same mount — always well-defined across two
+  different mounts) or to overwrite an existing entry at the destination. A same-filesystem
+  move (the common case, same mount or not) is an instant, atomic rename; a move that
+  actually crosses filesystems falls back to copy-then-remove, which is not atomic — a
+  crash mid-move can leave both a partial copy and the original behind.
 - **Delete** asks for confirmation, then recursively removes the file or folder via
   `POST /api/delete`. There is no trash/undo — deletion is immediate and permanent.
 - **Upload** streams each selected (or dropped) file straight to disk via
@@ -301,6 +316,59 @@ every mutation (delete, move, upload) is recorded in the activity log. They also
 the shared directory to be writable — the default Docker Compose setup mounts it
 read-only, which disables them cleanly (a permission error, not a crash); see the
 security note above before switching to a read-write mount.
+
+### Searching
+
+Typing in the top bar's search box while on **Browse** searches the *whole* active mount's
+folder tree by name (case-insensitive substring, folders and files both) via
+`GET /api/search`, debounced client-side — not just the folder currently open. Results show
+each match's full path; clicking one opens its containing folder, and files get a direct
+**Download** button. A very large tree is capped (result count and a scan budget) rather
+than searched exhaustively — the response says so (`truncated: true`) and the UI hints at it
+so a narrower query is the answer, not a longer wait. Scripts can call the endpoint directly:
+`GET /api/search?q=<query>&mount=<id-or-name>&path=<scope>&type=file|dir&limit=<n>`; omitting
+`mount` searches every mount the caller can reach at once, tagging each hit with which one it
+came from.
+
+## Multiple mounts and admin access
+
+Beyond the directory named by `P2F_ROOT` — always shared, seeded as the **default mount** on
+every boot, and browsable by every authenticated user — an **admin** can share additional
+directories ("mounts") and decide who else can browse each one. The first account ever
+created (via the setup screen or `cli.ts add-user` before any account exists) is the admin;
+admins can promote or demote other accounts later.
+
+- **Web/desktop clients**: signed-in admins get an **Admin** view (nav item / tab) to
+  promote/demote user roles, add or remove mounts, and grant or revoke a user's access to a
+  non-default mount. Everyone else only ever sees the mounts they're allowed into — the
+  default mount, plus anything explicitly granted.
+- **API**: `GET /api/mounts` lists what the caller can reach (admins see every mount, with
+  its path); `/api/admin/users`, `/api/admin/mounts`, and
+  `/api/admin/mounts/:id/access[/:userId]` (admin-only) manage roles, mounts and grants. Every
+  browse/upload/download/torrent/search endpoint takes an optional `mount` (id or name) —
+  omit it and it targets the default mount, so existing single-mount scripts keep working
+  unchanged. `POST /api/move` additionally takes an optional `toMount`, for a move that
+  lands in a different mount than the one `from` lives in (the caller needs access to both
+  when they differ; omit it for the ordinary same-mount case).
+- **CLI**: `set-role <user> <user|admin>`, `list-mounts`, `add-mount <name> <path>`,
+  `del-mount <name>`, `grant-mount <name> <user>`, `revoke-mount <name> <user>` — see
+  `node src/server/cli.ts` with no arguments for the full list.
+
+A mount other than the default is just a second directory the server is told to serve — it
+doesn't need to sit under `P2F_ROOT`, but it does need to exist and be readable by the
+server process, same as `P2F_ROOT` itself. The default mount can't be deleted or access-
+restricted (that would silently break every existing client that doesn't pass `mount` at
+all); removing sharing for everyone means changing `P2F_ROOT` and restarting instead.
+
+### Health checks
+
+`GET /api/health` is deliberately unauthenticated — a container orchestrator, load
+balancer, or `docker`/`docker compose`'s own health checking rarely carries credentials —
+and deliberately minimal (`{"status":"ok","uptime":<seconds>}`): it confirms the HTTP
+server itself is up and answering, not that every subsystem is healthy. It leaks nothing an
+unauthenticated request couldn't already learn from `/api/info` (also public — name,
+version, and non-secret auth/ECDH metadata clients need before signing in). The Docker
+image declares a `HEALTHCHECK` against it out of the box.
 
 ## Quick start
 
@@ -339,7 +407,7 @@ the backend.
 
 | Variable           | Default     | Meaning                                                        |
 | ------------------ | ----------- | -------------------------------------------------------------- |
-| `P2F_ROOT`         | `./data`    | Directory to share (mounted read-only in Docker as `/data`)     |
+| `P2F_ROOT`         | `./data`    | Directory to share — seeds the **default mount** (see "Multiple mounts and admin access") on every boot; mounted read-only in Docker as `/data` |
 | `P2F_HOST`         | `127.0.0.1` | Bind address — **set this to your VPN IP**                      |
 | `P2F_PORT`         | `8000`      | HTTP port: API, webseed and the web client                      |
 | `P2F_TRACKER_PORT` | `8001`      | Legacy tracker port — no longer opened (the tracker is served only at `/tracker` on the main port); kept for compatibility |
@@ -442,3 +510,11 @@ build.
 - The activity log is in-memory and unauthenticated requests aren't attributed to a
   user (only an IP) — it's an operational aid, not a security audit trail.
 - No previews, no sync, no multi-peer swarming.
+- A cross-mount move (or one that otherwise spans filesystems) isn't atomic: it falls back
+  to copy-then-remove, so a crash mid-move can leave both a partial copy and the original.
+- Download/upload history isn't mount-scoped: the path shown is relative to whichever
+  mount the transfer happened in, without naming which one.
+- Search is a name substring match over the current mount's tree (or every mount you can
+  reach, via the API's `mount`-less form) — not file contents.
+- `/api/logs` is admin-only; there's no finer-grained log visibility (e.g. a non-admin
+  seeing only their own activity).

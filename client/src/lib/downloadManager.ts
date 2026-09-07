@@ -28,6 +28,8 @@ export interface PeerInfo {
 export interface DownloadEntry {
   path: string
   name: string
+  /** Which mount `path` resolves in; undefined means the default mount. */
+  mountId?: number
   status: DownloadStatus
   message?: string
   progress: number
@@ -50,6 +52,7 @@ type ApiFetch = (pathname: string, init?: RequestInit) => Promise<Response>
 interface SavedDownload {
   path: string
   name: string
+  mountId?: number
   paused?: boolean
   infoHash?: string
   lastActiveAt: number
@@ -164,10 +167,11 @@ interface Tracked {
   smoothedSpeed: number
 }
 
-function blankEntry (path: string, name: string): DownloadEntry {
+function blankEntry (path: string, name: string, mountId?: number): DownloadEntry {
   return {
     path,
     name,
+    mountId,
     status: 'preparing',
     progress: 0,
     downloaded: 0,
@@ -263,7 +267,7 @@ export class DownloadManager {
     this.restored = true
     await this.reconcile()
     for (const saved of savedDownloads()) {
-      void this.start(saved.path, saved.name, apiFetch, { startPaused: saved.paused ?? false })
+      void this.start(saved.path, saved.name, apiFetch, { startPaused: saved.paused ?? false, mountId: saved.mountId })
     }
   }
 
@@ -292,11 +296,21 @@ export class DownloadManager {
     await Promise.all([...reap].map(key => OpfsChunkStore.remove(key)))
   }
 
+  /**
+   * `mountId` (undefined for the default mount) is stashed on the entry and
+   * persisted with it so a resumed/restored download re-requests torrent
+   * metadata from the same mount it started in. Entries are still keyed by
+   * `entryPath` alone, not `(mountId, entryPath)` — on a multi-mount server
+   * two simultaneous downloads that happen to share the exact same relative
+   * path in different mounts would collide in this map, same as download
+   * history isn't mount-scoped either. An acceptable, narrow limitation for
+   * a self-hosted tool rather than a full path/mount composite key.
+   */
   async start (
     entryPath: string,
     name: string,
     apiFetch: ApiFetch,
-    { startPaused = false } = {}
+    { startPaused = false, mountId }: { startPaused?: boolean, mountId?: number } = {}
   ): Promise<void> {
     const existing = this.entries.get(entryPath)
     if (existing) {
@@ -306,7 +320,7 @@ export class DownloadManager {
       await this.restartAndWait(entryPath)
     }
     this.apiFetch = apiFetch
-    this.entries.set(entryPath, blankEntry(entryPath, name))
+    this.entries.set(entryPath, blankEntry(entryPath, name, mountId))
     this.notify()
 
     try {
@@ -323,9 +337,9 @@ export class DownloadManager {
       // large files, hence the "preparing" state. Re-fetched on every start
       // so restored downloads get fresh transfer tokens (the infohash — and
       // with it the OPFS piece store — stays the same for unchanged files).
-      const res = await apiFetch(
-        `/api/torrent?path=${encodeURIComponent(entryPath)}&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}`
-      )
+      const torrentParams = new URLSearchParams({ path: entryPath, ck: keyWrap.clientPublicKeyBase64 })
+      if (mountId !== undefined) torrentParams.set('mount', String(mountId))
+      const res = await apiFetch(`/api/torrent?${torrentParams.toString()}`)
       const meta = await res.json() as {
         infoHash: string
         length: number
@@ -336,7 +350,7 @@ export class DownloadManager {
       }
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       persistDownload({
-        path: entryPath, name, paused: startPaused,
+        path: entryPath, name, mountId, paused: startPaused,
         infoHash: meta.infoHash, lastActiveAt: Date.now()
       })
       this.setEntry(entryPath, { infoHash: meta.infoHash, length: meta.length })

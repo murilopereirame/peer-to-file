@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   errMessage, formatBytes, formatDateTime, joinPath, parentPath, requestNotificationPermission,
-  type DirEntry, type Listing
+  type DirEntry, type Listing, type SearchHit
 } from '@p2f/shared'
 import { useApp, withUnauthorizedRetry } from '../context/AppContext'
 import { useDownloads } from '../context/DownloadsContext'
@@ -10,7 +10,7 @@ import { useToast } from '../context/ToastContext'
 import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
 import {
   DownloadIcon, FileIcon, FolderIcon, FolderPlusIcon, LevelUpIcon, MoreIcon, MoveIcon, PencilIcon,
-  RefreshIcon, TrashIcon, UploadIcon
+  RefreshIcon, SearchIcon, TrashIcon, UploadIcon
 } from '../components/icons'
 
 function Breadcrumbs ({ path, onNavigate }: { path: string, onNavigate: (p: string) => void }): React.JSX.Element {
@@ -117,29 +117,56 @@ function DeleteModal ({ entry, onCancel, onConfirm }: { entry: DirEntry | null, 
 
 function MoveModal ({
   entry, startPath, onCancel, onPick
-}: { entry: DirEntry | null, startPath: string, onCancel: () => void, onPick: (destDir: string) => Promise<void> }): React.JSX.Element | null {
-  const { client } = useApp()
+}: {
+  entry: DirEntry | null
+  startPath: string
+  onCancel: () => void
+  onPick: (destDir: string, destMountId: number | undefined) => Promise<void>
+}): React.JSX.Element | null {
+  const { client, activeMountId, mounts } = useApp()
+  // The entry being moved always lives in the currently active mount; the
+  // destination mount defaults to the same one but can be switched — a
+  // cross-mount move is just a same-mount move with a different destination.
+  const [destMountId, setDestMountId] = useState(activeMountId)
   const [path, setPath] = useState(startPath)
   const [listing, setListing] = useState<Listing | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const load = useCallback(async (p: string): Promise<void> => {
+  const load = useCallback(async (p: string, mountId: number | null): Promise<void> => {
     if (!client) return
-    try { setListing(await client.list(p)); setPath(p) } catch (err) { setError(errMessage(err)) }
+    try { setListing(await client.list(p, mountId ?? undefined)); setPath(p) } catch (err) { setError(errMessage(err)) }
   }, [client])
 
-  useEffect(() => { if (entry) void load(startPath) }, [entry, startPath, load])
+  useEffect(() => { if (entry) { setDestMountId(activeMountId); void load(startPath, activeMountId) } }, [entry, startPath, activeMountId, load])
 
   if (!entry) return null
   const folders = listing?.entries.filter(e => e.type === 'dir') ?? []
+  const crossMount = destMountId !== activeMountId
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
       <Card style={{ width: 460, maxHeight: '70vh', display: 'flex', flexDirection: 'column' }}>
         <div className="card-body" onClick={e => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <Title>Move "{entry.name}"</Title>
-          <Breadcrumbs path={path} onNavigate={p => { void load(p) }} />
+          {mounts.length > 1 && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '.8rem', marginBottom: 8 }}>
+              Mount
+              <select
+                className="input" style={{ flex: 1 }} value={destMountId ?? ''}
+                onChange={e => {
+                  const id = Number(e.target.value)
+                  setDestMountId(id)
+                  void load('', id)
+                }}
+              >
+                {mounts.map(m => (
+                  <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' (default)' : ''}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <Breadcrumbs path={path} onNavigate={p => { void load(p, destMountId) }} />
           <ErrorText>{error}</ErrorText>
           <div style={{ overflowY: 'auto', flex: 1, minHeight: 100 }}>
             {folders.length === 0 && <Muted>No subfolders here.</Muted>}
@@ -147,7 +174,7 @@ function MoveModal ({
               <div
                 key={f.name}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', cursor: 'pointer' }}
-                onClick={() => { void load(joinPath(path, f.name)) }}
+                onClick={() => { void load(joinPath(path, f.name), destMountId) }}
               >
                 <span className="entry-icon" style={{ background: 'var(--accent-tint)', color: 'var(--accent)' }}>
                   <FolderIcon />
@@ -162,7 +189,8 @@ function MoveModal ({
               loading={busy}
               onClick={() => {
                 setBusy(true)
-                onPick(path).catch(err => setError(errMessage(err))).finally(() => setBusy(false))
+                onPick(path, crossMount ? (destMountId ?? undefined) : undefined)
+                  .catch(err => setError(errMessage(err))).finally(() => setBusy(false))
               }}
             >
               Move here{path ? ` (/${path})` : ' (root)'}
@@ -202,7 +230,7 @@ export function BrowserScreen (): React.JSX.Element {
       setPath(p)
     }
     try {
-      const l = await withUnauthorizedRetry(app, () => app.client!.list(p))
+      const l = await withUnauthorizedRetry(app, () => app.client!.list(p, app.activeMountId ?? undefined))
       cacheRef.current.set(p, l)
       setListing(l)
       setPath(p)
@@ -212,6 +240,9 @@ export function BrowserScreen (): React.JSX.Element {
   }, [app])
 
   useEffect(() => { void load('') }, [load])
+
+  // A mount switch invalidates every cached listing from the previous one.
+  useEffect(() => { cacheRef.current.clear() }, [app.activeMountId])
 
   // Keeps the currently-viewed folder reasonably fresh without the user
   // having to navigate away and back — cache-first load() never blanks the
@@ -228,8 +259,50 @@ export function BrowserScreen (): React.JSX.Element {
     requestNotificationPermission()
     for (const file of files) {
       notify(`Uploading "${file.name}"…`)
-      uploads.start(path, file, () => { void load(path) })
+      uploads.start(path, file, () => { void load(path) }, app.activeMountId ?? undefined)
     }
+  }
+
+  // --- tree-wide search ------------------------------------------------------
+  const [search, setSearch] = useState('')
+  const query = search.trim()
+  const [searchResults, setSearchResults] = useState<SearchHit[] | null>(null)
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const [searchTruncated, setSearchTruncated] = useState(false)
+
+  useEffect(() => {
+    if (!app.client || query === '') {
+      setSearchResults(null)
+      setSearchError('')
+      setSearchLoading(false)
+      return
+    }
+    setSearchLoading(true)
+    setSearchError('')
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const res = await withUnauthorizedRetry(app, () =>
+            app.client!.search(query, { mount: app.activeMountId ?? undefined }))
+          if (cancelled) return
+          setSearchResults(res.results)
+          setSearchTruncated(res.truncated)
+        } catch (err) {
+          if (!cancelled) setSearchError(errMessage(err))
+        } finally {
+          if (!cancelled) setSearchLoading(false)
+        }
+      })()
+    }, 300)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [query, app])
+
+  const openSearchHit = (hit: SearchHit): void => {
+    setSearch('')
+    const parent = hit.type === 'dir' ? hit.path : hit.path.split('/').slice(0, -1).join('/')
+    void load(parent)
   }
 
   return (
@@ -238,6 +311,14 @@ export function BrowserScreen (): React.JSX.Element {
       <Card>
         <div className="browser-toolbar">
           <Breadcrumbs path={path} onNavigate={p => { void load(p) }} />
+          <div className="search-field">
+            <SearchIcon className="search-icon" size={14} />
+            <input
+              type="search" value={search} placeholder="Search files and folders…"
+              aria-label="Search files and folders"
+              onChange={e => setSearch(e.target.value)}
+            />
+          </div>
           <div className="toolbar-actions">
             <Button variant="secondary" className="sm" onClick={() => setCreatingFolder(true)}>
               <FolderPlusIcon size={14} />New folder
@@ -273,65 +354,115 @@ export function BrowserScreen (): React.JSX.Element {
               <th />
             </tr>
           </thead>
-          <tbody>
-            {path !== '' && (
-              <tr className="up" onClick={() => { void load(parentPath(path)) }}>
-                <td><span className="entry-icon"><LevelUpIcon /></span></td>
-                <td colSpan={5}><span className="muted">../</span></td>
-              </tr>
-            )}
-            {entries.length === 0 && (
-              <tr><td colSpan={6}><div className="empty"><FolderIcon className="empty-icon" size={26} />This folder is empty.</div></td></tr>
-            )}
-            {entries.map(entry => (
-              <tr
-                key={entry.name}
-                className={entry.type === 'dir' ? 'dir' : 'file'}
-                onClick={() => { if (entry.type === 'dir') void load(joinPath(path, entry.name)) }}
-              >
-                <td><span className="entry-icon">{entry.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span></td>
-                <td><span className="entry-name">{entry.name}</span></td>
-                <td className="num">{entry.type === 'file' ? formatBytes(entry.size) : '—'}</td>
-                <td className="num" style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>{formatDateTime(entry.mtime)}</td>
-                <td style={{ textAlign: 'right' }}>
-                  {entry.type === 'file' && (
-                    <button
-                      className="link-btn"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        requestNotificationPermission()
-                        downloads.start(joinPath(path, entry.name), entry.name)
-                        notify(`Added "${entry.name}" to the download queue`)
-                      }}
-                    >
-                      <DownloadIcon size={13} />Download
-                    </button>
-                  )}
-                </td>
-                <td style={{ position: 'relative' }}>
-                  <button
-                    className="icon-btn" aria-label="more actions" aria-haspopup="true"
-                    onClick={(e) => { e.stopPropagation(); setMenuFor(menuFor === entry.name ? null : entry.name) }}
+          {query !== ''
+            ? (
+              <tbody>
+                {searchLoading && (
+                  <tr><td colSpan={6}><div className="empty">searching…</div></td></tr>
+                )}
+                {!searchLoading && searchError && (
+                  <tr><td colSpan={6}><div className="empty error">search failed: {searchError}</div></td></tr>
+                )}
+                {!searchLoading && !searchError && searchResults?.length === 0 && (
+                  <tr><td colSpan={6}><div className="empty"><SearchIcon className="empty-icon" size={26} />nothing matches &ldquo;{query}&rdquo;</div></td></tr>
+                )}
+                {!searchLoading && !searchError && searchResults?.map(hit => (
+                  <tr
+                    key={`${hit.mount.id}:${hit.path}`}
+                    className={hit.type}
+                    onClick={() => openSearchHit(hit)}
                   >
-                    <MoreIcon />
-                  </button>
-                  {menuFor === entry.name && (
-                    <div className="row-menu" onClick={e => e.stopPropagation()}>
-                      <button type="button" onClick={() => { setMenuFor(null); setRenaming(entry) }}>
-                        <PencilIcon size={14} />Rename
+                    <td><span className="entry-icon">{hit.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span></td>
+                    <td>
+                      <span className="entry-name">{hit.name}</span>{' '}
+                      <span className="muted">/{hit.path}</span>
+                    </td>
+                    <td className="num">{hit.type === 'file' ? formatBytes(hit.size ?? 0) : '—'}</td>
+                    <td className="num" style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>{formatDateTime(hit.mtime)}</td>
+                    <td style={{ textAlign: 'right' }}>
+                      {hit.type === 'file' && (
+                        <button
+                          className="link-btn"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            requestNotificationPermission()
+                            downloads.start(hit.path, hit.name, hit.mount.id)
+                            notify(`Added "${hit.name}" to the download queue`)
+                          }}
+                        >
+                          <DownloadIcon size={13} />Download
+                        </button>
+                      )}
+                    </td>
+                    <td />
+                  </tr>
+                ))}
+                {!searchLoading && searchTruncated && (searchResults?.length ?? 0) > 0 && (
+                  <tr><td colSpan={6}><div className="muted" style={{ padding: '.5rem 0' }}>showing the first {searchResults?.length} matches — refine your search for more</div></td></tr>
+                )}
+              </tbody>
+              )
+            : (
+              <tbody>
+                {path !== '' && (
+                  <tr className="up" onClick={() => { void load(parentPath(path)) }}>
+                    <td><span className="entry-icon"><LevelUpIcon /></span></td>
+                    <td colSpan={5}><span className="muted">../</span></td>
+                  </tr>
+                )}
+                {entries.length === 0 && (
+                  <tr><td colSpan={6}><div className="empty"><FolderIcon className="empty-icon" size={26} />This folder is empty.</div></td></tr>
+                )}
+                {entries.map(entry => (
+                  <tr
+                    key={entry.name}
+                    className={entry.type === 'dir' ? 'dir' : 'file'}
+                    onClick={() => { if (entry.type === 'dir') void load(joinPath(path, entry.name)) }}
+                  >
+                    <td><span className="entry-icon">{entry.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span></td>
+                    <td><span className="entry-name">{entry.name}</span></td>
+                    <td className="num">{entry.type === 'file' ? formatBytes(entry.size) : '—'}</td>
+                    <td className="num" style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>{formatDateTime(entry.mtime)}</td>
+                    <td style={{ textAlign: 'right' }}>
+                      {entry.type === 'file' && (
+                        <button
+                          className="link-btn"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            requestNotificationPermission()
+                            downloads.start(joinPath(path, entry.name), entry.name, app.activeMountId ?? undefined)
+                            notify(`Added "${entry.name}" to the download queue`)
+                          }}
+                        >
+                          <DownloadIcon size={13} />Download
+                        </button>
+                      )}
+                    </td>
+                    <td style={{ position: 'relative' }}>
+                      <button
+                        className="icon-btn" aria-label="more actions" aria-haspopup="true"
+                        onClick={(e) => { e.stopPropagation(); setMenuFor(menuFor === entry.name ? null : entry.name) }}
+                      >
+                        <MoreIcon />
                       </button>
-                      <button type="button" onClick={() => { setMenuFor(null); setMoving(entry) }}>
-                        <MoveIcon size={14} />Move
-                      </button>
-                      <button type="button" className="danger" onClick={() => { setMenuFor(null); setDeleting(entry) }}>
-                        <TrashIcon size={14} />Delete
-                      </button>
-                    </div>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
+                      {menuFor === entry.name && (
+                        <div className="row-menu" onClick={e => e.stopPropagation()}>
+                          <button type="button" onClick={() => { setMenuFor(null); setRenaming(entry) }}>
+                            <PencilIcon size={14} />Rename
+                          </button>
+                          <button type="button" onClick={() => { setMenuFor(null); setMoving(entry) }}>
+                            <MoveIcon size={14} />Move
+                          </button>
+                          <button type="button" className="danger" onClick={() => { setMenuFor(null); setDeleting(entry) }}>
+                            <TrashIcon size={14} />Delete
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              )}
         </table>
       </Card>
 
@@ -340,7 +471,7 @@ export function BrowserScreen (): React.JSX.Element {
         onCancel={() => setCreatingFolder(false)}
         onConfirm={async (name) => {
           if (!app.client) return
-          await withUnauthorizedRetry(app, () => app.client!.mkdir(joinPath(path, name)))
+          await withUnauthorizedRetry(app, () => app.client!.mkdir(joinPath(path, name), app.activeMountId ?? undefined))
           setCreatingFolder(false)
           notify(`Created folder "${name}"`)
           await load(path)
@@ -351,7 +482,7 @@ export function BrowserScreen (): React.JSX.Element {
         onCancel={() => setRenaming(null)}
         onConfirm={async (name) => {
           if (!renaming || !app.client) return
-          await withUnauthorizedRetry(app, () => app.client!.move(joinPath(path, renaming.name), joinPath(path, name)))
+          await withUnauthorizedRetry(app, () => app.client!.move(joinPath(path, renaming.name), joinPath(path, name), app.activeMountId ?? undefined))
           setRenaming(null)
           notify(`Renamed to "${name}"`)
           await load(path)
@@ -361,9 +492,11 @@ export function BrowserScreen (): React.JSX.Element {
         entry={moving}
         startPath={path}
         onCancel={() => setMoving(null)}
-        onPick={async (destDir) => {
+        onPick={async (destDir, destMountId) => {
           if (!moving || !app.client) return
-          await withUnauthorizedRetry(app, () => app.client!.move(joinPath(path, moving.name), joinPath(destDir, moving.name)))
+          await withUnauthorizedRetry(app, () => app.client!.move(
+            joinPath(path, moving.name), joinPath(destDir, moving.name), app.activeMountId ?? undefined, destMountId
+          ))
           setMoving(null)
           notify(`Moved "${moving.name}"`)
           await load(path)
@@ -374,7 +507,7 @@ export function BrowserScreen (): React.JSX.Element {
         onCancel={() => setDeleting(null)}
         onConfirm={async () => {
           if (!deleting || !app.client) return
-          await withUnauthorizedRetry(app, () => app.client!.deleteEntry(joinPath(path, deleting.name)))
+          await withUnauthorizedRetry(app, () => app.client!.deleteEntry(joinPath(path, deleting.name), app.activeMountId ?? undefined))
           setDeleting(null)
           notify(`Deleted "${deleting.name}"`)
           await load(path)

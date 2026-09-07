@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { notifyOS } from '@p2f/shared'
 import type { DownloadEntry, DownloadManager } from '../lib/downloadManager'
+import { useMount } from '../context/MountContext'
 import { useUploads } from '../context/UploadsContext'
 import { useToast } from '../context/ToastContext'
 import { SPEED_HISTORY_SIZE, useSpeedHistory } from '../hooks/useSpeedHistory'
@@ -10,16 +11,18 @@ import { UploadPanel } from './UploadPanel'
 import { HistoryPanel } from './HistoryPanel'
 import { UploadHistoryPanel } from './UploadHistoryPanel'
 import { LogsPanel } from './LogsPanel'
+import { AdminPanel } from './AdminPanel'
 import { Sidebar, type View } from './Sidebar'
 import { TopBar } from './TopBar'
 import { SpeedChart } from './SpeedChart'
 import { AlertIcon, ArrowDownIcon, ArrowUpIcon, RefreshIcon } from './icons'
 
 const VIEW_META: Record<View, { title: string, searchPlaceholder: string }> = {
-  browse: { title: 'Files', searchPlaceholder: 'Search this folder…' },
+  browse: { title: 'Files', searchPlaceholder: 'Search files and folders…' },
   transfers: { title: 'Transfers', searchPlaceholder: 'Search transfers…' },
   history: { title: 'History', searchPlaceholder: 'Search history…' },
-  logs: { title: 'Logs', searchPlaceholder: 'Search log messages…' }
+  logs: { title: 'Logs', searchPlaceholder: 'Search log messages…' },
+  admin: { title: 'Admin', searchPlaceholder: 'Search users and mounts…' }
 }
 
 /** Fires a toast + OS notification exactly once per download the moment it finishes, regardless of which view is active. */
@@ -58,6 +61,7 @@ export function BrowserApp ({
   const [view, setView] = useState<View>('browse')
   const [search, setSearch] = useState('')
   const { uploads, dismiss } = useUploads()
+  const { mounts, activeMountId, setActiveMountId, role } = useMount()
   useDownloadCompletionNotifier(downloads)
 
   const uploadsDoneCount = uploads.filter(u => u.status === 'done').length
@@ -86,7 +90,8 @@ export function BrowserApp ({
     browse: 'Browse and transfer the server\'s shared folder',
     transfers: busyCount > 0 ? `${busyCount} transfer${busyCount === 1 ? '' : 's'} in flight` : 'Nothing in flight',
     history: 'Transfers this server has finished',
-    logs: 'Live server activity'
+    logs: 'Live server activity',
+    admin: 'Manage users, mounts and access'
   }
 
   return (
@@ -97,6 +102,10 @@ export function BrowserApp ({
         counts={{ transfers: busyCount }}
         connected={status.kind !== 'error'}
         onReconnect={onRetry}
+        role={role}
+        mounts={mounts}
+        activeMountId={activeMountId}
+        onSelectMount={setActiveMountId}
         authed={authed}
         onLogout={onLogout}
       />
@@ -161,6 +170,8 @@ export function BrowserApp ({
           )}
 
           {view === 'logs' && <LogsPanel search={search} />}
+
+          {view === 'admin' && <AdminPanel search={search} />}
         </main>
       </div>
     </div>

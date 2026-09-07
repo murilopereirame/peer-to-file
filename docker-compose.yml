@@ -20,8 +20,14 @@ services:
       # Read-only by default: download/browse only. Delete/rename/move/upload
       # need write access — drop the ":ro" (mount read-write) to enable them.
       # See "Managing files" and the security note in the README first.
-      - /srv/files:/data:ro # <-- change to the directory you want to share
+      - /srv/files:/data:ro # <-- change to the directory you want to share (the "default mount")
       - p2f-config:/config # SQLite auth database (transfer encryption is streamed, nothing cached)
+      # An admin can share additional directories as extra "mounts" at
+      # runtime (web/desktop Admin view, or `cli.ts add-mount`) — see
+      # "Multiple mounts and admin access" in the README. Each one still
+      # needs to be reachable inside this container, so bind-mount it here
+      # first, e.g.:
+      # - /srv/photos:/mounts/photos:ro
     restart: unless-stopped
 
     # Alternative without host networking: delete network_mode above, set

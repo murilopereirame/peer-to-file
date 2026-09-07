@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { ApiError, P2FClient, colorsFor, type ThemeColors, type ThemeMode } from '@p2f/shared'
+import { ApiError, P2FClient, colorsFor, type MountInfo, type Role, type ThemeColors, type ThemeMode } from '@p2f/shared'
 import { createClient } from '../lib/client'
 import {
   loadCredentials, saveCredentials, clearCredentials, settings,
@@ -14,6 +14,11 @@ export interface AppContextValue {
   serverUrl: string
   username: string | null
   connected: boolean
+  role: Role | null
+  mounts: MountInfo[]
+  activeMountId: number | null
+  setActiveMountId: (id: number) => void
+  refreshMounts: () => Promise<void>
   colors: ThemeColors
   scheme: ThemeMode
   downloadDir: string | null
@@ -58,6 +63,9 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
   const [serverUrl, setServerUrl] = useState('')
   const [username, setUsername] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
+  const [role, setRole] = useState<Role | null>(null)
+  const [mounts, setMounts] = useState<MountInfo[]>([])
+  const [activeMountId, setActiveMountId] = useState<number | null>(null)
   const [downloadDir, setDownloadDirState] = useState<string | null>(null)
   const [keepAwakeDuringTransfers, setKeepAwakeDuringTransfersState] = useState(false)
   const [themeOverride, setThemeOverride] = useState<ThemeMode | null>(null)
@@ -96,6 +104,26 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     }
   }, [persistRefreshToken])
 
+  // Fetches the mounts the signed-in user can reach and their role, and picks
+  // an active mount: keep the current one if it's still reachable, else the
+  // default mount, else whatever's first. Called after every successful
+  // auth transition and exposed so the Admin screen can re-trigger it once
+  // it changes roles or mount access.
+  const refreshMounts = useCallback(async (c: P2FClient): Promise<void> => {
+    try {
+      const [mountsRes, me] = await Promise.all([c.mounts(), c.me()])
+      setMounts(mountsRes.mounts)
+      setRole(me.role)
+      setActiveMountId(current => {
+        if (current !== null && mountsRes.mounts.some(m => m.id === current)) return current
+        return mountsRes.mounts.find(m => m.isDefault)?.id ?? mountsRes.mounts[0]?.id ?? null
+      })
+    } catch {
+      // best-effort — the browse/download/upload screens still work against
+      // whatever mount was last known (or the default, if none was ever set)
+    }
+  }, [])
+
   const evaluateAuth = useCallback(async (c: P2FClient): Promise<void> => {
     try {
       const info = await c.info()
@@ -103,19 +131,20 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
       if (info.auth.needsSetup) { setPhase('setup'); return }
       if (!info.auth.authenticated) {
         const user = await tryStoredRefresh(c)
-        if (user) { setUsername(user); setPhase('main'); return }
+        if (user) { setUsername(user); setPhase('main'); void refreshMounts(c); return }
         setPhase('login')
         return
       }
       const me = await c.me()
       setUsername(me.username)
       setPhase('main')
+      void refreshMounts(c)
     } catch {
       setConnected(false)
       const creds = await loadCredentials(c.baseUrl)
       setPhase(creds ? 'main' : 'server')
     }
-  }, [tryStoredRefresh])
+  }, [tryStoredRefresh, refreshMounts])
   const evaluateAuthRef = useRef(evaluateAuth)
   evaluateAuthRef.current = evaluateAuth
 
@@ -160,6 +189,9 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     await settings.clearServerScoped()
     setClient(null)
     setUsername(null)
+    setRole(null)
+    setMounts([])
+    setActiveMountId(null)
     setPhase('server')
   }, [client])
 
@@ -169,7 +201,8 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     if (remember) await persistRefreshToken(client, u)
     setUsername(u)
     setPhase('main')
-  }, [client, persistRefreshToken])
+    void refreshMounts(client)
+  }, [client, persistRefreshToken, refreshMounts])
 
   const completeLogin = useCallback(async (u: string, p: string, remember: boolean): Promise<void> => {
     if (!client) throw new Error('not connected')
@@ -178,12 +211,16 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     else await clearCredentials(client.baseUrl)
     setUsername(u)
     setPhase('main')
-  }, [client, persistRefreshToken])
+    void refreshMounts(client)
+  }, [client, persistRefreshToken, refreshMounts])
 
   const logout = useCallback(async (): Promise<void> => {
     try { await client?.logout() } catch { /* session already gone server-side */ }
     if (client) await clearCredentials(client.baseUrl)
     setUsername(null)
+    setRole(null)
+    setMounts([])
+    setActiveMountId(null)
     setPhase('login')
   }, [client])
 
@@ -213,8 +250,13 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     setThemeOverride(mode)
   }, [])
 
+  const refreshMountsForCurrentClient = useCallback(async (): Promise<void> => {
+    if (client) await refreshMounts(client)
+  }, [client, refreshMounts])
+
   const value: AppContextValue = {
     phase, client, serverUrl, username, connected, colors, scheme,
+    role, mounts, activeMountId, setActiveMountId, refreshMounts: refreshMountsForCurrentClient,
     downloadDir, setDownloadDir, keepAwakeDuringTransfers, setKeepAwakeDuringTransfersPref,
     themeOverride, setThemeOverridePref,
     connectToServer, changeServer, completeSetup, completeLogin, logout, retry, handleUnauthorized

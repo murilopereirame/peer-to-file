@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useApi } from '../context/ApiContext'
+import { useMount } from '../context/MountContext'
 import { errMessage, HttpError } from '../lib/format'
 import { CloseIcon, FolderPlusIcon } from './icons'
 
@@ -12,6 +13,7 @@ export function NewFolderModal ({
   onCreated: (name: string) => void
 }): React.JSX.Element {
   const { apiFetch } = useApi()
+  const { mountBody } = useMount()
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -26,7 +28,7 @@ export function NewFolderModal ({
         await apiFetch('/api/mkdir', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: path === '' ? trimmed : `${path}/${trimmed}` })
+          body: JSON.stringify({ path: path === '' ? trimmed : `${path}/${trimmed}`, ...mountBody })
         })
         onCreated(trimmed)
       } catch (err) {

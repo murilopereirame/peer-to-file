@@ -53,8 +53,9 @@ export interface AuthService {
   logout (accessId: string, refreshId: string): void
   /** Invalidate every session and refresh token for a user (revoke-all). */
   logoutAll (userId: number): void
-  mintRawToken (relPath: string): string
-  verifyRawToken (relPath: string, token: string): boolean
+  /** Bound to one mount *and* one path — a token minted for a path in one mount must not authorize the same-named path in another. */
+  mintRawToken (mountId: number, relPath: string): string
+  verifyRawToken (mountId: number, relPath: string, token: string): boolean
   mintTrackerToken (infoHash: string, ttlMs?: number): string
   verifyTrackerToken (infoHash: string, token: string): boolean
 }
@@ -143,10 +144,10 @@ export function createAuthService (db: AuthDb): AuthService {
       db.deleteAllUserSessions(userId)
     },
 
-    mintRawToken: relPath =>
-      mintSignedToken(secret, `raw:${relPath}`, TRANSFER_TOKEN_TTL_MS),
-    verifyRawToken: (relPath, token) =>
-      verifySignedToken(secret, `raw:${relPath}`, token),
+    mintRawToken: (mountId, relPath) =>
+      mintSignedToken(secret, `raw:${mountId}:${relPath}`, TRANSFER_TOKEN_TTL_MS),
+    verifyRawToken: (mountId, relPath, token) =>
+      verifySignedToken(secret, `raw:${mountId}:${relPath}`, token),
     mintTrackerToken: (infoHash, ttlMs = TRANSFER_TOKEN_TTL_MS) =>
       mintSignedToken(secret, `tracker:${infoHash}`, ttlMs),
     verifyTrackerToken: (infoHash, token) =>

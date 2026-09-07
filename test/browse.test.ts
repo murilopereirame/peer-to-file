@@ -1,4 +1,4 @@
-import { test, before, after } from 'node:test'
+import { test, before, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -211,7 +211,7 @@ test('deleteEntry unlinks a symlink to a directory without touching its contents
 test('moveEntry renames a file in place', async () => {
   const mroot = await makeMutableRoot()
   try {
-    const result = await moveEntry(mroot, 'a.txt', 'renamed.txt')
+    const result = await moveEntry(mroot, 'a.txt', mroot, 'renamed.txt')
     assert.equal(result.toRel, 'renamed.txt')
     await assert.rejects(fs.stat(path.join(mroot, 'a.txt')))
     assert.equal(await fs.readFile(path.join(mroot, 'renamed.txt'), 'utf8'), 'hello')
@@ -223,7 +223,7 @@ test('moveEntry renames a file in place', async () => {
 test('moveEntry moves a file into another folder', async () => {
   const mroot = await makeMutableRoot()
   try {
-    const result = await moveEntry(mroot, 'a.txt', 'sub/a.txt')
+    const result = await moveEntry(mroot, 'a.txt', mroot, 'sub/a.txt')
     assert.equal(result.toRel, path.join('sub', 'a.txt'))
     assert.equal(await fs.readFile(path.join(mroot, 'sub', 'a.txt'), 'utf8'), 'hello')
   } finally {
@@ -235,7 +235,7 @@ test('moveEntry refuses to overwrite an existing entry', async () => {
   const mroot = await makeMutableRoot()
   try {
     await fs.writeFile(path.join(mroot, 'taken.txt'), 'already here')
-    await expectStatus(moveEntry(mroot, 'a.txt', 'taken.txt'), 409)
+    await expectStatus(moveEntry(mroot, 'a.txt', mroot, 'taken.txt'), 409)
   } finally {
     await fs.rm(mroot, { recursive: true, force: true })
   }
@@ -244,7 +244,7 @@ test('moveEntry refuses to overwrite an existing entry', async () => {
 test('moveEntry refuses to move a folder into its own subtree', async () => {
   const mroot = await makeMutableRoot()
   try {
-    await expectStatus(moveEntry(mroot, 'sub', 'sub/nested'), 400)
+    await expectStatus(moveEntry(mroot, 'sub', mroot, 'sub/nested'), 400)
   } finally {
     await fs.rm(mroot, { recursive: true, force: true })
   }
@@ -253,9 +253,9 @@ test('moveEntry refuses to move a folder into its own subtree', async () => {
 test('moveEntry refuses to move the shared root and rejects traversal', async () => {
   const mroot = await makeMutableRoot()
   try {
-    await expectStatus(moveEntry(mroot, '', 'elsewhere'), 400)
-    await expectStatus(moveEntry(mroot, 'a.txt', '../escape.txt'), 403)
-    await expectStatus(moveEntry(mroot, '../escape.txt', 'a.txt'), 403)
+    await expectStatus(moveEntry(mroot, '', mroot, 'elsewhere'), 400)
+    await expectStatus(moveEntry(mroot, 'a.txt', mroot, '../escape.txt'), 403)
+    await expectStatus(moveEntry(mroot, '../escape.txt', mroot, 'a.txt'), 403)
   } finally {
     await fs.rm(mroot, { recursive: true, force: true })
   }
@@ -265,7 +265,7 @@ test('moveEntry renames a symlink itself, leaving its target where it was', asyn
   const mroot = await makeMutableRoot()
   try {
     await fs.symlink(path.join(mroot, 'a.txt'), path.join(mroot, 'link.txt'))
-    const result = await moveEntry(mroot, 'link.txt', 'renamed-link.txt')
+    const result = await moveEntry(mroot, 'link.txt', mroot, 'renamed-link.txt')
     assert.equal(result.toRel, 'renamed-link.txt')
     await assert.rejects(fs.lstat(path.join(mroot, 'link.txt')))
     const st = await fs.lstat(path.join(mroot, 'renamed-link.txt'))
@@ -274,6 +274,94 @@ test('moveEntry renames a symlink itself, leaving its target where it was', asyn
     assert.equal(await fs.readFile(path.join(mroot, 'a.txt'), 'utf8'), 'hello')
   } finally {
     await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry moves a file across two different roots', async () => {
+  const fromRoot = await makeMutableRoot()
+  const toRoot = await makeMutableRoot()
+  try {
+    const result = await moveEntry(fromRoot, 'a.txt', toRoot, 'moved.txt')
+    assert.equal(result.fromRel, 'a.txt')
+    assert.equal(result.toRel, 'moved.txt')
+    await assert.rejects(fs.stat(path.join(fromRoot, 'a.txt')))
+    assert.equal(await fs.readFile(path.join(toRoot, 'moved.txt'), 'utf8'), 'hello')
+  } finally {
+    await fs.rm(fromRoot, { recursive: true, force: true })
+    await fs.rm(toRoot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry across two roots does not treat the destination root as inside the source', async () => {
+  // The "cannot move a folder into itself" guard only applies within a
+  // single root — moving `sub` from fromRoot into toRoot's root is a
+  // perfectly normal cross-mount move, not a self-containment error.
+  const fromRoot = await makeMutableRoot()
+  const toRoot = await makeMutableRoot()
+  try {
+    const result = await moveEntry(fromRoot, 'sub', toRoot, 'sub-moved')
+    assert.equal(result.toRel, 'sub-moved')
+    assert.equal(await fs.readFile(path.join(toRoot, 'sub-moved', 'b.txt'), 'utf8'), 'world!')
+  } finally {
+    await fs.rm(fromRoot, { recursive: true, force: true })
+    await fs.rm(toRoot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry across two roots still refuses to overwrite an existing destination entry', async () => {
+  const fromRoot = await makeMutableRoot()
+  const toRoot = await makeMutableRoot()
+  try {
+    await fs.writeFile(path.join(toRoot, 'taken.txt'), 'already here')
+    await expectStatus(moveEntry(fromRoot, 'a.txt', toRoot, 'taken.txt'), 409)
+  } finally {
+    await fs.rm(fromRoot, { recursive: true, force: true })
+    await fs.rm(toRoot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry falls back to copy+remove when rename reports EXDEV (a genuine cross-filesystem move)', async () => {
+  const fromRoot = await makeMutableRoot()
+  const toRoot = await makeMutableRoot()
+  const rename = mock.method(fs, 'rename', async () => {
+    const err = new Error('cross-device link') as NodeJS.ErrnoException
+    err.code = 'EXDEV'
+    throw err
+  })
+  try {
+    const result = await moveEntry(fromRoot, 'sub', toRoot, 'sub-copied')
+    assert.equal(result.toRel, 'sub-copied')
+    // source is gone, destination has the full recursive contents
+    await assert.rejects(fs.stat(path.join(fromRoot, 'sub')))
+    assert.equal(await fs.readFile(path.join(toRoot, 'sub-copied', 'b.txt'), 'utf8'), 'world!')
+  } finally {
+    rename.mock.restore()
+    await fs.rm(fromRoot, { recursive: true, force: true })
+    await fs.rm(toRoot, { recursive: true, force: true })
+  }
+})
+
+test('moveEntry cleans up a partial copy if the EXDEV fallback itself fails', async () => {
+  const fromRoot = await makeMutableRoot()
+  const toRoot = await makeMutableRoot()
+  const rename = mock.method(fs, 'rename', async () => {
+    const err = new Error('cross-device link') as NodeJS.ErrnoException
+    err.code = 'EXDEV'
+    throw err
+  })
+  const cp = mock.method(fs, 'cp', async () => {
+    throw new Error('disk full')
+  })
+  try {
+    await assert.rejects(moveEntry(fromRoot, 'a.txt', toRoot, 'copied.txt'))
+    // no partial file left at the destination, and the source is untouched
+    await assert.rejects(fs.stat(path.join(toRoot, 'copied.txt')))
+    assert.equal(await fs.readFile(path.join(fromRoot, 'a.txt'), 'utf8'), 'hello')
+  } finally {
+    cp.mock.restore()
+    rename.mock.restore()
+    await fs.rm(fromRoot, { recursive: true, force: true })
+    await fs.rm(toRoot, { recursive: true, force: true })
   }
 })
 

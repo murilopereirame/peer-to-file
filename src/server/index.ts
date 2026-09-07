@@ -66,6 +66,13 @@ export async function startServer (
 ): Promise<RunningServer> {
   const db = new AuthDb(config.dbPath)
   db.pruneExpiredSessions()
+  // The default mount always tracks the current P2F_ROOT — created on first
+  // boot, kept in sync on every later one, so an operator changing the env
+  // var doesn't have to also touch the database (see db.ts's
+  // ensureDefaultMount). Every authenticated user can browse it, matching
+  // this tool's original single-root behavior; additional mounts are opt-in,
+  // managed by an admin via /api/admin/mounts.
+  db.ensureDefaultMount(config.root)
   const auth = createAuthService(db)
   const activity = createActivityLog()
 

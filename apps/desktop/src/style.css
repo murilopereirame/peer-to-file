@@ -177,6 +177,16 @@ a { color: var(--accent); text-decoration: none; }
 .sidebar-brand strong { font-size: 1rem; }
 .sidebar-brand .tagline { display: block; font-size: .68rem; color: var(--fg-subtle); }
 
+.mount-switcher { padding: 0 .85rem .6rem; display: flex; flex-direction: column; gap: .3rem; }
+.mount-switcher label {
+  font-size: .68rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.mount-switcher select { height: 1.9rem; font-size: .82rem; }
+
 .sidebar-nav { flex: 1; overflow-y: auto; padding: .5rem; display: flex; flex-direction: column; gap: .15rem; }
 
 .nav-item {
@@ -346,6 +356,18 @@ select.input { cursor: pointer; }
 .card-head .muted-count { color: var(--fg-subtle); font-weight: 400; font-size: .8rem; }
 .card-body { padding: 1rem; }
 
+.admin-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  padding: .65rem 0;
+  border-top: 1px solid var(--line-soft);
+}
+.admin-row:first-child { border-top: none; }
+.admin-row-main { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+
 .title { font-size: 1.05rem; font-weight: 700; margin: 0 0 .6rem; }
 .muted { color: var(--fg-muted); font-size: .82rem; margin: .15rem 0 0; }
 .error-text { color: var(--negative); font-size: .82rem; margin-top: .4rem; }
@@ -409,6 +431,27 @@ select.input { cursor: pointer; }
   flex-wrap: wrap;
 }
 .browser-toolbar .toolbar-actions { display: flex; align-items: center; gap: .4rem; margin-left: auto; }
+
+.search-field { position: relative; flex: 1; min-width: 12rem; max-width: 22rem; }
+.search-field .search-icon {
+  position: absolute;
+  left: .6rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg-muted);
+  pointer-events: none;
+}
+.search-field input {
+  width: 100%;
+  height: 2.1rem;
+  padding: 0 .7rem 0 2rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--raise);
+  color: var(--foreground);
+  transition: border-color .15s, box-shadow .15s;
+}
+.search-field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
 
 .breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: .1rem; font-size: .85rem; min-width: 0; }
 .breadcrumbs a, .breadcrumbs button {

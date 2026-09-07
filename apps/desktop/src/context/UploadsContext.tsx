@@ -22,7 +22,7 @@ export interface UploadEntry {
 
 interface Ctx {
   uploads: UploadEntry[]
-  start: (destDir: string, file: File, onSettled?: () => void) => void
+  start: (destDir: string, file: File, onSettled?: () => void, mountId?: number) => void
   remove: (id: string) => void
 }
 
@@ -54,7 +54,7 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
   // generated per upload, then ECDH-wrapped so the wire never carries the
   // key either) — see the doc comment on the /api/upload handler in
   // src/server/app.ts and packages/shared/src/browserCrypto.ts.
-  const start = useCallback((destDir: string, file: File, onSettled?: () => void) => {
+  const start = useCallback((destDir: string, file: File, onSettled?: () => void, mountId?: number) => {
     const client = app.client
     if (!client) return
     const id = `${destDir}/${file.name}#${Date.now()}`
@@ -84,7 +84,7 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
       const keyWrap = await establishKeyWrap(serverPublicKey)
       return encryptFileForUpload(file, keyWrap)
     })()
-      .then(async ({ body, headers }) => ipcFetchWithProgress(client.uploadUrl(destDir, file.name), {
+      .then(async ({ body, headers }) => ipcFetchWithProgress(client.uploadUrl(destDir, file.name, mountId), {
         method: 'POST',
         // X-P2F-Csrf: F5 CSRF guard on cookie-authenticated mutations.
         headers: { 'Content-Type': 'application/octet-stream', 'X-P2F-Csrf': '1', ...headers },

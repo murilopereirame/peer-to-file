@@ -198,21 +198,33 @@ export async function deleteEntry (root: string, relPath: unknown): Promise<{ ab
 }
 
 /**
- * Moves (or renames) a file, directory or symlink inside the root. Refuses
- * to overwrite an existing entry — though, like a plain `mv`, that check
- * and the rename itself are not one atomic step, so a concurrent request
- * racing for the exact same destination path could still overwrite it; on a
- * single-admin tool that's an acceptable, narrow window.
+ * Moves (or renames) a file, directory or symlink from `fromRoot` to
+ * `toRoot` — the same root for an ordinary same-mount move/rename, or two
+ * different mounts' roots for a cross-mount move. Refuses to overwrite an
+ * existing entry — though, like a plain `mv`, that check and the move
+ * itself are not one atomic step, so a concurrent request racing for the
+ * exact same destination path could still overwrite it; on a single-admin
+ * tool that's an acceptable, narrow window.
+ *
+ * `fs.rename` is tried first — instant and atomic when it works, which
+ * covers every same-mount move and any cross-mount move that happens to
+ * land on the same underlying filesystem. It fails with EXDEV when the
+ * source and destination are genuinely on different filesystems (always
+ * true across two independently admin-configured mounts, unless they
+ * happen to share a device); the fallback there is a recursive copy
+ * followed by removing the source — not atomic, so a crash mid-move can
+ * leave both a partial copy and the original behind, but there is no
+ * general-purpose atomic move across filesystems to fall back to.
  */
 export async function moveEntry (
-  root: string, fromRelPath: unknown, toRelPath: unknown
+  fromRoot: string, fromRelPath: unknown, toRoot: string, toRelPath: unknown
 ): Promise<{ fromAbs: string, fromRel: string, toAbs: string, toRel: string }> {
-  const fromAbs = await resolveEntryInsideRoot(root, fromRelPath)
-  if (fromAbs === root) {
+  const fromAbs = await resolveEntryInsideRoot(fromRoot, fromRelPath)
+  if (fromAbs === fromRoot) {
     throw new BrowseError(400, 'cannot move the shared root')
   }
-  const toAbs = await resolveNewPathInsideRoot(root, toRelPath)
-  if (isInside(fromAbs, toAbs)) {
+  const toAbs = await resolveNewPathInsideRoot(toRoot, toRelPath)
+  if (fromRoot === toRoot && isInside(fromAbs, toAbs)) {
     throw new BrowseError(400, 'cannot move a folder into itself')
   }
   const exists = await fs.lstat(toAbs).then(() => true, () => false)
@@ -222,9 +234,23 @@ export async function moveEntry (
   try {
     await fs.rename(fromAbs, toAbs)
   } catch (err) {
-    throwIfPermissionError(err)
+    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throwIfPermissionError(err)
+    try {
+      // Copies a symlink as a symlink (fs.cp's default — it does not
+      // dereference), matching how delete/move already treat a symlink
+      // entry itself rather than whatever it points to.
+      await fs.cp(fromAbs, toAbs, { recursive: true, errorOnExist: true })
+    } catch (copyErr) {
+      await fs.rm(toAbs, { recursive: true, force: true }) // clean up a partial copy
+      throwIfPermissionError(copyErr)
+    }
+    try {
+      await fs.rm(fromAbs, { recursive: true, force: false })
+    } catch (rmErr) {
+      throwIfPermissionError(rmErr)
+    }
   }
-  return { fromAbs, fromRel: path.relative(root, fromAbs), toAbs, toRel: path.relative(root, toAbs) }
+  return { fromAbs, fromRel: path.relative(fromRoot, fromAbs), toAbs, toRel: path.relative(toRoot, toAbs) }
 }
 
 /** Creates a new, empty directory inside the root. Refuses to overwrite an existing entry. */

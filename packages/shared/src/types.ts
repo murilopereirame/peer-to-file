@@ -10,6 +10,56 @@ export interface Listing {
   entries: DirEntry[]
 }
 
+export type Role = 'user' | 'admin'
+
+/** A filesystem root the server shares. See src/server/db.ts's Mount. */
+export interface MountInfo {
+  id: number
+  name: string
+  isDefault: boolean
+  /** Only present for an admin caller — the path itself isn't needed to browse it. */
+  path?: string
+}
+
+export interface MountAccessEntry {
+  user_id: number
+  username: string
+  granted_at: number
+}
+
+/** Admin-only view of a mount, including who has access to it. */
+export interface AdminMount {
+  id: number
+  name: string
+  path: string
+  isDefault: boolean
+  createdAt: number
+  access: MountAccessEntry[]
+}
+
+export interface AdminUser {
+  id: number
+  username: string
+  role: Role
+  createdAt: number
+}
+
+export interface SearchHit {
+  path: string
+  name: string
+  type: 'dir' | 'file'
+  size: number | null
+  mtime: number
+  mount: { id: number, name: string }
+}
+
+export interface SearchResponse {
+  query: string
+  results: SearchHit[]
+  /** True when the result set may be incomplete (hit the limit, or a scan budget on a huge tree). */
+  truncated: boolean
+}
+
 export interface AuthInfo {
   required: boolean
   needsSetup: boolean

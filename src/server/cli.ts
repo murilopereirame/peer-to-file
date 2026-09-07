@@ -1,11 +1,17 @@
-// User / API-token management CLI.
+// User / API-token / mount management CLI.
 //
 //   node src/server/cli.ts add-user <username>     (password prompted, or P2F_PASSWORD)
 //   node src/server/cli.ts del-user <username>
 //   node src/server/cli.ts list-users
+//   node src/server/cli.ts set-role <username> <user|admin>
 //   node src/server/cli.ts add-token <username> [name] [--ttl <dur>]  (token printed once)
 //   node src/server/cli.ts list-tokens [username]
 //   node src/server/cli.ts del-token <id>
+//   node src/server/cli.ts list-mounts
+//   node src/server/cli.ts add-mount <name> <path>
+//   node src/server/cli.ts del-mount <name>
+//   node src/server/cli.ts grant-mount <name> <username>
+//   node src/server/cli.ts revoke-mount <name> <username>
 //
 // --ttl accepts a duration like 90d, 12h, 30m, or 'never' (0 = never). When
 // omitted, tokens default to a finite 90-day lifetime (F9).
@@ -16,6 +22,7 @@
 import readline from 'node:readline'
 import { Writable } from 'node:stream'
 import { AuthDb } from './db.ts'
+import { resolveDirectory } from './config.ts'
 
 const dbPath = process.env.P2F_DB || './p2f.db'
 
@@ -26,9 +33,15 @@ function usage (): never {
   cli.ts add-user <username>       create a user (password from prompt or P2F_PASSWORD)
   cli.ts del-user <username>       delete a user (and their sessions/tokens)
   cli.ts list-users                list users
+  cli.ts set-role <username> <user|admin>   change a user's role
   cli.ts add-token <username> [name] [--ttl <dur>]  create an API token (printed once)
   cli.ts list-tokens [username]    list API tokens
   cli.ts del-token <id>            delete an API token
+  cli.ts list-mounts                        list mounts and who has access
+  cli.ts add-mount <name> <path>            share an extra directory as a mount
+  cli.ts del-mount <name>                   remove a (non-default) mount
+  cli.ts grant-mount <name> <username>      give a user access to a mount
+  cli.ts revoke-mount <name> <username>     take away a user's access to a mount
 
   --ttl <dur>   token lifetime: e.g. 90d, 12h, 30m, or 'never' (default 90d)
 
@@ -93,8 +106,23 @@ try {
     }
     case 'list-users': {
       for (const u of db.listUsers()) {
-        console.log(`${u.id}\t${u.username}\tcreated ${new Date(u.created_at).toISOString()}`)
+        console.log(`${u.id}\t${u.username}\t${u.role}\tcreated ${new Date(u.created_at).toISOString()}`)
       }
+      break
+    }
+    case 'set-role': {
+      if (!arg1 || (arg2 !== 'user' && arg2 !== 'admin')) usage()
+      const target = db.getUserByUsername(arg1)
+      if (!target) {
+        console.error(`no such user: ${arg1}`)
+        process.exit(1)
+      }
+      if (target.role === 'admin' && arg2 === 'user' && db.countAdmins() <= 1) {
+        console.error('cannot demote the last remaining admin')
+        process.exit(1)
+      }
+      db.setUserRole(target.id, arg2)
+      console.log(`${arg1} is now ${arg2}`)
       break
     }
     case 'add-token': {
@@ -121,6 +149,73 @@ try {
     case 'del-token': {
       if (!arg1) usage()
       console.log(db.deleteApiToken(Number(arg1)) ? `token ${arg1} deleted` : `no such token: ${arg1}`)
+      break
+    }
+    case 'list-mounts': {
+      for (const m of db.listMounts()) {
+        const access = db.listMountAccess(m.id).map(a => a.username).join(', ')
+        const scope = m.is_default ? 'everyone (default)' : (access || 'nobody yet')
+        console.log(`${m.id}\t${m.name}\t${m.path}\t${scope}`)
+      }
+      break
+    }
+    case 'add-mount': {
+      if (!arg1 || !arg2) usage()
+      let resolved: string
+      try {
+        resolved = resolveDirectory(arg2)
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err))
+        process.exit(1)
+      }
+      if (db.getMountByName(arg1)) {
+        console.error(`a mount named "${arg1}" already exists`)
+        process.exit(1)
+      }
+      try {
+        db.createMount(arg1, resolved, null)
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err))
+        process.exit(1)
+      }
+      console.log(`mount "${arg1}" created: ${resolved}`)
+      break
+    }
+    case 'del-mount': {
+      if (!arg1) usage()
+      const mount = db.getMountByName(arg1)
+      if (!mount) {
+        console.error(`no such mount: ${arg1}`)
+        process.exit(1)
+      }
+      if (mount.is_default) {
+        console.error('cannot remove the default mount')
+        process.exit(1)
+      }
+      db.deleteMount(mount.id)
+      console.log(`mount "${arg1}" removed`)
+      break
+    }
+    case 'grant-mount':
+    case 'revoke-mount': {
+      if (!arg1 || !arg2) usage()
+      const mount = db.getMountByName(arg1)
+      if (!mount) {
+        console.error(`no such mount: ${arg1}`)
+        process.exit(1)
+      }
+      const user = db.getUserByUsername(arg2)
+      if (!user) {
+        console.error(`no such user: ${arg2}`)
+        process.exit(1)
+      }
+      if (command === 'grant-mount') {
+        db.grantMountAccess(mount.id, user.id)
+        console.log(`granted "${arg2}" access to mount "${arg1}"`)
+      } else {
+        db.revokeMountAccess(mount.id, user.id)
+        console.log(`revoked "${arg2}"'s access to mount "${arg1}"`)
+      }
       break
     }
     default:

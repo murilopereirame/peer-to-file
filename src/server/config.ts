@@ -90,6 +90,27 @@ function parsePort (value: string | undefined, fallback: number): number {
 }
 
 /**
+ * Resolves and validates a directory to be shared: must exist, must be a
+ * directory, and comes back symlink-resolved (realpath) so later
+ * containment checks (browse.ts's isInside) compare like with like. Shared
+ * by P2F_ROOT (below) and admin-created mounts (see app.ts's
+ * POST /api/admin/mounts) — the same rules apply to both.
+ */
+export function resolveDirectory (inputPath: string, label = 'directory'): string {
+  const resolved = path.resolve(inputPath)
+  let real: string
+  try {
+    real = fs.realpathSync(resolved)
+  } catch {
+    throw new Error(`${label} does not exist: ${resolved}`)
+  }
+  if (!fs.statSync(real).isDirectory()) {
+    throw new Error(`${label} is not a directory: ${real}`)
+  }
+  return real
+}
+
+/**
  * Load configuration from environment variables:
  *
  *   P2F_ROOT         directory to serve (default ./data)
@@ -110,16 +131,7 @@ function parsePort (value: string | undefined, fallback: number): number {
  *   P2F_TRUST_PROXY  'on'/'off' (default off) — trust X-Forwarded-* from a proxy
  */
 export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
-  const rootInput = path.resolve(env.P2F_ROOT || './data')
-  let root: string
-  try {
-    root = fs.realpathSync(rootInput)
-  } catch {
-    throw new Error(`P2F_ROOT directory does not exist: ${rootInput}`)
-  }
-  if (!fs.statSync(root).isDirectory()) {
-    throw new Error(`P2F_ROOT is not a directory: ${root}`)
-  }
+  const root = resolveDirectory(env.P2F_ROOT || './data', 'P2F_ROOT directory')
 
   return {
     root,

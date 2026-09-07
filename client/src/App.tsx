@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiContext } from './context/ApiContext'
+import { MountProvider } from './context/MountContext'
 import { ToastProvider } from './context/ToastContext'
 import { UploadsProvider } from './context/UploadsContext'
 import { HttpError, errMessage } from './lib/format'
@@ -132,10 +133,12 @@ export function App (): React.JSX.Element {
         <UploadsProvider>
           {view === 'browser'
             ? (
-              <BrowserApp
-                manager={manager} downloads={downloads} doneCount={doneCount}
-                authed={authed} onLogout={handleLogout} status={status} onRetry={retry}
-              />
+              <MountProvider>
+                <BrowserApp
+                  manager={manager} downloads={downloads} doneCount={doneCount}
+                  authed={authed} onLogout={handleLogout} status={status} onRetry={retry}
+                />
+              </MountProvider>
               )
             : (
               <AuthLayout status={status} onRetry={retry}>

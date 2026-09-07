@@ -8,27 +8,30 @@ import { setSystemKeepAwake } from '../lib/electronApi'
 import { useSpeedHistory } from '../hooks/useSpeedHistory'
 import { ConnectionBadge } from '../components/ConnectionBadge'
 import {
-  ActivityIcon, ArrowDownIcon, ArrowUpIcon, FolderIcon, HistoryIcon, SettingsIcon, TerminalIcon
+  ActivityIcon, ArrowDownIcon, ArrowUpIcon, FolderIcon, HistoryIcon, ShieldIcon, SettingsIcon, TerminalIcon
 } from '../components/icons'
 import { BrowserScreen } from './BrowserScreen'
 import { DownloadsScreen } from './DownloadsScreen'
 import { HistoryScreen } from './HistoryScreen'
 import { LogsScreen } from './LogsScreen'
 import { SettingsScreen } from './SettingsScreen'
+import { AdminScreen } from './AdminScreen'
 
-type Tab = 'browse' | 'transfers' | 'history' | 'logs' | 'settings'
+type Tab = 'browse' | 'transfers' | 'history' | 'logs' | 'settings' | 'admin'
 
-const TABS: Array<{ key: Tab, label: string, Icon: typeof FolderIcon, subtitle: string }> = [
+const TABS: Array<{ key: Tab, label: string, Icon: typeof FolderIcon, subtitle: string, adminOnly?: boolean }> = [
   { key: 'browse', label: 'Browse', Icon: FolderIcon, subtitle: 'The server\'s shared folder' },
   { key: 'transfers', label: 'Transfers', Icon: ActivityIcon, subtitle: 'Downloads and uploads in flight' },
   { key: 'history', label: 'History', Icon: HistoryIcon, subtitle: 'Transfers this server has finished' },
-  { key: 'logs', label: 'Logs', Icon: TerminalIcon, subtitle: 'Live server activity' },
+  // Server activity carries other users' IPs/usernames/paths — admin-only (F4/item 14).
+  { key: 'logs', label: 'Logs', Icon: TerminalIcon, subtitle: 'Live server activity', adminOnly: true },
   { key: 'settings', label: 'Settings', Icon: SettingsIcon, subtitle: 'Server, downloads and appearance' }
 ]
 
 function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => void }): React.JSX.Element {
   const { downloads } = useDownloads()
   const { uploads } = useUploads()
+  const app = useApp()
   const busyCount =
     downloads.filter(d => d.status === 'downloading' || d.status === 'paused' || d.status === 'preparing').length +
     uploads.filter(u => u.status === 'running').length
@@ -46,8 +49,22 @@ function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => voi
         </div>
       </div>
 
+      {app.mounts.length > 1 && (
+        <div className="mount-switcher">
+          <label htmlFor="mount-select">Mount</label>
+          <select
+            id="mount-select" className="input" value={app.activeMountId ?? ''}
+            onChange={e => app.setActiveMountId(Number(e.target.value))}
+          >
+            {app.mounts.map(m => (
+              <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' (default)' : ''}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <nav className="sidebar-nav" aria-label="views">
-        {TABS.map(({ key, label, Icon }) => (
+        {TABS.filter(t => !t.adminOnly || app.role === 'admin').map(({ key, label, Icon }) => (
           <button
             key={key}
             type="button"
@@ -59,6 +76,17 @@ function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => voi
             {key === 'transfers' && busyCount > 0 && <span className="count">{busyCount}</span>}
           </button>
         ))}
+        {app.role === 'admin' && (
+          <button
+            key="admin"
+            type="button"
+            className={`nav-item${active === 'admin' ? ' active' : ''}`}
+            aria-current={active === 'admin' ? 'page' : undefined}
+            onClick={() => onChange('admin')}
+          >
+            <span className="nav-label"><ShieldIcon />Admin</span>
+          </button>
+        )}
       </nav>
 
       <div className="sidebar-footer">
@@ -125,7 +153,9 @@ function useTransferSpeeds (): { downSpeed: number, upSpeed: number } {
 }
 
 function TopBar ({ tab, downSpeed, upSpeed }: { tab: Tab, downSpeed: number, upSpeed: number }): React.JSX.Element {
-  const meta = TABS.find(t => t.key === tab)
+  const meta = tab === 'admin'
+    ? { label: 'Admin', subtitle: 'Manage users, mounts and access' }
+    : TABS.find(t => t.key === tab)
 
   return (
     <div className="topbar">
@@ -168,6 +198,7 @@ function Shell (): React.JSX.Element {
             {tab === 'history' && <HistoryScreen />}
             {tab === 'logs' && <LogsScreen />}
             {tab === 'settings' && <SettingsScreen />}
+            {tab === 'admin' && <AdminScreen />}
           </div>
         </main>
       </div>
