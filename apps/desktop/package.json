@@ -1,6 +1,6 @@
 {
   "name": "p2file-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "peer-to-file desktop client",
   "homepage": "https://github.com/murilopereirame/peer-to-file",
@@ -47,17 +47,24 @@
     ],
     "mac": {
       "icon": "icon-source.png",
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "hardenedRuntime": false,
       "gatekeeperAssess": false
     },
     "win": {
       "icon": "icon-source.png",
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "linux": {
       "icon": "icon-source.png",
-      "target": ["deb", "AppImage"],
+      "target": [
+        "deb",
+        "AppImage"
+      ],
       "category": "Network"
     }
   },
