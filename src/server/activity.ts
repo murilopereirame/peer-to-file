@@ -6,7 +6,7 @@
  * no database or file I/O.
  */
 
-export type LogKind = 'auth' | 'browse' | 'torrent' | 'webseed' | 'tracker' | 'connection' | 'server'
+export type LogKind = 'auth' | 'browse' | 'torrent' | 'webseed' | 'tracker' | 'connection' | 'server' | 'admin'
 
 export interface LogEntry {
   id: number

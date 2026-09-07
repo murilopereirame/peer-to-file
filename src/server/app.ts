@@ -9,6 +9,7 @@ import {
   BrowseError, createFolder, deleteEntry, listDir, moveEntry, resolveInsideRoot, resolveUploadTarget,
   throwIfPermissionError
 } from './browse.ts'
+import { clampSearchLimit, searchTree, type SearchHit } from './search.ts'
 import { renderTorrent, type TorrentStore } from './torrents.ts'
 import {
   SESSION_COOKIE, REFRESH_COOKIE, REFRESH_PATH, ACCESS_TTL_MS, REFRESH_TTL_MS,
@@ -16,9 +17,9 @@ import {
 } from './auth.ts'
 import { createDebouncer, type ActivityLog } from './activity.ts'
 import { createFixedWindowLimiter, createTokenBucketLimiter } from './rateLimit.ts'
-import type { Config } from './config.ts'
+import { resolveDirectory, type Config } from './config.ts'
 import type { Seeder } from './seeder.ts'
-import type { AuthDb } from './db.ts'
+import type { AuthDb, Mount, Role, User } from './db.ts'
 import type { CipherKeys } from './cipherKeys.ts'
 import { KeyExchangeError, type KeyExchange } from './keyExchange.ts'
 import type { Logger } from './log.ts'
@@ -101,6 +102,44 @@ const wrap = (fn: AsyncHandler) =>
   (req: Request, res: Response, next: NextFunction) => {
     fn(req, res).catch(next)
   }
+
+/** The authenticated user set by the auth gate below — every route past it can rely on this being present. */
+const authedUser = (res: Response): User => (res.locals as { user: User }).user
+
+/**
+ * Resolves a `mount` request parameter (an id, a name, or absent) to a Mount
+ * row. Accepts either query (`?mount=`) or JSON body (`{ mount }`) —
+ * different routes carry it differently (GETs vs. JSON POSTs vs. the
+ * query-only upload/raw endpoints). Absent means "the default mount", so
+ * every pre-multi-mount client and script keeps working unchanged.
+ */
+function mountParamFromReq (req: Request): string | undefined {
+  if (typeof req.query.mount === 'string') return req.query.mount
+  const body = req.body as { mount?: unknown } | undefined
+  if (typeof body?.mount === 'string') return body.mount
+  return undefined
+}
+
+function findMount (db: AuthDb, mountParam: string | undefined): Mount {
+  if (mountParam === undefined || mountParam === '') {
+    const mount = db.getDefaultMount()
+    if (!mount) throw new BrowseError(500, 'no default mount configured')
+    return mount
+  }
+  const mount = (/^\d+$/.test(mountParam) ? db.getMountById(Number(mountParam)) : null) ?? db.getMountByName(mountParam)
+  if (!mount) throw new BrowseError(404, 'no such mount')
+  return mount
+}
+
+/** Resolves the mount a request targets and enforces the requester's access to it. */
+function resolveMountForRequest (db: AuthDb, req: Request, res: Response): Mount {
+  const user = authedUser(res)
+  const mount = findMount(db, mountParamFromReq(req))
+  if (!db.hasMountAccess(mount, user.id, user.role === 'admin')) {
+    throw new BrowseError(403, 'no access to this mount')
+  }
+  return mount
+}
 
 export function createApp ({ config, store, seeder, auth, activity, db, cipherKeys, keyExchange, version, log, setupToken }: AppDeps): Express {
   const app = express()
@@ -285,10 +324,18 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
   app.get('/api/raw', wrap(async (req, res) => {
     const relQuery = typeof req.query.path === 'string' ? req.query.path : ''
     const token = typeof req.query.t === 'string' ? req.query.t : ''
-    if (!auth.verifyRawToken(relQuery, token) && auth.authenticate(req) === null) {
-      throw new BrowseError(401, 'authentication required')
+    const mount = findMount(db, mountParamFromReq(req))
+    if (!auth.verifyRawToken(mount.id, relQuery, token)) {
+      // No valid mount-bound token — fall back to a normal authenticated
+      // session/bearer token, but that alone only proves *who*, not access
+      // to *this* mount, so check it explicitly.
+      const authResult = auth.authenticate(req)
+      if (!authResult) throw new BrowseError(401, 'authentication required')
+      if (!db.hasMountAccess(mount, authResult.user.id, authResult.user.role === 'admin')) {
+        throw new BrowseError(403, 'no access to this mount')
+      }
     }
-    const abs = await resolveInsideRoot(config.root, relQuery)
+    const abs = await resolveInsideRoot(mount.path, relQuery)
     const st = await fs.stat(abs)
     if (!st.isFile()) throw new BrowseError(400, 'not a file')
     if (webseedLogOnce(`${req.ip}:${relQuery}`)) {
@@ -362,6 +409,16 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     next()
   })
 
+  // Gate for the /api/admin/* routes below: the CSRF/auth middleware above
+  // has already run, so res.locals.user is set — just check its role.
+  const requireAdmin = (req: Request, res: Response, next: NextFunction): void => {
+    if (authedUser(res).role !== 'admin') {
+      res.status(403).json({ error: 'admin role required' })
+      return
+    }
+    next()
+  }
+
   app.post('/api/logout', (req, res) => {
     const cookies = parseCookies(req.headers.cookie)
     auth.logout(cookies[SESSION_COOKIE] ?? '', cookies[REFRESH_COOKIE] ?? '')
@@ -383,8 +440,8 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
   })
 
   app.get('/api/me', (req, res) => {
-    const user = (res.locals as { user?: { username: string } }).user
-    res.json({ username: user?.username ?? null })
+    const user = (res.locals as { user?: User }).user
+    res.json({ username: user?.username ?? null, role: user?.role ?? null })
   })
 
   app.get('/api/logs', (req, res) => {
@@ -453,38 +510,200 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     res.json({ ok: true })
   })
 
+  // Mounts the caller may browse — the default mount plus any explicitly
+  // granted, or every mount for an admin. Listed first so clients can build a
+  // mount switcher / know what to pass as `mount` on the routes below.
+  app.get('/api/mounts', (req, res) => {
+    const user = authedUser(res)
+    const isAdmin = user.role === 'admin'
+    const mounts = db.listMountsForUser(user.id, isAdmin)
+    res.json({
+      mounts: mounts.map(m => ({
+        id: m.id, name: m.name, isDefault: m.is_default,
+        // The path itself is only useful (and only ever needed) for the
+        // admin UI that manages mounts — regular browsing only needs id/name.
+        ...(isAdmin ? { path: m.path } : {})
+      }))
+    })
+  })
+
   app.get('/api/list', wrap(async (req, res) => {
-    res.json(await listDir(config.root, req.query.path ?? ''))
+    const mount = resolveMountForRequest(db, req, res)
+    res.json(await listDir(mount.path, req.query.path ?? ''))
   }))
 
   app.post('/api/delete', jsonBody, wrap(async (req, res) => {
+    const mount = resolveMountForRequest(db, req, res)
     const { path: relPath } = (req.body ?? {}) as { path?: unknown }
-    const { rel, wasDir } = await deleteEntry(config.root, relPath)
+    const { rel, wasDir } = await deleteEntry(mount.path, relPath)
     const requester = (res.locals as { user?: { username: string } }).user
-    activity.add('browse', `deleted ${wasDir ? 'folder' : 'file'} "${rel}"${requester ? ` by ${requester.username}` : ''}`, {
-      path: rel, user: requester?.username, ip: req.ip
+    activity.add('browse', `deleted ${wasDir ? 'folder' : 'file'} "${rel}" on mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
+      path: rel, mount: mount.name, user: requester?.username, ip: req.ip
     })
     res.json({ ok: true })
   }))
 
+  // Moves within the same mount only — `from`/`to` both resolve against it,
+  // there's no cross-mount move.
   app.post('/api/move', jsonBody, wrap(async (req, res) => {
+    const mount = resolveMountForRequest(db, req, res)
     const { from, to } = (req.body ?? {}) as { from?: unknown, to?: unknown }
-    const { fromRel, toRel } = await moveEntry(config.root, from, to)
+    const { fromRel, toRel } = await moveEntry(mount.path, from, to)
     const requester = (res.locals as { user?: { username: string } }).user
-    activity.add('browse', `moved "${fromRel}" to "${toRel}"${requester ? ` by ${requester.username}` : ''}`, {
-      from: fromRel, to: toRel, user: requester?.username, ip: req.ip
+    activity.add('browse', `moved "${fromRel}" to "${toRel}" on mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
+      from: fromRel, to: toRel, mount: mount.name, user: requester?.username, ip: req.ip
     })
     res.json({ ok: true, path: toRel })
   }))
 
   app.post('/api/mkdir', jsonBody, wrap(async (req, res) => {
+    const mount = resolveMountForRequest(db, req, res)
     const { path: relPath } = (req.body ?? {}) as { path?: unknown }
-    const { rel } = await createFolder(config.root, relPath)
+    const { rel } = await createFolder(mount.path, relPath)
     const requester = (res.locals as { user?: { username: string } }).user
-    activity.add('browse', `created folder "${rel}"${requester ? ` by ${requester.username}` : ''}`, {
-      path: rel, user: requester?.username, ip: req.ip
+    activity.add('browse', `created folder "${rel}" on mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
+      path: rel, mount: mount.name, user: requester?.username, ip: req.ip
     })
     res.json({ ok: true, path: rel })
+  }))
+
+  // Recursive name search across one mount's tree, or every mount the caller
+  // can reach when `mount` is omitted. Read-only, so no extra CSRF or write
+  // rate-limiting beyond the standard auth gate.
+  app.get('/api/search', wrap(async (req, res) => {
+    const user = authedUser(res)
+    const isAdmin = user.role === 'admin'
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    if (q === '') throw new BrowseError(400, 'q is required')
+    if (q.length > 200) throw new BrowseError(400, 'q is too long')
+    const typeParam = req.query.type
+    const type = typeParam === 'dir' || typeParam === 'file' ? typeParam : undefined
+    const scopePath = typeof req.query.path === 'string' ? req.query.path : ''
+    const mountParam = mountParamFromReq(req)
+    const limit = clampSearchLimit(Number(req.query.limit))
+
+    let mounts: Mount[]
+    if (mountParam !== undefined) {
+      const mount = findMount(db, mountParam)
+      if (!db.hasMountAccess(mount, user.id, isAdmin)) throw new BrowseError(403, 'no access to this mount')
+      mounts = [mount]
+    } else {
+      mounts = db.listMountsForUser(user.id, isAdmin)
+    }
+
+    const results: Array<SearchHit & { mount: { id: number, name: string } }> = []
+    let truncated = false
+    let remaining = limit
+    for (const mount of mounts) {
+      if (remaining <= 0) { truncated = true; break }
+      let scopeAbs: string
+      try {
+        scopeAbs = await resolveInsideRoot(mount.path, scopePath)
+      } catch (err) {
+        if (mountParam !== undefined) throw err // an explicitly requested mount's scope error should surface, not be swallowed
+        continue // searching every mount: just skip ones without this subpath
+      }
+      const outcome = await searchTree(mount.path, scopeAbs, { query: q, type, limit: remaining })
+      for (const hit of outcome.hits) results.push({ ...hit, mount: { id: mount.id, name: mount.name } })
+      remaining -= outcome.hits.length
+      if (outcome.truncated) truncated = true
+    }
+
+    res.json({ query: q, results, truncated })
+  }))
+
+  // --- admin: users + mount access -------------------------------------------
+
+  app.get('/api/admin/users', requireAdmin, (req, res) => {
+    res.json({
+      users: db.listUsers().map(u => ({ id: u.id, username: u.username, role: u.role, createdAt: u.created_at }))
+    })
+  })
+
+  app.post('/api/admin/users/:username/role', jsonBody, requireAdmin, wrap(async (req, res) => {
+    const username = String(req.params.username)
+    const { role } = (req.body ?? {}) as { role?: unknown }
+    if (role !== 'user' && role !== 'admin') throw new BrowseError(400, "role must be 'user' or 'admin'")
+    const target = db.getUserByUsername(username)
+    if (!target) throw new BrowseError(404, 'no such user')
+    if (target.role === 'admin' && role === 'user' && db.countAdmins() <= 1) {
+      throw new BrowseError(400, 'cannot demote the last remaining admin')
+    }
+    db.setUserRole(target.id, role)
+    const requester = authedUser(res)
+    activity.add('admin', `"${username}" role changed to ${role} by ${requester.username}`, {
+      targetUser: username, role, user: requester.username, ip: req.ip
+    })
+    res.json({ ok: true })
+  }))
+
+  app.get('/api/admin/mounts', requireAdmin, (req, res) => {
+    res.json({
+      mounts: db.listMounts().map(m => ({
+        id: m.id, name: m.name, path: m.path, isDefault: m.is_default, createdAt: m.created_at,
+        access: db.listMountAccess(m.id)
+      }))
+    })
+  })
+
+  app.post('/api/admin/mounts', jsonBody, requireAdmin, wrap(async (req, res) => {
+    const { name, path: pathInput } = (req.body ?? {}) as { name?: unknown, path?: unknown }
+    if (typeof name !== 'string' || !/^[a-zA-Z0-9._ -]{1,64}$/.test(name)) {
+      throw new BrowseError(400, 'mount name must be 1-64 chars of letters, digits, spaces, . _ -')
+    }
+    if (typeof pathInput !== 'string' || pathInput.trim() === '') throw new BrowseError(400, 'path is required')
+    if (db.getMountByName(name)) throw new BrowseError(409, 'a mount with that name already exists')
+    let resolved: string
+    try {
+      resolved = resolveDirectory(pathInput)
+    } catch (err) {
+      throw new BrowseError(400, err instanceof Error ? err.message : 'invalid path')
+    }
+    const requester = authedUser(res)
+    const mount: Mount = db.createMount(name, resolved, requester.id)
+    activity.add('admin', `mount "${name}" (${resolved}) created by ${requester.username}`, {
+      mount: name, path: resolved, user: requester.username, ip: req.ip
+    })
+    res.status(201).json({ id: mount.id, name: mount.name, path: mount.path, isDefault: mount.is_default })
+  }))
+
+  app.post('/api/admin/mounts/:id/access', jsonBody, requireAdmin, wrap(async (req, res) => {
+    const mount = db.getMountById(Number(req.params.id))
+    if (!mount) throw new BrowseError(404, 'no such mount')
+    const { username } = (req.body ?? {}) as { username?: unknown }
+    if (typeof username !== 'string') throw new BrowseError(400, 'username is required')
+    const target = db.getUserByUsername(username)
+    if (!target) throw new BrowseError(404, 'no such user')
+    db.grantMountAccess(mount.id, target.id)
+    const requester = authedUser(res)
+    activity.add('admin', `granted "${username}" access to mount "${mount.name}" by ${requester.username}`, {
+      mount: mount.name, targetUser: username, user: requester.username, ip: req.ip
+    })
+    res.status(201).json({ ok: true })
+  }))
+
+  app.delete('/api/admin/mounts/:id/access/:userId', requireAdmin, wrap(async (req, res) => {
+    const mount = db.getMountById(Number(req.params.id))
+    if (!mount) throw new BrowseError(404, 'no such mount')
+    const target = db.getUserById(Number(req.params.userId))
+    db.revokeMountAccess(mount.id, Number(req.params.userId))
+    const requester = authedUser(res)
+    activity.add('admin', `revoked "${target?.username ?? req.params.userId}" access to mount "${mount.name}" by ${requester.username}`, {
+      mount: mount.name, targetUser: target?.username, user: requester.username, ip: req.ip
+    })
+    res.json({ ok: true })
+  }))
+
+  app.delete('/api/admin/mounts/:id', requireAdmin, wrap(async (req, res) => {
+    const mount = db.getMountById(Number(req.params.id))
+    if (!mount) throw new BrowseError(404, 'no such mount')
+    if (mount.is_default) throw new BrowseError(400, 'cannot remove the default mount')
+    db.deleteMount(mount.id)
+    const requester = authedUser(res)
+    activity.add('admin', `mount "${mount.name}" removed by ${requester.username}`, {
+      mount: mount.name, user: requester.username, ip: req.ip
+    })
+    res.json({ ok: true })
   }))
 
   // Streamed to disk (never buffered in memory) via a temp file, then
@@ -510,9 +729,10 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     if (!heavyLimiter.take(req.ip ?? 'unknown')) {
       throw new BrowseError(429, 'too many requests — slow down')
     }
+    const mount = resolveMountForRequest(db, req, res)
     const destDirRel = typeof req.query.path === 'string' ? req.query.path : ''
     const name = typeof req.query.name === 'string' ? req.query.name : ''
-    const destAbs = await resolveUploadTarget(config.root, destDirRel, name)
+    const destAbs = await resolveUploadTarget(mount.path, destDirRel, name)
 
     const clientKey = req.get('X-P2F-Enc-Client-Pubkey')
     const wrappedKey = req.get('X-P2F-Enc-Key-Wrapped')
@@ -559,11 +779,11 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     }
     await fs.rm(tmpAbs, { force: true })
 
-    const rel = path.relative(config.root, destAbs)
+    const rel = path.relative(mount.path, destAbs)
     const size = out.bytesWritten
     const requester = (res.locals as { user?: { username: string } }).user
-    activity.add('browse', `uploaded "${rel}" (${size} bytes)${requester ? ` by ${requester.username}` : ''}`, {
-      path: rel, size, user: requester?.username, ip: req.ip
+    activity.add('browse', `uploaded "${rel}" (${size} bytes) to mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
+      path: rel, size, mount: mount.name, user: requester?.username, ip: req.ip
     })
     res.status(201).json({ name, path: rel, size })
   }))
@@ -581,16 +801,18 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     const clientKey = typeof req.query.ck === 'string' ? req.query.ck : ''
     if (!clientKey) throw new BrowseError(400, 'missing ck (client ECDH public key)')
 
-    const abs = await resolveInsideRoot(config.root, req.query.path ?? '')
+    const mount = resolveMountForRequest(db, req, res)
+    const abs = await resolveInsideRoot(mount.path, req.query.path ?? '')
     const { meta, plainSha256 } = await store.getMeta(abs)
-    const rel = path.relative(config.root, abs)
+    const rel = path.relative(mount.path, abs)
 
     // The webseed carries a path-bound transfer token and the announce an
     // infohash-bound tracker token (F3) — WebTorrent's own requests can't
     // present cookies or headers, so authorization lives in the URLs
-    // themselves.
+    // themselves. The webseed URL also carries the mount id so /api/raw
+    // resolves the same root this path was minted against.
     const rawQuery = (p: string): string =>
-      `path=${encodeURIComponent(p)}&t=${encodeURIComponent(auth.mintRawToken(p))}`
+      `path=${encodeURIComponent(p)}&mount=${mount.id}&t=${encodeURIComponent(auth.mintRawToken(mount.id, p))}`
     const trackerQuery =
       `?ih=${meta.infoHash}&t=${encodeURIComponent(auth.mintTrackerToken(meta.infoHash))}`
 
@@ -616,8 +838,8 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     seeder.ensureSeeding(abs, meta, key, iv)
 
     const requester = (res.locals as { user?: { username: string } }).user
-    activity.add('torrent', `metadata requested for "${rel}"${requester ? ` by ${requester.username}` : ''}`, {
-      path: rel, infoHash: meta.infoHash, user: requester?.username, ip: req.ip
+    activity.add('torrent', `metadata requested for "${rel}" on mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
+      path: rel, mount: mount.name, infoHash: meta.infoHash, user: requester?.username, ip: req.ip
     })
 
     const { torrentFile, magnet } = renderTorrent(meta, { announce, urlList: [webseed] })

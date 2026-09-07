@@ -56,7 +56,7 @@ test('metadata URLs use the public origin (wss + same-port tracker path)', async
 
   // announce/webseed use the public origin and now carry transfer tokens (F3)
   assert.ok(body.announce[0].startsWith(`wss://files.example.com/tracker?ih=${body.infoHash}&t=`))
-  assert.ok(body.webseed.startsWith('https://files.example.com/api/raw?path=file.bin&t='))
+  assert.ok(body.webseed.startsWith('https://files.example.com/api/raw?path=file.bin&mount='))
 
   const parsed = await parseTorrent(Buffer.from(body.torrentBase64, 'base64'))
   assert.deepEqual(parsed.announce, body.announce)

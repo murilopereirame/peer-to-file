@@ -109,7 +109,7 @@ test('login sets a session cookie that unlocks the API', async () => {
   assert.equal(list.status, 200)
 
   const me = await fetch(`${base}/api/me`, { headers: { Cookie: cookie } })
-  assert.deepEqual(await me.json(), { username: 'alice' })
+  assert.deepEqual(await me.json(), { username: 'alice', role: 'user' })
 })
 
 test('Bearer API tokens unlock the API', async () => {

@@ -12,10 +12,31 @@ import nodePath from 'node:path'
  * except the transfer-token HMAC key in `meta`.
  */
 
+export type Role = 'user' | 'admin'
+
 export interface User {
   id: number
   username: string
+  role: Role
   created_at: number
+}
+
+export interface Mount {
+  id: number
+  name: string
+  path: string
+  /** True for the single mount seeded from P2F_ROOT — always accessible to
+   *  every authenticated user, can't be deleted, and can't be gated by
+   *  mount_access (preserves the pre-multi-mount behavior of the root). */
+  is_default: boolean
+  created_at: number
+  created_by: number | null
+}
+
+export interface MountAccessEntry {
+  user_id: number
+  username: string
+  granted_at: number
 }
 
 export interface ApiTokenInfo {
@@ -132,6 +153,27 @@ export class AuthDb {
       );
       CREATE INDEX IF NOT EXISTS idx_download_history_user
         ON download_history(user_id, completed_at DESC);
+      CREATE TABLE IF NOT EXISTS mounts (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        -- Deliberately not UNIQUE: the same directory can legitimately be
+        -- shared under two names with different access grants, and the
+        -- default mount (seeded from P2F_ROOT) must be free to coincide
+        -- with an admin-created mount pointing at the same place.
+        path TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+      );
+      -- At most one mount may be the default (seeded from P2F_ROOT).
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mounts_one_default
+        ON mounts(is_default) WHERE is_default = 1;
+      CREATE TABLE IF NOT EXISTS mount_access (
+        mount_id INTEGER NOT NULL REFERENCES mounts(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (mount_id, user_id)
+      );
     `)
     // Added after the initial release — CREATE TABLE IF NOT EXISTS above
     // leaves an existing table's columns untouched, so a pre-existing
@@ -144,7 +186,11 @@ export class AuthDb {
       "ALTER TABLE download_history ADD COLUMN kind TEXT NOT NULL DEFAULT 'download'",
       // Nullable: a NULL expiry means "never expires", so API tokens created
       // before this migration keep working unchanged.
-      'ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER'
+      'ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER',
+      // Every user created before roles existed keeps working as a plain
+      // 'user' — an operator upgrading in place must explicitly promote
+      // themselves back to 'admin' via the CLI (see cli.ts's set-role).
+      "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"
     ]) {
       try { this.db.exec(stmt) } catch { /* column already exists */ }
     }
@@ -156,7 +202,9 @@ export class AuthDb {
 
   // --- users ---------------------------------------------------------------
 
-  createUser (username: string, password: string): User {
+  /** `role` defaults to 'user' — only setupFirstUser grants 'admin', and only
+   *  an existing admin can promote anyone else (see app.ts's /api/admin/users). */
+  createUser (username: string, password: string, role: Role = 'user'): User {
     if (!/^[a-zA-Z0-9._-]{1,64}$/.test(username)) {
       throw new Error('username must be 1-64 chars of letters, digits, . _ -')
     }
@@ -165,32 +213,62 @@ export class AuthDb {
     }
     const now = Date.now()
     const res = this.db.prepare(
-      'INSERT INTO users (username, pass_hash, created_at) VALUES (?, ?, ?)'
-    ).run(username, hashPassword(password), now)
-    return { id: Number(res.lastInsertRowid), username, created_at: now }
+      'INSERT INTO users (username, pass_hash, role, created_at) VALUES (?, ?, ?, ?)'
+    ).run(username, hashPassword(password), role, now)
+    return { id: Number(res.lastInsertRowid), username, role, created_at: now }
   }
 
   /**
-   * Create the very first user (first-run web setup). Atomic against other
-   * requests in this process: node:sqlite is synchronous and there is no
-   * `await` between the count check and the insert, so nothing else in this
-   * single-process server can interleave. Throws if a user already exists.
+   * Create the very first user (first-run web setup) as an admin — it's the
+   * only account that exists yet, so it has to be the one that can manage
+   * mounts and other users afterward. Atomic against other requests in this
+   * process: node:sqlite is synchronous and there is no `await` between the
+   * count check and the insert, so nothing else in this single-process
+   * server can interleave. Throws if a user already exists.
    */
   setupFirstUser (username: string, password: string): User {
     if (this.userCount() > 0) {
       throw new Error('setup already completed')
     }
-    return this.createUser(username, password)
+    return this.createUser(username, password, 'admin')
   }
 
   deleteUser (username: string): boolean {
-    return this.db.prepare('DELETE FROM users WHERE username = ?').run(username).changes > 0
+    const user = this.getUserByUsername(username)
+    if (!user) return false
+    this.db.prepare('DELETE FROM mount_access WHERE user_id = ?').run(user.id)
+    return this.db.prepare('DELETE FROM users WHERE id = ?').run(user.id).changes > 0
   }
 
   listUsers (): User[] {
     return this.db.prepare(
-      'SELECT id, username, created_at FROM users ORDER BY username'
+      'SELECT id, username, role, created_at FROM users ORDER BY username'
     ).all() as unknown as User[]
+  }
+
+  getUserByUsername (username: string): User | null {
+    const row = this.db.prepare(
+      'SELECT id, username, role, created_at FROM users WHERE username = ?'
+    ).get(username) as (User | undefined)
+    return row ?? null
+  }
+
+  getUserById (id: number): User | null {
+    const row = this.db.prepare(
+      'SELECT id, username, role, created_at FROM users WHERE id = ?'
+    ).get(id) as (User | undefined)
+    return row ?? null
+  }
+
+  /** How many admins currently exist — used to refuse demoting the last one. */
+  countAdmins (): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get() as { n: number }
+    return row.n
+  }
+
+  /** Returns false if the user doesn't exist. */
+  setUserRole (userId: number, role: Role): boolean {
+    return this.db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId).changes > 0
   }
 
   userCount (): number {
@@ -200,15 +278,15 @@ export class AuthDb {
 
   verifyCredentials (username: string, password: string): User | null {
     const row = this.db.prepare(
-      'SELECT id, username, pass_hash, created_at FROM users WHERE username = ?'
-    ).get(username) as ({ id: number, username: string, pass_hash: string, created_at: number } | undefined)
+      'SELECT id, username, role, pass_hash, created_at FROM users WHERE username = ?'
+    ).get(username) as ({ id: number, username: string, role: Role, pass_hash: string, created_at: number } | undefined)
     if (!row || !verifyPassword(password, row.pass_hash)) return null
     // Transparently upgrade a hash stored with weaker (older) scrypt params
     // now that we've verified the plaintext once.
     if (needsRehash(row.pass_hash)) {
       this.db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(hashPassword(password), row.id)
     }
-    return { id: row.id, username: row.username, created_at: row.created_at }
+    return { id: row.id, username: row.username, role: row.role, created_at: row.created_at }
   }
 
   // --- sessions (short-lived access) + refresh tokens ---------------------
@@ -227,15 +305,15 @@ export class AuthDb {
 
   getSessionUser (sessionId: string): User | null {
     const row = this.db.prepare(`
-      SELECT u.id, u.username, u.created_at, s.expires_at FROM sessions s
+      SELECT u.id, u.username, u.role, u.created_at, s.expires_at FROM sessions s
       JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?
-    `).get(sha256(sessionId)) as ({ id: number, username: string, created_at: number, expires_at: number } | undefined)
+    `).get(sha256(sessionId)) as ({ id: number, username: string, role: Role, created_at: number, expires_at: number } | undefined)
     if (!row) return null
     if (row.expires_at < Date.now()) {
       this.deleteSession(sessionId)
       return null
     }
-    return { id: row.id, username: row.username, created_at: row.created_at }
+    return { id: row.id, username: row.username, role: row.role, created_at: row.created_at }
   }
 
   deleteSession (sessionId: string): void {
@@ -258,13 +336,13 @@ export class AuthDb {
    */
   consumeRefreshToken (refreshId: string): User | null {
     const row = this.db.prepare(`
-      SELECT u.id, u.username, u.created_at, r.expires_at FROM refresh_tokens r
+      SELECT u.id, u.username, u.role, u.created_at, r.expires_at FROM refresh_tokens r
       JOIN users u ON u.id = r.user_id WHERE r.id_hash = ?
-    `).get(sha256(refreshId)) as ({ id: number, username: string, created_at: number, expires_at: number } | undefined)
+    `).get(sha256(refreshId)) as ({ id: number, username: string, role: Role, created_at: number, expires_at: number } | undefined)
     if (!row) return null
     this.db.prepare('DELETE FROM refresh_tokens WHERE id_hash = ?').run(sha256(refreshId))
     if (row.expires_at < Date.now()) return null
-    return { id: row.id, username: row.username, created_at: row.created_at }
+    return { id: row.id, username: row.username, role: row.role, created_at: row.created_at }
   }
 
   deleteRefreshToken (refreshId: string): void {
@@ -300,15 +378,15 @@ export class AuthDb {
 
   getTokenUser (token: string): User | null {
     const row = this.db.prepare(`
-      SELECT u.id, u.username, u.created_at, t.id AS token_id, t.expires_at FROM api_tokens t
+      SELECT u.id, u.username, u.role, u.created_at, t.id AS token_id, t.expires_at FROM api_tokens t
       JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?
-    `).get(sha256(token)) as ({ id: number, username: string, created_at: number, token_id: number, expires_at: number | null } | undefined)
+    `).get(sha256(token)) as ({ id: number, username: string, role: Role, created_at: number, token_id: number, expires_at: number | null } | undefined)
     if (!row) return null
     // NULL expiry = never expires (grandfathered / explicitly non-expiring).
     if (row.expires_at !== null && row.expires_at < Date.now()) return null
     this.db.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?')
       .run(Date.now(), row.token_id)
-    return { id: row.id, username: row.username, created_at: row.created_at }
+    return { id: row.id, username: row.username, role: row.role, created_at: row.created_at }
   }
 
   listApiTokens (username?: string): ApiTokenInfo[] {
@@ -439,5 +517,110 @@ export class AuthDb {
 
   clearUploadHistory (userId: number | null): void {
     this.clearTransferHistory('upload', userId)
+  }
+
+  // --- mounts --------------------------------------------------------------
+  // Multiple filesystem roots ("mounts") can be shared at once. Exactly one —
+  // seeded from P2F_ROOT at startup, see ensureDefaultMount — is the
+  // `is_default` mount: implicitly browsable by every authenticated user
+  // (matching the tool's original single-root behavior) and undeletable.
+  // Every other mount is opt-in: an admin grants specific users access via
+  // mount_access; admins themselves can always reach every mount.
+
+  private rowToMount (row: { id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null }): Mount {
+    return { id: row.id, name: row.name, path: row.path, is_default: row.is_default === 1, created_at: row.created_at, created_by: row.created_by }
+  }
+
+  createMount (name: string, dirPath: string, createdBy: number | null, isDefault = false): Mount {
+    if (!/^[a-zA-Z0-9._ -]{1,64}$/.test(name)) {
+      throw new Error('mount name must be 1-64 chars of letters, digits, spaces, . _ -')
+    }
+    const now = Date.now()
+    const res = this.db.prepare(
+      'INSERT INTO mounts (name, path, is_default, created_at, created_by) VALUES (?, ?, ?, ?, ?)'
+    ).run(name, dirPath, isDefault ? 1 : 0, now, createdBy)
+    return { id: Number(res.lastInsertRowid), name, path: dirPath, is_default: isDefault, created_at: now, created_by: createdBy }
+  }
+
+  /**
+   * Ensures the default mount exists and points at `dirPath` — called on
+   * every startup with the current P2F_ROOT, so an operator changing that
+   * env var updates the existing default mount in place rather than leaving
+   * a stale one behind (this mirrors how the pre-multi-mount server always
+   * trusted config.root fresh on each boot).
+   */
+  ensureDefaultMount (dirPath: string): Mount {
+    const existing = this.getDefaultMount()
+    if (!existing) return this.createMount('default', dirPath, null, true)
+    if (existing.path !== dirPath) {
+      this.db.prepare('UPDATE mounts SET path = ? WHERE id = ?').run(dirPath, existing.id)
+      existing.path = dirPath
+    }
+    return existing
+  }
+
+  getDefaultMount (): Mount | null {
+    const row = this.db.prepare('SELECT * FROM mounts WHERE is_default = 1').get() as
+      ({ id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null } | undefined)
+    return row ? this.rowToMount(row) : null
+  }
+
+  getMountById (id: number): Mount | null {
+    const row = this.db.prepare('SELECT * FROM mounts WHERE id = ?').get(id) as
+      ({ id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null } | undefined)
+    return row ? this.rowToMount(row) : null
+  }
+
+  getMountByName (name: string): Mount | null {
+    const row = this.db.prepare('SELECT * FROM mounts WHERE name = ?').get(name) as
+      ({ id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null } | undefined)
+    return row ? this.rowToMount(row) : null
+  }
+
+  listMounts (): Mount[] {
+    const rows = this.db.prepare('SELECT * FROM mounts ORDER BY is_default DESC, name').all() as
+      Array<{ id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null }>
+    return rows.map(r => this.rowToMount(r))
+  }
+
+  /** Mounts a given user may browse: every mount for an admin, otherwise the default mount plus any explicitly granted. */
+  listMountsForUser (userId: number, isAdmin: boolean): Mount[] {
+    if (isAdmin) return this.listMounts()
+    const rows = this.db.prepare(`
+      SELECT m.* FROM mounts m
+      WHERE m.is_default = 1 OR EXISTS (SELECT 1 FROM mount_access a WHERE a.mount_id = m.id AND a.user_id = ?)
+      ORDER BY m.is_default DESC, m.name
+    `).all(userId) as Array<{ id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null }>
+    return rows.map(r => this.rowToMount(r))
+  }
+
+  hasMountAccess (mount: Mount, userId: number, isAdmin: boolean): boolean {
+    if (isAdmin || mount.is_default) return true
+    return this.db.prepare('SELECT 1 FROM mount_access WHERE mount_id = ? AND user_id = ?')
+      .get(mount.id, userId) !== undefined
+  }
+
+  /** Deletes a mount and its access grants. Refuses to delete the default mount. */
+  deleteMount (id: number): boolean {
+    const mount = this.getMountById(id)
+    if (!mount || mount.is_default) return false
+    this.db.prepare('DELETE FROM mount_access WHERE mount_id = ?').run(id)
+    return this.db.prepare('DELETE FROM mounts WHERE id = ?').run(id).changes > 0
+  }
+
+  grantMountAccess (mountId: number, userId: number): void {
+    this.db.prepare('INSERT OR IGNORE INTO mount_access (mount_id, user_id, granted_at) VALUES (?, ?, ?)')
+      .run(mountId, userId, Date.now())
+  }
+
+  revokeMountAccess (mountId: number, userId: number): void {
+    this.db.prepare('DELETE FROM mount_access WHERE mount_id = ? AND user_id = ?').run(mountId, userId)
+  }
+
+  listMountAccess (mountId: number): MountAccessEntry[] {
+    return this.db.prepare(`
+      SELECT a.user_id, u.username, a.granted_at FROM mount_access a
+      JOIN users u ON u.id = a.user_id WHERE a.mount_id = ? ORDER BY u.username
+    `).all(mountId) as unknown as MountAccessEntry[]
   }
 }
