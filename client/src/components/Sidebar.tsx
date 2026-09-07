@@ -1,9 +1,10 @@
+import type { MountInfo, Role } from '@p2f/shared'
 import { ThemeToggle } from './ThemeToggle'
 import {
-  ActivityIcon, FolderIcon, HistoryIcon, LogOutIcon, RefreshIcon, TerminalIcon, WifiIcon, WifiOffIcon
+  ActivityIcon, FolderIcon, HistoryIcon, LogOutIcon, RefreshIcon, ShieldIcon, TerminalIcon, WifiIcon, WifiOffIcon
 } from './icons'
 
-export type View = 'browse' | 'transfers' | 'history' | 'logs'
+export type View = 'browse' | 'transfers' | 'history' | 'logs' | 'admin'
 
 const NAV_ITEMS: Array<{ key: View, label: string, Icon: typeof FolderIcon }> = [
   { key: 'browse', label: 'Browse', Icon: FolderIcon },
@@ -13,7 +14,7 @@ const NAV_ITEMS: Array<{ key: View, label: string, Icon: typeof FolderIcon }> = 
 ]
 
 export function Sidebar ({
-  view, onSelect, counts, connected, onReconnect, authed, onLogout
+  view, onSelect, counts, connected, onReconnect, authed, onLogout, role, mounts, activeMountId, onSelectMount
 }: {
   view: View
   onSelect: (view: View) => void
@@ -23,6 +24,11 @@ export function Sidebar ({
   onReconnect: () => void
   authed: boolean
   onLogout: () => void
+  /** Null while /api/me hasn't resolved yet — the Admin nav item is hidden until it's known. */
+  role: Role | null
+  mounts: MountInfo[]
+  activeMountId: number | null
+  onSelectMount: (id: number) => void
 }): React.JSX.Element {
   return (
     <aside className="sidebar">
@@ -33,6 +39,20 @@ export function Sidebar ({
           <span className="tagline">self-hosted P2P files</span>
         </div>
       </div>
+
+      {mounts.length > 1 && (
+        <div className="mount-switcher">
+          <label htmlFor="mount-select">Mount</label>
+          <select
+            id="mount-select" value={activeMountId ?? ''}
+            onChange={e => onSelectMount(Number(e.target.value))}
+          >
+            {mounts.map(m => (
+              <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' (default)' : ''}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* Kept a `tab-bar` class alongside the sidebar one: same four views the
           old tab strip had, just laid out down the side. */}
@@ -52,6 +72,17 @@ export function Sidebar ({
             </button>
           )
         })}
+        {role === 'admin' && (
+          <button
+            key="admin"
+            type="button"
+            className={`nav-item${view === 'admin' ? ' active' : ''}`}
+            aria-current={view === 'admin' ? 'page' : undefined}
+            onClick={() => onSelect('admin')}
+          >
+            <span className="nav-label"><ShieldIcon />Admin</span>
+          </button>
+        )}
       </nav>
 
       <div className="sidebar-footer">

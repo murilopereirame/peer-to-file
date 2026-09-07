@@ -20,7 +20,7 @@ export interface UploadEntry {
 
 interface Ctx {
   uploads: UploadEntry[]
-  start: (destDir: string, file: File, onSettled?: () => void) => void
+  start: (destDir: string, file: File, onSettled?: () => void, mountId?: number) => void
   dismiss: (id: string) => void
 }
 
@@ -60,7 +60,7 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
     setUploads(list => list.map(u => (u.id === id ? { ...u, ...patch } : u)))
   }, [])
 
-  const start = useCallback((destDir: string, file: File, onSettled?: () => void) => {
+  const start = useCallback((destDir: string, file: File, onSettled?: () => void, mountId?: number) => {
     if (!apiBase) return
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
     const startedAt = Date.now()
@@ -81,7 +81,9 @@ export function UploadsProvider ({ children }: { children: React.ReactNode }): R
       const keyWrap = await establishKeyWrap(serverPublicKey)
       return encryptFileForUpload(file, keyWrap)
     })().then(({ body, headers }) => {
-      const url = `${apiBase}/api/upload?path=${encodeURIComponent(destDir)}&name=${encodeURIComponent(file.name)}`
+      const uploadParams = new URLSearchParams({ path: destDir, name: file.name })
+      if (mountId !== undefined) uploadParams.set('mount', String(mountId))
+      const url = `${apiBase}/api/upload?${uploadParams.toString()}`
       const xhr = new XMLHttpRequest()
       inFlight.current.set(id, xhr)
       xhr.open('POST', url)

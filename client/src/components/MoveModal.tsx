@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useApi } from '../context/ApiContext'
+import { useMount } from '../context/MountContext'
 import { errMessage, HttpError } from '../lib/format'
 import { CloseIcon, FolderIcon, LevelUpIcon, MoveIcon } from './icons'
 
@@ -20,6 +21,7 @@ export function MoveModal ({
   onMoved: () => void
 }): React.JSX.Element {
   const { apiFetch } = useApi()
+  const { mountQS, mountBody } = useMount()
   const [navPath, setNavPath] = useState(startPath)
   const [dirs, setDirs] = useState<DirEntry[] | null>(null)
   const [loading, setLoading] = useState(true)
@@ -33,7 +35,7 @@ export function MoveModal ({
     setLoadError(null)
     void (async () => {
       try {
-        const res = await apiFetch(`/api/list?path=${encodeURIComponent(target)}`)
+        const res = await apiFetch(`/api/list?path=${encodeURIComponent(target)}${mountQS}`)
         const body = await res.json() as { entries: DirEntry[] }
         setDirs(body.entries.filter(e => e.type === 'dir'))
       } catch (err) {
@@ -42,7 +44,7 @@ export function MoveModal ({
         setLoading(false)
       }
     })()
-  }, [apiFetch])
+  }, [apiFetch, mountQS])
 
   useEffect(() => { load(startPath) }, [load, startPath])
 
@@ -64,7 +66,7 @@ export function MoveModal ({
         await apiFetch('/api/move', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: fromPath, to: destPath })
+          body: JSON.stringify({ from: fromPath, to: destPath, ...mountBody })
         })
         onMoved()
       } catch (err) {

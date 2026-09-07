@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
 import { requestNotificationPermission } from '@p2f/shared'
+import type { SearchHit } from '@p2f/shared'
 import { useApi } from '../context/ApiContext'
+import { useMount } from '../context/MountContext'
 import { errMessage, formatBytes, HttpError } from '../lib/format'
 import type { DownloadManager } from '../lib/downloadManager'
 import { useUploads } from '../context/UploadsContext'
@@ -24,15 +26,18 @@ interface Listing {
   entries: DirEntry[]
 }
 
+const SEARCH_DEBOUNCE_MS = 300
+
 export function FileBrowser ({
   manager, search = ''
 }: {
   manager: DownloadManager
-  /** Free-text filter from the top bar; matches entry names in this folder. */
+  /** Free-text query from the top bar — searches the whole mount's tree, not just the current folder. */
   search?: string
 }): React.JSX.Element {
   const { apiFetch } = useApi()
   const notify = useToast()
+  const { activeMountId, mountQS, mountBody } = useMount()
   const [path, setPath] = useState('')
   const [listing, setListing] = useState<Listing | null>(null)
   const [loading, setLoading] = useState(true)
@@ -58,7 +63,7 @@ export function FileBrowser ({
     }
     void (async () => {
       try {
-        const res = await apiFetch(`/api/list?path=${encodeURIComponent(target)}`)
+        const res = await apiFetch(`/api/list?path=${encodeURIComponent(target)}${mountQS}`)
         const body = await res.json() as Listing
         if (requestedPath.current !== target) return // user already navigated elsewhere
         cacheRef.current.set(body.path, body)
@@ -71,9 +76,14 @@ export function FileBrowser ({
         setLoading(false)
       }
     })()
-  }, [apiFetch])
+  }, [apiFetch, mountQS])
 
   useEffect(() => { load('') }, [load])
+
+  // A mount switch invalidates every cached listing from the previous one —
+  // without this, stale-while-revalidate would briefly paint the old mount's
+  // folder contents under the new mount's breadcrumb.
+  useEffect(() => { cacheRef.current.clear() }, [activeMountId])
 
   // Keeps the currently-viewed folder reasonably fresh without the user
   // having to navigate away and back — cache-first load() never blanks the
@@ -93,8 +103,51 @@ export function FileBrowser ({
     requestNotificationPermission()
     for (const file of files) {
       notify(`Uploading "${file.name}"…`)
-      start(pathRef.current, file, refresh)
+      start(pathRef.current, file, refresh, activeMountId ?? undefined)
     }
+  }
+
+  // --- tree-wide search ------------------------------------------------------
+  // A non-empty query searches the whole active mount's tree (via
+  // /api/search), replacing the folder listing below with a flat result list
+  // — distinct from the per-view local text filters the other tabs use.
+  const query = search.trim()
+  const [searchResults, setSearchResults] = useState<SearchHit[] | null>(null)
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [searchTruncated, setSearchTruncated] = useState(false)
+
+  useEffect(() => {
+    if (query === '') {
+      setSearchResults(null)
+      setSearchError(null)
+      setSearchLoading(false)
+      return
+    }
+    setSearchLoading(true)
+    setSearchError(null)
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const res = await apiFetch(`/api/search?q=${encodeURIComponent(query)}${mountQS}`, { signal: controller.signal })
+          const body = await res.json() as { results: SearchHit[], truncated: boolean }
+          setSearchResults(body.results)
+          setSearchTruncated(body.truncated)
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') return
+          setSearchError(errMessage(err))
+        } finally {
+          setSearchLoading(false)
+        }
+      })()
+    }, SEARCH_DEBOUNCE_MS)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [query, apiFetch, mountQS])
+
+  const openSearchHit = (hit: SearchHit): void => {
+    const parent = hit.type === 'dir' ? hit.path : hit.path.split('/').slice(0, -1).join('/')
+    load(parent)
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -121,11 +174,7 @@ export function FileBrowser ({
   }
 
   const segments = path === '' ? [] : path.split('/')
-  const query = search.trim().toLowerCase()
-  const visible = useMemo(
-    () => (query === '' ? listing?.entries : listing?.entries.filter(e => e.name.toLowerCase().includes(query))),
-    [listing, query]
-  )
+  const searching = query !== ''
 
   return (
     <>
@@ -180,44 +229,64 @@ export function FileBrowser ({
         <span />
       </div>
 
-      <ul id="listing">
-        {path !== '' && (
-          <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
-            <div className="entry-main">
-              <span className="entry-icon"><LevelUpIcon /></span>
-              <span className="entry-name">../</span>
-            </div>
-          </li>
-        )}
-        {loading && <li className="empty loading">loading…</li>}
-        {!loading && error && (
-          <li className="empty error">
-            failed to load folder: {error}{' '}
-            <button type="button" className="btn outline sm" onClick={() => load(path)}>
-              <RefreshIcon size={13} />
-              retry
-            </button>
-          </li>
-        )}
-        {!loading && !error && listing?.entries.length === 0 && (
-          <li className="empty">
-            <FolderIcon className="empty-icon" size={26} />
-            empty folder
-          </li>
-        )}
-        {!loading && !error && (listing?.entries.length ?? 0) > 0 && visible?.length === 0 && (
-          <li className="empty">
-            <SearchIcon className="empty-icon" size={26} />
-            nothing in this folder matches &ldquo;{search.trim()}&rdquo;
-          </li>
-        )}
-        {!loading && !error && visible?.map(entry => (
-          <ListingRow
-            key={entry.name} entry={entry} path={path}
-            onOpenDir={load} onChanged={refresh} manager={manager} apiFetch={apiFetch}
-          />
-        ))}
-      </ul>
+      {searching
+        ? (
+          <ul id="listing">
+            {searchLoading && <li className="empty loading">searching…</li>}
+            {!searchLoading && searchError && (
+              <li className="empty error">search failed: {searchError}</li>
+            )}
+            {!searchLoading && !searchError && searchResults?.length === 0 && (
+              <li className="empty">
+                <SearchIcon className="empty-icon" size={26} />
+                nothing matches &ldquo;{query}&rdquo;
+              </li>
+            )}
+            {!searchLoading && !searchError && searchResults?.map(hit => (
+              <SearchResultRow
+                key={`${hit.mount.id}:${hit.path}`} hit={hit}
+                onOpen={openSearchHit} manager={manager} apiFetch={apiFetch}
+              />
+            ))}
+            {!searchLoading && searchTruncated && (searchResults?.length ?? 0) > 0 && (
+              <li className="empty hint-inline">showing the first {searchResults?.length} matches — refine your search for more</li>
+            )}
+          </ul>
+          )
+        : (
+          <ul id="listing">
+            {path !== '' && (
+              <li className="dir up" onClick={() => load(segments.slice(0, -1).join('/'))}>
+                <div className="entry-main">
+                  <span className="entry-icon"><LevelUpIcon /></span>
+                  <span className="entry-name">../</span>
+                </div>
+              </li>
+            )}
+            {loading && <li className="empty loading">loading…</li>}
+            {!loading && error && (
+              <li className="empty error">
+                failed to load folder: {error}{' '}
+                <button type="button" className="btn outline sm" onClick={() => load(path)}>
+                  <RefreshIcon size={13} />
+                  retry
+                </button>
+              </li>
+            )}
+            {!loading && !error && listing?.entries.length === 0 && (
+              <li className="empty">
+                <FolderIcon className="empty-icon" size={26} />
+                empty folder
+              </li>
+            )}
+            {!loading && !error && listing?.entries.map(entry => (
+              <ListingRow
+                key={entry.name} entry={entry} path={path}
+                onOpenDir={load} onChanged={refresh} manager={manager} apiFetch={apiFetch}
+              />
+            ))}
+          </ul>
+          )}
     </section>
     {creatingFolder && (
       <NewFolderModal
@@ -241,6 +310,7 @@ function ListingRow ({
   apiFetch: ReturnType<typeof useApi>['apiFetch']
 }): React.JSX.Element {
   const notify = useToast()
+  const { activeMountId, mountBody } = useMount()
   const entryPath = path === '' ? entry.name : `${path}/${entry.name}`
 
   const [renaming, setRenaming] = useState(false)
@@ -296,7 +366,7 @@ function ListingRow ({
         await apiFetch('/api/move', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: entryPath, to })
+          body: JSON.stringify({ from: entryPath, to, ...mountBody })
         })
         setRenaming(false)
         notify(`Renamed to "${trimmed}"`)
@@ -348,7 +418,7 @@ function ListingRow ({
         await apiFetch('/api/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: entryPath })
+          body: JSON.stringify({ path: entryPath, ...mountBody })
         })
         notify(`Deleted "${entry.name}"`)
         onChanged()
@@ -391,7 +461,7 @@ function ListingRow ({
             type="button" className="btn outline sm"
             onClick={(e) => {
               e.stopPropagation()
-              void manager.start(entryPath, entry.name, apiFetch)
+              void manager.start(entryPath, entry.name, apiFetch, { mountId: activeMountId ?? undefined })
               notify(`Added "${entry.name}" to the download queue`)
             }}
           >
@@ -424,6 +494,46 @@ function ListingRow ({
           onMoved={() => { setMoveOpen(false); notify(`Moved "${entry.name}"`); onChanged() }}
         />
       )}
+    </li>
+  )
+}
+
+/** One flattened match from /api/search — shows its full path (not just a name) since it can be several folders deep. */
+function SearchResultRow ({
+  hit, onOpen, manager, apiFetch
+}: {
+  hit: SearchHit
+  onOpen: (hit: SearchHit) => void
+  manager: DownloadManager
+  apiFetch: ReturnType<typeof useApi>['apiFetch']
+}): React.JSX.Element {
+  const notify = useToast()
+  return (
+    <li className={hit.type} onClick={() => onOpen(hit)}>
+      <div className="entry-main">
+        <span className="entry-icon">{hit.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span>
+        <span className="entry-text">
+          <span className="entry-name">{hit.name}</span>
+          <span className="hint-inline">/{hit.path}</span>
+        </span>
+      </div>
+      <span className="entry-size">{hit.type === 'file' ? formatBytes(hit.size ?? 0) : '—'}</span>
+      <span className="entry-mtime">{new Date(hit.mtime).toLocaleDateString()}</span>
+      <div className="entry-actions">
+        {hit.type === 'file' && (
+          <button
+            type="button" className="btn outline sm"
+            onClick={(e) => {
+              e.stopPropagation()
+              void manager.start(hit.path, hit.name, apiFetch, { mountId: hit.mount.id })
+              notify(`Added "${hit.name}" to the download queue`)
+            }}
+          >
+            <DownloadIcon size={13} />
+            Download
+          </button>
+        )}
+      </div>
     </li>
   )
 }

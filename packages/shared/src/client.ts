@@ -1,6 +1,6 @@
 import { ApiError } from './types.ts'
 import type {
-  HistoryEntry, Listing, LogEntry, ServerInfo, TorrentMeta
+  AdminMount, AdminUser, HistoryEntry, Listing, LogEntry, MountInfo, Role, SearchResponse, ServerInfo, TorrentMeta
 } from './types.ts'
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
@@ -105,31 +105,80 @@ export class P2FClient {
     await this.request('/api/logout-all', { method: 'POST' })
   }
 
-  async me (): Promise<{ username: string | null }> {
+  async me (): Promise<{ username: string | null, role: Role | null }> {
     return await this.requestJson('/api/me')
   }
 
-  async list (path = ''): Promise<Listing> {
-    return await this.requestJson(`/api/list?path=${encodeURIComponent(path)}`)
+  /** Mounts (id, name) requester may browse — the default plus any explicitly granted, or every mount for an admin. */
+  async mounts (): Promise<{ mounts: MountInfo[] }> {
+    return await this.requestJson('/api/mounts')
   }
 
-  async deleteEntry (path: string): Promise<void> {
-    await this.request('/api/delete', P2FClient.jsonInit('POST', { path }))
+  /** `mount` is a mount id or name; omitted means the default mount. */
+  async list (path = '', mount?: number | string): Promise<Listing> {
+    const params = new URLSearchParams({ path })
+    if (mount !== undefined) params.set('mount', String(mount))
+    return await this.requestJson(`/api/list?${params.toString()}`)
   }
 
-  async move (from: string, to: string): Promise<{ path: string }> {
-    return await this.requestJson('/api/move', P2FClient.jsonInit('POST', { from, to }))
+  async deleteEntry (path: string, mount?: number | string): Promise<void> {
+    await this.request('/api/delete', P2FClient.jsonInit('POST', { path, mount: mount === undefined ? undefined : String(mount) }))
   }
 
-  async mkdir (path: string): Promise<{ path: string }> {
-    return await this.requestJson('/api/mkdir', P2FClient.jsonInit('POST', { path }))
+  /** `from`/`to` resolve within the same mount — there is no cross-mount move. */
+  async move (from: string, to: string, mount?: number | string): Promise<{ path: string }> {
+    return await this.requestJson('/api/move', P2FClient.jsonInit('POST', { from, to, mount: mount === undefined ? undefined : String(mount) }))
+  }
+
+  async mkdir (path: string, mount?: number | string): Promise<{ path: string }> {
+    return await this.requestJson('/api/mkdir', P2FClient.jsonInit('POST', { path, mount: mount === undefined ? undefined : String(mount) }))
   }
 
   /** `clientPublicKeyBase64` is this session's ephemeral ECDH public key — see browserCrypto.ts's establishKeyWrap. */
-  async torrentMeta (path: string, clientPublicKeyBase64: string): Promise<TorrentMeta> {
-    return await this.requestJson(
-      `/api/torrent?path=${encodeURIComponent(path)}&ck=${encodeURIComponent(clientPublicKeyBase64)}`
-    )
+  async torrentMeta (path: string, clientPublicKeyBase64: string, mount?: number | string): Promise<TorrentMeta> {
+    const params = new URLSearchParams({ path, ck: clientPublicKeyBase64 })
+    if (mount !== undefined) params.set('mount', String(mount))
+    return await this.requestJson(`/api/torrent?${params.toString()}`)
+  }
+
+  /** Recursive name search. Omit `mount` to search every mount the caller can reach. */
+  async search (query: string, opts: { mount?: number | string, path?: string, type?: 'dir' | 'file', limit?: number } = {}): Promise<SearchResponse> {
+    const params = new URLSearchParams({ q: query })
+    if (opts.mount !== undefined) params.set('mount', String(opts.mount))
+    if (opts.path !== undefined) params.set('path', opts.path)
+    if (opts.type !== undefined) params.set('type', opts.type)
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit))
+    return await this.requestJson(`/api/search?${params.toString()}`)
+  }
+
+  // --- admin: users + mount access -----------------------------------------
+
+  async adminUsers (): Promise<{ users: AdminUser[] }> {
+    return await this.requestJson('/api/admin/users')
+  }
+
+  async adminSetUserRole (username: string, role: Role): Promise<void> {
+    await this.request(`/api/admin/users/${encodeURIComponent(username)}/role`, P2FClient.jsonInit('POST', { role }))
+  }
+
+  async adminMounts (): Promise<{ mounts: AdminMount[] }> {
+    return await this.requestJson('/api/admin/mounts')
+  }
+
+  async adminCreateMount (name: string, path: string): Promise<MountInfo> {
+    return await this.requestJson('/api/admin/mounts', P2FClient.jsonInit('POST', { name, path }))
+  }
+
+  async adminDeleteMount (id: number): Promise<void> {
+    await this.request(`/api/admin/mounts/${id}`, { method: 'DELETE' })
+  }
+
+  async adminGrantMountAccess (mountId: number, username: string): Promise<void> {
+    await this.request(`/api/admin/mounts/${mountId}/access`, P2FClient.jsonInit('POST', { username }))
+  }
+
+  async adminRevokeMountAccess (mountId: number, userId: number): Promise<void> {
+    await this.request(`/api/admin/mounts/${mountId}/access/${userId}`, { method: 'DELETE' })
   }
 
   async logs (opts: { limit?: number, sinceId?: number } = {}): Promise<{ entries: LogEntry[] }> {
@@ -166,7 +215,9 @@ export class P2FClient {
   }
 
   /** URL to POST a file's raw bytes to, to create it at `dirPath/name`. */
-  uploadUrl (dirPath: string, name: string): string {
-    return `${this.baseUrl}/api/upload?path=${encodeURIComponent(dirPath)}&name=${encodeURIComponent(name)}`
+  uploadUrl (dirPath: string, name: string, mount?: number | string): string {
+    const params = new URLSearchParams({ path: dirPath, name })
+    if (mount !== undefined) params.set('mount', String(mount))
+    return `${this.baseUrl}/api/upload?${params.toString()}`
   }
 }
