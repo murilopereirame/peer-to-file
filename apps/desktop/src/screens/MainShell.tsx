@@ -19,11 +19,12 @@ import { AdminScreen } from './AdminScreen'
 
 type Tab = 'browse' | 'transfers' | 'history' | 'logs' | 'settings' | 'admin'
 
-const TABS: Array<{ key: Tab, label: string, Icon: typeof FolderIcon, subtitle: string }> = [
+const TABS: Array<{ key: Tab, label: string, Icon: typeof FolderIcon, subtitle: string, adminOnly?: boolean }> = [
   { key: 'browse', label: 'Browse', Icon: FolderIcon, subtitle: 'The server\'s shared folder' },
   { key: 'transfers', label: 'Transfers', Icon: ActivityIcon, subtitle: 'Downloads and uploads in flight' },
   { key: 'history', label: 'History', Icon: HistoryIcon, subtitle: 'Transfers this server has finished' },
-  { key: 'logs', label: 'Logs', Icon: TerminalIcon, subtitle: 'Live server activity' },
+  // Server activity carries other users' IPs/usernames/paths — admin-only (F4/item 14).
+  { key: 'logs', label: 'Logs', Icon: TerminalIcon, subtitle: 'Live server activity', adminOnly: true },
   { key: 'settings', label: 'Settings', Icon: SettingsIcon, subtitle: 'Server, downloads and appearance' }
 ]
 
@@ -63,7 +64,7 @@ function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => voi
       )}
 
       <nav className="sidebar-nav" aria-label="views">
-        {TABS.map(({ key, label, Icon }) => (
+        {TABS.filter(t => !t.adminOnly || app.role === 'admin').map(({ key, label, Icon }) => (
           <button
             key={key}
             type="button"

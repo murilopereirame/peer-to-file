@@ -117,29 +117,56 @@ function DeleteModal ({ entry, onCancel, onConfirm }: { entry: DirEntry | null, 
 
 function MoveModal ({
   entry, startPath, onCancel, onPick
-}: { entry: DirEntry | null, startPath: string, onCancel: () => void, onPick: (destDir: string) => Promise<void> }): React.JSX.Element | null {
-  const { client, activeMountId } = useApp()
+}: {
+  entry: DirEntry | null
+  startPath: string
+  onCancel: () => void
+  onPick: (destDir: string, destMountId: number | undefined) => Promise<void>
+}): React.JSX.Element | null {
+  const { client, activeMountId, mounts } = useApp()
+  // The entry being moved always lives in the currently active mount; the
+  // destination mount defaults to the same one but can be switched — a
+  // cross-mount move is just a same-mount move with a different destination.
+  const [destMountId, setDestMountId] = useState(activeMountId)
   const [path, setPath] = useState(startPath)
   const [listing, setListing] = useState<Listing | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const load = useCallback(async (p: string): Promise<void> => {
+  const load = useCallback(async (p: string, mountId: number | null): Promise<void> => {
     if (!client) return
-    try { setListing(await client.list(p, activeMountId ?? undefined)); setPath(p) } catch (err) { setError(errMessage(err)) }
-  }, [client, activeMountId])
+    try { setListing(await client.list(p, mountId ?? undefined)); setPath(p) } catch (err) { setError(errMessage(err)) }
+  }, [client])
 
-  useEffect(() => { if (entry) void load(startPath) }, [entry, startPath, load])
+  useEffect(() => { if (entry) { setDestMountId(activeMountId); void load(startPath, activeMountId) } }, [entry, startPath, activeMountId, load])
 
   if (!entry) return null
   const folders = listing?.entries.filter(e => e.type === 'dir') ?? []
+  const crossMount = destMountId !== activeMountId
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
       <Card style={{ width: 460, maxHeight: '70vh', display: 'flex', flexDirection: 'column' }}>
         <div className="card-body" onClick={e => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <Title>Move "{entry.name}"</Title>
-          <Breadcrumbs path={path} onNavigate={p => { void load(p) }} />
+          {mounts.length > 1 && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '.8rem', marginBottom: 8 }}>
+              Mount
+              <select
+                className="input" style={{ flex: 1 }} value={destMountId ?? ''}
+                onChange={e => {
+                  const id = Number(e.target.value)
+                  setDestMountId(id)
+                  void load('', id)
+                }}
+              >
+                {mounts.map(m => (
+                  <option key={m.id} value={m.id}>{m.name}{m.isDefault ? ' (default)' : ''}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <Breadcrumbs path={path} onNavigate={p => { void load(p, destMountId) }} />
           <ErrorText>{error}</ErrorText>
           <div style={{ overflowY: 'auto', flex: 1, minHeight: 100 }}>
             {folders.length === 0 && <Muted>No subfolders here.</Muted>}
@@ -147,7 +174,7 @@ function MoveModal ({
               <div
                 key={f.name}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', cursor: 'pointer' }}
-                onClick={() => { void load(joinPath(path, f.name)) }}
+                onClick={() => { void load(joinPath(path, f.name), destMountId) }}
               >
                 <span className="entry-icon" style={{ background: 'var(--accent-tint)', color: 'var(--accent)' }}>
                   <FolderIcon />
@@ -162,7 +189,8 @@ function MoveModal ({
               loading={busy}
               onClick={() => {
                 setBusy(true)
-                onPick(path).catch(err => setError(errMessage(err))).finally(() => setBusy(false))
+                onPick(path, crossMount ? (destMountId ?? undefined) : undefined)
+                  .catch(err => setError(errMessage(err))).finally(() => setBusy(false))
               }}
             >
               Move here{path ? ` (/${path})` : ' (root)'}
@@ -464,9 +492,11 @@ export function BrowserScreen (): React.JSX.Element {
         entry={moving}
         startPath={path}
         onCancel={() => setMoving(null)}
-        onPick={async (destDir) => {
+        onPick={async (destDir, destMountId) => {
           if (!moving || !app.client) return
-          await withUnauthorizedRetry(app, () => app.client!.move(joinPath(path, moving.name), joinPath(destDir, moving.name), app.activeMountId ?? undefined))
+          await withUnauthorizedRetry(app, () => app.client!.move(
+            joinPath(path, moving.name), joinPath(destDir, moving.name), app.activeMountId ?? undefined, destMountId
+          ))
           setMoving(null)
           notify(`Moved "${moving.name}"`)
           await load(path)
