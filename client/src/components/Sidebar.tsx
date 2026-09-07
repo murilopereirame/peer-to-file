@@ -6,11 +6,12 @@ import {
 
 export type View = 'browse' | 'transfers' | 'history' | 'logs' | 'admin'
 
-const NAV_ITEMS: Array<{ key: View, label: string, Icon: typeof FolderIcon }> = [
+const NAV_ITEMS: Array<{ key: View, label: string, Icon: typeof FolderIcon, adminOnly?: boolean }> = [
   { key: 'browse', label: 'Browse', Icon: FolderIcon },
   { key: 'transfers', label: 'Transfers', Icon: ActivityIcon },
   { key: 'history', label: 'History', Icon: HistoryIcon },
-  { key: 'logs', label: 'Logs', Icon: TerminalIcon }
+  // Server activity carries other users' IPs/usernames/paths — admin-only (F4/item 14).
+  { key: 'logs', label: 'Logs', Icon: TerminalIcon, adminOnly: true }
 ]
 
 export function Sidebar ({
@@ -57,7 +58,7 @@ export function Sidebar ({
       {/* Kept a `tab-bar` class alongside the sidebar one: same four views the
           old tab strip had, just laid out down the side. */}
       <nav className="sidebar-nav tab-bar" aria-label="views">
-        {NAV_ITEMS.map(({ key, label, Icon }) => {
+        {NAV_ITEMS.filter(item => !item.adminOnly || role === 'admin').map(({ key, label, Icon }) => {
           const count = counts[key] ?? 0
           return (
             <button

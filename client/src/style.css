@@ -896,6 +896,16 @@ li[data-state="error"] .dl-bar > div { background: var(--negative); }
 }
 .modal-head h2 { overflow-wrap: anywhere; }
 .modal-content { padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; min-height: 0; }
+.modal-mount-picker {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+  margin-bottom: .6rem;
+}
+.modal-mount-picker select { flex: 1; height: 2rem; font-size: .82rem; font-weight: 400; }
 .modal-listing { flex: 1; min-height: 6rem; overflow-y: auto; margin-top: .75rem; }
 .modal-listing li {
   display: flex;
