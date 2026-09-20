@@ -9,6 +9,7 @@ export interface SearchHit {
   type: 'dir' | 'file'
   size: number | null
   mtime: number
+  isSymlink: boolean
 }
 
 export interface SearchOptions {
@@ -22,6 +23,9 @@ export interface SearchOptions {
    *  forever — once this many entries have been examined, the search stops
    *  and reports itself truncated even if the hit limit wasn't reached. */
   maxScanned?: number
+  /** Mirrors listDir's flag: false skips every symlink and never walks into
+   *  one, treating it as though it doesn't exist. Default true. */
+  followSymlinks?: boolean
 }
 
 export interface SearchOutcome {
@@ -45,8 +49,9 @@ export function clampSearchLimit (limit: number | undefined): number {
  * Recursively searches a directory tree (rooted at `root`, starting from
  * `scopeAbs`, both already resolved/validated by browse.ts) for entries whose
  * name contains `query`. Mirrors listDir's symlink handling: a symlink is
- * only followed when it resolves back inside `root`, and broken symlinks or
- * entries that vanish mid-walk are skipped rather than failing the search.
+ * only followed when it resolves back inside `root` (and not at all when
+ * `followSymlinks` is false), and broken symlinks or entries that vanish
+ * mid-walk are skipped rather than failing the search.
  *
  * Depth-first and sequential — simple to reason about and plenty fast for a
  * self-hosted tool's directory sizes; `maxScanned` bounds the worst case on
@@ -56,6 +61,7 @@ export async function searchTree (root: string, scopeAbs: string, opts: SearchOp
   const needle = opts.query.trim().toLowerCase()
   const limit = clampSearchLimit(opts.limit)
   const maxScanned = opts.maxScanned ?? DEFAULT_MAX_SCANNED
+  const followSymlinks = opts.followSymlinks ?? true
 
   const hits: SearchHit[] = []
   let scanned = 0
@@ -79,8 +85,10 @@ export async function searchTree (root: string, scopeAbs: string, opts: SearchOp
 
       const entryAbs = path.join(dirAbs, dirent.name)
       let isDir = dirent.isDirectory()
+      const isSymlink = dirent.isSymbolicLink()
       try {
-        if (dirent.isSymbolicLink()) {
+        if (isSymlink) {
+          if (!followSymlinks) continue
           const real = await fs.realpath(entryAbs)
           if (!isInside(root, real)) continue
           const st = await fs.stat(entryAbs)
@@ -102,7 +110,8 @@ export async function searchTree (root: string, scopeAbs: string, opts: SearchOp
             name: dirent.name,
             type: isDir ? 'dir' : 'file',
             size: isDir ? null : st.size,
-            mtime: st.mtimeMs
+            mtime: st.mtimeMs,
+            isSymlink
           })
         } catch {
           continue // vanished between the check above and this stat

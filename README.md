@@ -421,6 +421,7 @@ the backend.
 | `P2F_SEED_SWEEP_INTERVAL_MS` | `3600000` | How often (ms) the reaper sweeps for idle torrents. Default 1 h |
 | `P2F_SECURE_COOKIES` | `auto`    | Mark auth cookies `Secure`: `auto` (derive from the effective scheme), `on`, or `off` |
 | `P2F_TRUST_PROXY`  | `off`       | Trust `X-Forwarded-*` from a front proxy (needed for correct client IPs / `Secure` behind nginx) |
+| `P2F_DISABLE_SYMLINKS` | `off`   | When `on`, symlinks are treated as if they don't exist — hidden from browsing/search and any path through one 404s. Default `off`: a symlinked file or folder that stays inside the shared root is followed and displayed like a regular one (with a small link badge), same as before this option existed |
 
 ## Behind a reverse proxy (nginx)
 

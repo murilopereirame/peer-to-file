@@ -15,6 +15,7 @@ export interface DirEntry {
   type: 'dir' | 'file'
   size: number | null
   mtime: number
+  isSymlink: boolean
 }
 
 export interface Listing {
@@ -50,14 +51,45 @@ async function mapLimit<T, R> (
 }
 
 /**
+ * Rejects (404, as if it doesn't exist) any path whose journey from `root` to
+ * `abs` crosses a symlink at any component — used when symlink-following is
+ * disabled. `abs` must already be known to sit inside `root` (isInside), and
+ * is checked component by component with lstat so an intermediate symlinked
+ * directory is caught just as reliably as a symlinked leaf.
+ */
+async function assertNoSymlinkInPath (root: string, abs: string): Promise<void> {
+  const rel = path.relative(root, abs)
+  if (rel === '') return
+  let current = root
+  for (const segment of rel.split(path.sep)) {
+    current = path.join(current, segment)
+    let st
+    try {
+      st = await fs.lstat(current)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        throw new BrowseError(404, 'no such file or directory')
+      }
+      throw err
+    }
+    if (st.isSymbolicLink()) {
+      throw new BrowseError(404, 'no such file or directory')
+    }
+  }
+}
+
+/**
  * Resolve a client-supplied relative path to an absolute path that is
  * guaranteed to live inside `root`. `root` must already be an absolute,
  * symlink-resolved (realpath) directory.
  *
  * Rejects `..` escapes, absolute paths and symlinks that point outside the
- * root. Throws BrowseError(404) if the path does not exist.
+ * root. Throws BrowseError(404) if the path does not exist. When
+ * `followSymlinks` is false, any path that crosses a symlink also 404s, as
+ * though the symlink doesn't exist.
  */
-export async function resolveInsideRoot (root: string, relPath: unknown = ''): Promise<string> {
+export async function resolveInsideRoot (root: string, relPath: unknown = '', followSymlinks = true): Promise<string> {
   if (typeof relPath !== 'string') {
     throw new BrowseError(400, 'path must be a string')
   }
@@ -70,6 +102,9 @@ export async function resolveInsideRoot (root: string, relPath: unknown = ''): P
   const abs = path.resolve(root, relative)
   if (!isInside(root, abs)) {
     throw new BrowseError(403, 'path escapes the shared root')
+  }
+  if (!followSymlinks) {
+    await assertNoSymlinkInPath(root, abs)
   }
 
   let real: string
@@ -104,11 +139,11 @@ function splitParentAndName (relPath: unknown): { parentRel: string, name: strin
 }
 
 /** Shared by resolveNewPathInsideRoot and resolveUploadTarget: validate an already-split parent+name pair. */
-async function resolveDestination (root: string, parentRel: unknown, name: string): Promise<string> {
+async function resolveDestination (root: string, parentRel: unknown, name: string, followSymlinks: boolean): Promise<string> {
   if (!isValidEntryName(name)) {
     throw new BrowseError(400, 'invalid file name')
   }
-  const parentAbs = await resolveInsideRoot(root, parentRel)
+  const parentAbs = await resolveInsideRoot(root, parentRel, followSymlinks)
   const stat = await fs.stat(parentAbs)
   if (!stat.isDirectory()) {
     throw new BrowseError(400, 'destination folder does not exist')
@@ -123,9 +158,9 @@ async function resolveDestination (root: string, parentRel: unknown, name: strin
  * separators or traversal tricks. Unlike resolveInsideRoot, this never
  * touches the target itself (it may not exist), only its parent.
  */
-export async function resolveNewPathInsideRoot (root: string, relPath: unknown): Promise<string> {
+export async function resolveNewPathInsideRoot (root: string, relPath: unknown, followSymlinks = true): Promise<string> {
   const { parentRel, name } = splitParentAndName(relPath)
-  return resolveDestination(root, parentRel, name)
+  return resolveDestination(root, parentRel, name, followSymlinks)
 }
 
 /**
@@ -136,11 +171,11 @@ export async function resolveNewPathInsideRoot (root: string, relPath: unknown):
  * `path=sub&name=` naively becomes "sub/", which trims to "sub" and reads
  * as a file named "sub" in the root instead of an invalid name inside sub/).
  */
-export async function resolveUploadTarget (root: string, destDirRel: unknown, name: unknown): Promise<string> {
+export async function resolveUploadTarget (root: string, destDirRel: unknown, name: unknown, followSymlinks = true): Promise<string> {
   if (typeof name !== 'string') {
     throw new BrowseError(400, 'invalid file name')
   }
-  return resolveDestination(root, destDirRel, name)
+  return resolveDestination(root, destDirRel, name, followSymlinks)
 }
 
 /**
@@ -153,22 +188,28 @@ export async function resolveUploadTarget (root: string, destDirRel: unknown, na
  * and act on whatever it points to (which resolveInsideRoot's realpath
  * would otherwise resolve to).
  */
-async function resolveEntryInsideRoot (root: string, relPath: unknown): Promise<string> {
+async function resolveEntryInsideRoot (root: string, relPath: unknown, followSymlinks = true): Promise<string> {
   const { parentRel, name } = splitParentAndName(relPath)
-  if (name === '') return resolveInsideRoot(root, parentRel) // '' (or an all-".." path) means the root itself
+  if (name === '') return resolveInsideRoot(root, parentRel, followSymlinks) // '' (or an all-".." path) means the root itself
   if (!isValidEntryName(name)) {
     throw new BrowseError(400, 'invalid file name')
   }
-  const parentAbs = await resolveInsideRoot(root, parentRel)
+  const parentAbs = await resolveInsideRoot(root, parentRel, followSymlinks)
   const abs = path.join(parentAbs, name)
+  let st
   try {
-    await fs.lstat(abs)
+    st = await fs.lstat(abs)
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
     if (code === 'ENOENT' || code === 'ENOTDIR') {
       throw new BrowseError(404, 'no such file or directory')
     }
     throw err
+  }
+  // Symlink-following disabled: the entry itself is off-limits too, exactly
+  // as if it weren't there — matches it being hidden from listDir/searchTree.
+  if (!followSymlinks && st.isSymbolicLink()) {
+    throw new BrowseError(404, 'no such file or directory')
   }
   return abs
 }
@@ -183,8 +224,8 @@ export function throwIfPermissionError (err: unknown): never {
 }
 
 /** Deletes a file, directory (recursively) or symlink (just the link) inside the root. */
-export async function deleteEntry (root: string, relPath: unknown): Promise<{ abs: string, rel: string, wasDir: boolean }> {
-  const abs = await resolveEntryInsideRoot(root, relPath)
+export async function deleteEntry (root: string, relPath: unknown, followSymlinks = true): Promise<{ abs: string, rel: string, wasDir: boolean }> {
+  const abs = await resolveEntryInsideRoot(root, relPath, followSymlinks)
   if (abs === root) {
     throw new BrowseError(400, 'cannot delete the shared root')
   }
@@ -217,13 +258,13 @@ export async function deleteEntry (root: string, relPath: unknown): Promise<{ ab
  * general-purpose atomic move across filesystems to fall back to.
  */
 export async function moveEntry (
-  fromRoot: string, fromRelPath: unknown, toRoot: string, toRelPath: unknown
+  fromRoot: string, fromRelPath: unknown, toRoot: string, toRelPath: unknown, followSymlinks = true
 ): Promise<{ fromAbs: string, fromRel: string, toAbs: string, toRel: string }> {
-  const fromAbs = await resolveEntryInsideRoot(fromRoot, fromRelPath)
+  const fromAbs = await resolveEntryInsideRoot(fromRoot, fromRelPath, followSymlinks)
   if (fromAbs === fromRoot) {
     throw new BrowseError(400, 'cannot move the shared root')
   }
-  const toAbs = await resolveNewPathInsideRoot(toRoot, toRelPath)
+  const toAbs = await resolveNewPathInsideRoot(toRoot, toRelPath, followSymlinks)
   if (fromRoot === toRoot && isInside(fromAbs, toAbs)) {
     throw new BrowseError(400, 'cannot move a folder into itself')
   }
@@ -254,8 +295,8 @@ export async function moveEntry (
 }
 
 /** Creates a new, empty directory inside the root. Refuses to overwrite an existing entry. */
-export async function createFolder (root: string, relPath: unknown): Promise<{ abs: string, rel: string }> {
-  const abs = await resolveNewPathInsideRoot(root, relPath)
+export async function createFolder (root: string, relPath: unknown, followSymlinks = true): Promise<{ abs: string, rel: string }> {
+  const abs = await resolveNewPathInsideRoot(root, relPath, followSymlinks)
   const exists = await fs.lstat(abs).then(() => true, () => false)
   if (exists) {
     throw new BrowseError(409, 'a file or folder already exists there')
@@ -271,9 +312,11 @@ export async function createFolder (root: string, relPath: unknown): Promise<{ a
 /**
  * List a directory inside the root. Symlinks pointing outside the root,
  * broken symlinks and special files (sockets, devices, ...) are omitted.
+ * When `followSymlinks` is false, every symlink is omitted instead of being
+ * resolved — the listing then looks exactly as it would if they didn't exist.
  */
-export async function listDir (root: string, relPath: unknown = ''): Promise<Listing> {
-  const abs = await resolveInsideRoot(root, relPath)
+export async function listDir (root: string, relPath: unknown = '', followSymlinks = true): Promise<Listing> {
+  const abs = await resolveInsideRoot(root, relPath, followSymlinks)
   const stat = await fs.stat(abs)
   if (!stat.isDirectory()) {
     throw new BrowseError(400, 'not a directory')
@@ -286,16 +329,18 @@ export async function listDir (root: string, relPath: unknown = ''): Promise<Lis
   const results = await mapLimit(dirents, 64, async (dirent): Promise<DirEntry | null> => {
     const entryPath = path.join(abs, dirent.name)
     try {
-      if (dirent.isSymbolicLink()) {
+      const isSymlink = dirent.isSymbolicLink()
+      if (isSymlink) {
+        if (!followSymlinks) return null
         const real = await fs.realpath(entryPath)
         if (!isInside(root, real)) return null
       }
       const st = await fs.stat(entryPath)
       if (st.isDirectory()) {
-        return { name: dirent.name, type: 'dir', size: null, mtime: st.mtimeMs }
+        return { name: dirent.name, type: 'dir', size: null, mtime: st.mtimeMs, isSymlink }
       }
       if (st.isFile()) {
-        return { name: dirent.name, type: 'file', size: st.size, mtime: st.mtimeMs }
+        return { name: dirent.name, type: 'file', size: st.size, mtime: st.mtimeMs, isSymlink }
       }
       return null
     } catch {
