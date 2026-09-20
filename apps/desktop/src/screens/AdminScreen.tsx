@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { errMessage, type AdminMount, type AdminUser } from '@p2f/shared'
+import { errMessage, type AdminMount, type AdminUser, type Role } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
 import { useToast } from '../context/ToastContext'
 import { Button, Card, ErrorText, Input, Muted } from '../components/Primitives'
-import { FolderPlusIcon, HardDriveIcon, KeyIcon, RefreshIcon, ShieldIcon, TrashIcon, UsersIcon } from '../components/icons'
+import {
+  FolderPlusIcon, HardDriveIcon, KeyIcon, RefreshIcon, ShieldIcon, TrashIcon, UserPlusIcon, UsersIcon
+} from '../components/icons'
 
 /** Card with the same head/body split the rest of the app uses. */
 function Section ({
@@ -52,6 +54,16 @@ export function AdminScreen (): React.JSX.Element {
       .finally(() => setBusy(false))
   }
 
+  const deleteUser = (user: AdminUser): void => {
+    if (!app.client) return
+    if (!window.confirm(`Delete the user "${user.username}"?\n\nThis revokes all of their sessions and mount access grants — it can't be undone.`)) return
+    setBusy(true)
+    void app.client.adminDeleteUser(user.username)
+      .then(async () => { notify(`User "${user.username}" deleted`); await load(); await app.refreshMounts() })
+      .catch(err => notify(errMessage(err)))
+      .finally(() => setBusy(false))
+  }
+
   const deleteMount = (mount: AdminMount): void => {
     if (!app.client) return
     if (!window.confirm(`Remove the mount "${mount.name}"?\n\nThis only stops sharing it — nothing on disk is touched.`)) return
@@ -82,24 +94,11 @@ export function AdminScreen (): React.JSX.Element {
 
   return (
     <>
-      <Section title={`Users${users ? ` (${users.length})` : ''}`} icon={<UsersIcon size={15} />}>
-        {users === null && <Muted>loading…</Muted>}
-        {users?.map(u => (
-          <div key={u.id} className="admin-row">
-            <span className="admin-row-main">
-              <strong>{u.username}</strong>
-              <span className={`badge${u.role === 'admin' ? ' accent' : ''}`}>{u.role}</span>
-            </span>
-            <Button
-              variant="secondary" className="sm" disabled={busy}
-              onClick={() => setRole(u.username, u.role === 'admin' ? 'user' : 'admin')}
-            >
-              <ShieldIcon size={13} />
-              {u.role === 'admin' ? 'Demote to user' : 'Promote to admin'}
-            </Button>
-          </div>
-        ))}
-      </Section>
+      <UsersSection
+        users={users} busy={busy} onSetRole={setRole}
+        onCreated={() => { void load() }}
+        onDelete={deleteUser}
+      />
 
       <MountsSection
         mounts={mounts} users={users} busy={busy}
@@ -109,6 +108,84 @@ export function AdminScreen (): React.JSX.Element {
         onRevoke={revokeAccess}
       />
     </>
+  )
+}
+
+function UsersSection ({
+  users, busy, onSetRole, onCreated, onDelete
+}: {
+  users: AdminUser[] | null
+  busy: boolean
+  onSetRole: (username: string, role: 'user' | 'admin') => void
+  onCreated: () => void
+  onDelete: (user: AdminUser) => void
+}): React.JSX.Element {
+  const app = useApp()
+  const notify = useToast()
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [role, setRole] = useState<Role>('user')
+  const [createError, setCreateError] = useState('')
+  const [creating, setCreating] = useState(false)
+
+  const createUser = (): void => {
+    if (!app.client || creating || !username.trim() || !password) return
+    setCreating(true)
+    setCreateError('')
+    app.client.adminCreateUser(username.trim(), password, role)
+      .then(() => {
+        notify(`User "${username.trim()}" created`)
+        setUsername('')
+        setPassword('')
+        setRole('user')
+        onCreated()
+      })
+      .catch(err => setCreateError(errMessage(err)))
+      .finally(() => setCreating(false))
+  }
+
+  return (
+    <Section title={`Users${users ? ` (${users.length})` : ''}`} icon={<UsersIcon size={15} />}>
+      <div className="btn-row" style={{ marginTop: 0, alignItems: 'center' }}>
+        <Input placeholder="username" value={username} disabled={creating} onChange={e => setUsername(e.target.value)} style={{ flex: 1 }} />
+        <Input
+          type="password" placeholder="password (min 12 characters)" value={password} disabled={creating}
+          onChange={e => setPassword(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') createUser() }}
+          style={{ flex: 1 }}
+        />
+        <select className="input" value={role} disabled={creating} onChange={e => setRole(e.target.value as Role)}>
+          <option value="user">user</option>
+          <option value="admin">admin</option>
+        </select>
+        <Button className="sm" disabled={creating || !username.trim() || !password} onClick={createUser}>
+          <UserPlusIcon size={13} />Add user
+        </Button>
+      </div>
+      <ErrorText>{createError}</ErrorText>
+
+      {users === null && <Muted>loading…</Muted>}
+      {users?.map(u => (
+        <div key={u.id} className="admin-row">
+          <span className="admin-row-main">
+            <strong>{u.username}</strong>
+            <span className={`badge${u.role === 'admin' ? ' accent' : ''}`}>{u.role}</span>
+          </span>
+          <span className="btn-row" style={{ margin: 0 }}>
+            <Button
+              variant="secondary" className="sm" disabled={busy}
+              onClick={() => onSetRole(u.username, u.role === 'admin' ? 'user' : 'admin')}
+            >
+              <ShieldIcon size={13} />
+              {u.role === 'admin' ? 'Demote to user' : 'Promote to admin'}
+            </Button>
+            <Button variant="danger" className="sm" disabled={busy} onClick={() => onDelete(u)}>
+              <TrashIcon size={13} />Delete
+            </Button>
+          </span>
+        </div>
+      ))}
+    </Section>
   )
 }
 

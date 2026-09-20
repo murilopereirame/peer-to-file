@@ -170,6 +170,14 @@ export class P2FClient {
     await this.request(`/api/admin/users/${encodeURIComponent(username)}/role`, P2FClient.jsonInit('POST', { role }))
   }
 
+  async adminCreateUser (username: string, password: string, role?: Role): Promise<AdminUser> {
+    return await this.requestJson('/api/admin/users', P2FClient.jsonInit('POST', { username, password, role }))
+  }
+
+  async adminDeleteUser (username: string): Promise<void> {
+    await this.request(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' })
+  }
+
   async adminMounts (): Promise<{ mounts: AdminMount[] }> {
     return await this.requestJson('/api/admin/mounts')
   }

@@ -668,6 +668,40 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     res.json({ ok: true })
   }))
 
+  app.post('/api/admin/users', jsonBody, requireAdmin, wrap(async (req, res) => {
+    const { username, password, role } = (req.body ?? {}) as { username?: unknown, password?: unknown, role?: unknown }
+    if (typeof username !== 'string') throw new BrowseError(400, 'username is required')
+    if (typeof password !== 'string') throw new BrowseError(400, 'password is required')
+    if (role !== undefined && role !== 'user' && role !== 'admin') throw new BrowseError(400, "role must be 'user' or 'admin'")
+    if (db.getUserByUsername(username)) throw new BrowseError(409, 'a user with that name already exists')
+    let target: User
+    try {
+      target = db.createUser(username, password, (role as Role | undefined) ?? 'user')
+    } catch (err) {
+      throw new BrowseError(400, err instanceof Error ? err.message : 'invalid username or password')
+    }
+    const requester = authedUser(res)
+    activity.add('admin', `user "${target.username}" created by ${requester.username}`, {
+      targetUser: target.username, role: target.role, user: requester.username, ip: req.ip
+    })
+    res.status(201).json({ id: target.id, username: target.username, role: target.role, createdAt: target.created_at })
+  }))
+
+  app.delete('/api/admin/users/:username', requireAdmin, wrap(async (req, res) => {
+    const username = String(req.params.username)
+    const target = db.getUserByUsername(username)
+    if (!target) throw new BrowseError(404, 'no such user')
+    if (target.role === 'admin' && db.countAdmins() <= 1) {
+      throw new BrowseError(400, 'cannot delete the last remaining admin')
+    }
+    const requester = authedUser(res)
+    db.deleteUser(username)
+    activity.add('admin', `user "${username}" deleted by ${requester.username}`, {
+      targetUser: username, user: requester.username, ip: req.ip
+    })
+    res.json({ ok: true })
+  }))
+
   app.get('/api/admin/mounts', requireAdmin, (req, res) => {
     res.json({
       mounts: db.listMounts().map(m => ({

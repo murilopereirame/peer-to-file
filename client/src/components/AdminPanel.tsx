@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { AdminMount, AdminUser } from '@p2f/shared'
+import type { AdminMount, AdminUser, Role } from '@p2f/shared'
 import { useApi } from '../context/ApiContext'
 import { useMount } from '../context/MountContext'
 import { useToast } from '../context/ToastContext'
 import { errMessage, HttpError } from '../lib/format'
 import {
-  FolderPlusIcon, HardDriveIcon, KeyIcon, RefreshIcon, ShieldIcon, TrashIcon, UsersIcon
+  FolderPlusIcon, HardDriveIcon, KeyIcon, RefreshIcon, ShieldIcon, TrashIcon, UserPlusIcon, UsersIcon
 } from './icons'
 
 export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Element {
@@ -46,6 +46,23 @@ export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Ele
           body: JSON.stringify({ role })
         })
         notify(`"${username}" is now ${role === 'admin' ? 'an admin' : 'a regular user'}`)
+        await load()
+        void refreshMounts()
+      } catch (err) {
+        notify(err instanceof HttpError ? err.message : errMessage(err))
+      } finally {
+        setBusy(false)
+      }
+    })()
+  }
+
+  const deleteUser = (user: AdminUser): void => {
+    if (!window.confirm(`Delete the user "${user.username}"?\n\nThis revokes all of their sessions and mount access grants — it can't be undone.`)) return
+    setBusy(true)
+    void (async () => {
+      try {
+        await apiFetch(`/api/admin/users/${encodeURIComponent(user.username)}`, { method: 'DELETE' })
+        notify(`User "${user.username}" deleted`)
         await load()
         void refreshMounts()
       } catch (err) {
@@ -109,7 +126,11 @@ export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Ele
 
   return (
     <>
-      <UsersCard users={visibleUsers} loading={users === null} busy={busy} onSetRole={setRole} />
+      <UsersCard
+        users={visibleUsers} loading={users === null} busy={busy} onSetRole={setRole}
+        onCreated={() => { void load() }}
+        onDelete={deleteUser}
+      />
       <MountsCard
         mounts={visibleMounts} users={users} loading={mounts === null} busy={busy}
         onCreated={() => { void load(); void refreshMounts() }}
@@ -122,13 +143,47 @@ export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Ele
 }
 
 function UsersCard ({
-  users, loading, busy, onSetRole
+  users, loading, busy, onSetRole, onCreated, onDelete
 }: {
   users: AdminUser[] | undefined
   loading: boolean
   busy: boolean
   onSetRole: (username: string, role: 'user' | 'admin') => void
+  onCreated: () => void
+  onDelete: (user: AdminUser) => void
 }): React.JSX.Element {
+  const { apiFetch } = useApi()
+  const notify = useToast()
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [role, setRole] = useState<Role>('user')
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+
+  const createUser = (): void => {
+    if (creating || !username.trim() || !password) return
+    setCreating(true)
+    setCreateError(null)
+    void (async () => {
+      try {
+        await apiFetch('/api/admin/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username.trim(), password, role })
+        })
+        notify(`User "${username.trim()}" created`)
+        setUsername('')
+        setPassword('')
+        setRole('user')
+        onCreated()
+      } catch (err) {
+        setCreateError(errMessage(err))
+      } finally {
+        setCreating(false)
+      }
+    })()
+  }
+
   return (
     <section className="card">
       <div className="card-head">
@@ -138,6 +193,28 @@ function UsersCard ({
           {users && <span className="muted-count">{users.length}</span>}
         </h2>
       </div>
+
+      <div className="card-body admin-mount-create">
+        <input
+          type="text" placeholder="username" value={username} disabled={creating}
+          onChange={e => setUsername(e.target.value)}
+        />
+        <input
+          type="password" placeholder="password (min 12 characters)" value={password} disabled={creating}
+          onChange={e => setPassword(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') createUser() }}
+        />
+        <select value={role} disabled={creating} onChange={e => setRole(e.target.value as Role)}>
+          <option value="user">user</option>
+          <option value="admin">admin</option>
+        </select>
+        <button type="button" className="btn primary sm" disabled={creating || !username.trim() || !password} onClick={createUser}>
+          <UserPlusIcon size={13} />
+          Add user
+        </button>
+      </div>
+      {createError && <div className="entry-error admin-mount-create-error">{createError}</div>}
+
       <ul className="admin-list">
         {loading && <li className="empty loading">loading…</li>}
         {!loading && users?.length === 0 && <li className="empty">no users match this filter</li>}
@@ -147,13 +224,19 @@ function UsersCard ({
               <strong>{u.username}</strong>
               <span className={`badge${u.role === 'admin' ? ' accent' : ''}`}>{u.role}</span>
             </span>
-            <button
-              type="button" className="btn outline sm" disabled={busy}
-              onClick={() => onSetRole(u.username, u.role === 'admin' ? 'user' : 'admin')}
-            >
-              <ShieldIcon size={13} />
-              {u.role === 'admin' ? 'Demote to user' : 'Promote to admin'}
-            </button>
+            <span className="admin-row-actions">
+              <button
+                type="button" className="btn outline sm" disabled={busy}
+                onClick={() => onSetRole(u.username, u.role === 'admin' ? 'user' : 'admin')}
+              >
+                <ShieldIcon size={13} />
+                {u.role === 'admin' ? 'Demote to user' : 'Promote to admin'}
+              </button>
+              <button type="button" className="btn danger sm" disabled={busy} onClick={() => onDelete(u)}>
+                <TrashIcon size={13} />
+                Delete
+              </button>
+            </span>
           </li>
         ))}
       </ul>
