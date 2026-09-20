@@ -339,20 +339,23 @@ created (via the setup screen or `cli.ts add-user` before any account exists) is
 admins can promote or demote other accounts later.
 
 - **Web/desktop clients**: signed-in admins get an **Admin** view (nav item / tab) to
-  promote/demote user roles, add or remove mounts, and grant or revoke a user's access to a
-  non-default mount. Everyone else only ever sees the mounts they're allowed into — the
-  default mount, plus anything explicitly granted.
+  create or delete user accounts, promote/demote user roles, add or remove mounts, and grant
+  or revoke a user's access to a non-default mount. Everyone else only ever sees the mounts
+  they're allowed into — the default mount, plus anything explicitly granted.
 - **API**: `GET /api/mounts` lists what the caller can reach (admins see every mount, with
-  its path); `/api/admin/users`, `/api/admin/mounts`, and
-  `/api/admin/mounts/:id/access[/:userId]` (admin-only) manage roles, mounts and grants. Every
-  browse/upload/download/torrent/search endpoint takes an optional `mount` (id or name) —
-  omit it and it targets the default mount, so existing single-mount scripts keep working
-  unchanged. `POST /api/move` additionally takes an optional `toMount`, for a move that
-  lands in a different mount than the one `from` lives in (the caller needs access to both
-  when they differ; omit it for the ordinary same-mount case).
-- **CLI**: `set-role <user> <user|admin>`, `list-mounts`, `add-mount <name> <path>`,
-  `del-mount <name>`, `grant-mount <name> <user>`, `revoke-mount <name> <user>` — see
-  `node src/server/cli.ts` with no arguments for the full list.
+  its path); `/api/admin/users` (`GET`/`POST`), `/api/admin/users/:username` (`DELETE`),
+  `/api/admin/users/:username/role`, `/api/admin/mounts`, and
+  `/api/admin/mounts/:id/access[/:userId]` (admin-only) manage accounts, roles, mounts and
+  grants — deleting a user revokes their sessions, API tokens and mount grants, and is refused
+  for the last remaining admin. Every browse/upload/download/torrent/search endpoint takes an
+  optional `mount` (id or name) — omit it and it targets the default mount, so existing
+  single-mount scripts keep working unchanged. `POST /api/move` additionally takes an optional
+  `toMount`, for a move that lands in a different mount than the one `from` lives in (the
+  caller needs access to both when they differ; omit it for the ordinary same-mount case).
+- **CLI**: `add-user <user> <password>`, `del-user <user>`, `set-role <user> <user|admin>`,
+  `list-mounts`, `add-mount <name> <path>`, `del-mount <name>`, `grant-mount <name> <user>`,
+  `revoke-mount <name> <user>` — see `node src/server/cli.ts` with no arguments for the full
+  list.
 
 A mount other than the default is just a second directory the server is told to serve — it
 doesn't need to sit under `P2F_ROOT`, but it does need to exist and be readable by the

@@ -200,6 +200,74 @@ test('the last remaining admin cannot be demoted', async () => {
   assert.equal(res.status, 400)
 })
 
+test('POST/DELETE /api/admin/users require the admin role', async () => {
+  const create = await fetch(`${base}/api/admin/users`, {
+    method: 'POST', headers: authJson(userToken), body: JSON.stringify({ username: 'nope', password: 'correct horse battery' })
+  })
+  assert.equal(create.status, 403)
+
+  const del = await fetch(`${base}/api/admin/users/member`, { method: 'DELETE', headers: authHeader(userToken) })
+  assert.equal(del.status, 403)
+})
+
+test('admin can create a new user, who can then authenticate; duplicate names and weak passwords are rejected', async () => {
+  const create = await fetch(`${base}/api/admin/users`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ username: 'newbie', password: 'correct horse battery' })
+  })
+  assert.equal(create.status, 201)
+  const created = await create.json() as { username: string, role: string }
+  assert.equal(created.username, 'newbie')
+  assert.equal(created.role, 'user') // role defaults to 'user' when omitted
+
+  const login = await fetch(`${base}/api/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'newbie', password: 'correct horse battery' })
+  })
+  assert.equal(login.status, 200)
+
+  const dupe = await fetch(`${base}/api/admin/users`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ username: 'newbie', password: 'correct horse battery' })
+  })
+  assert.equal(dupe.status, 409)
+
+  const weak = await fetch(`${base}/api/admin/users`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ username: 'weakling', password: 'short' })
+  })
+  assert.equal(weak.status, 400)
+})
+
+test('admin can create an admin user via the role field', async () => {
+  const create = await fetch(`${base}/api/admin/users`, {
+    method: 'POST', headers: authJson(adminToken),
+    body: JSON.stringify({ username: 'newadmin', password: 'correct horse battery', role: 'admin' })
+  })
+  assert.equal(create.status, 201)
+  const created = await create.json() as { role: string }
+  assert.equal(created.role, 'admin')
+})
+
+test('deleting a user revokes their access; the last remaining admin cannot be deleted', async () => {
+  // "admin" is not the last admin right now — "newadmin" also exists — so an
+  // admin deleting another admin succeeds as long as one would remain.
+  const del = await fetch(`${base}/api/admin/users/newbie`, { method: 'DELETE', headers: authHeader(adminToken) })
+  assert.equal(del.status, 200)
+
+  const list = await fetch(`${base}/api/admin/users`, { headers: authHeader(adminToken) })
+  const body = await list.json() as { users: Array<{ username: string }> }
+  assert.ok(!body.users.some(u => u.username === 'newbie'))
+
+  const missing = await fetch(`${base}/api/admin/users/newbie`, { method: 'DELETE', headers: authHeader(adminToken) })
+  assert.equal(missing.status, 404)
+
+  // clean up the extra admin so later tests still see exactly one admin+member
+  const cleanup = await fetch(`${base}/api/admin/users/newadmin`, { method: 'DELETE', headers: authHeader(adminToken) })
+  assert.equal(cleanup.status, 200)
+
+  // "admin" is now the only remaining admin — deleting it must be refused.
+  const lastAdminDelete = await fetch(`${base}/api/admin/users/admin`, { method: 'DELETE', headers: authHeader(adminToken) })
+  assert.equal(lastAdminDelete.status, 400)
+})
+
 test('a raw token minted for one mount does not authorize the same path in another mount', async () => {
   // Both mounts have a file whose name collides in spirit (not literally,
   // just to prove the token is mount-scoped): mint a torrent for the file in

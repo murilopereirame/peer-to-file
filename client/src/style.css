@@ -1027,6 +1027,7 @@ li[data-state="error"] .dl-bar > div { background: var(--negative); }
   border-bottom: 1px solid var(--line-soft);
 }
 .admin-mount-create input { flex: 1; min-width: 10rem; }
+.admin-mount-create select { flex: 0 0 auto; }
 .admin-mount-create-error { padding: 0 1rem .75rem; }
 
 .admin-mount-access {
