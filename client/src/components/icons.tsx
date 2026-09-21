@@ -305,6 +305,18 @@ export const LinkIcon = icon(
   </>
 )
 
+export const StarIcon = icon(
+  <path d="M12 2 15 8.5 22 9.3 17 14.1 18.2 21 12 17.6 5.8 21 7 14.1 2 9.3 9 8.5Z" />
+)
+
+export const UserMinusIcon = icon(
+  <>
+    <path d="M13 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M22 11h-6" />
+  </>
+)
+
 export const HardDriveIcon = icon(
   <>
     <line x1="22" y1="12" x2="2" y2="12" />

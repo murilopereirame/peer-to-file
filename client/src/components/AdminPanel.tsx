@@ -5,7 +5,8 @@ import { useMount } from '../context/MountContext'
 import { useToast } from '../context/ToastContext'
 import { errMessage, HttpError } from '../lib/format'
 import {
-  FolderPlusIcon, HardDriveIcon, KeyIcon, RefreshIcon, ShieldIcon, TrashIcon, UserPlusIcon, UsersIcon
+  FolderPlusIcon, HardDriveIcon, KeyIcon, RefreshIcon, ShieldIcon, StarIcon, TrashIcon, UserMinusIcon,
+  UserPlusIcon, UsersIcon
 } from './icons'
 
 export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Element {
@@ -48,6 +49,25 @@ export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Ele
         notify(`"${username}" is now ${role === 'admin' ? 'an admin' : 'a regular user'}`)
         await load()
         void refreshMounts()
+      } catch (err) {
+        notify(err instanceof HttpError ? err.message : errMessage(err))
+      } finally {
+        setBusy(false)
+      }
+    })()
+  }
+
+  const setDefaultMount = (username: string, mountId: number | null, mountName: string): void => {
+    setBusy(true)
+    void (async () => {
+      try {
+        await apiFetch(`/api/admin/users/${encodeURIComponent(username)}/default-mount`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mountId })
+        })
+        notify(mountId === null ? `"${username}"'s default mount reset to the global default` : `"${username}"'s default mount set to "${mountName}"`)
+        await load()
       } catch (err) {
         notify(err instanceof HttpError ? err.message : errMessage(err))
       } finally {
@@ -106,6 +126,22 @@ export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Ele
     })()
   }
 
+  const allowAccess = (mount: AdminMount, userId: number, username: string): void => {
+    setBusy(true)
+    void (async () => {
+      try {
+        await apiFetch(`/api/admin/mounts/${mount.id}/deny/${userId}`, { method: 'DELETE' })
+        notify(`Restored "${username}"'s access to the default mount "${mount.name}"`)
+        await load()
+        void refreshMounts()
+      } catch (err) {
+        notify(errMessage(err))
+      } finally {
+        setBusy(false)
+      }
+    })()
+  }
+
   const query = search.trim().toLowerCase()
   const visibleUsers = users?.filter(u => query === '' || u.username.toLowerCase().includes(query))
   const visibleMounts = mounts?.filter(m => query === '' || m.name.toLowerCase().includes(query))
@@ -127,9 +163,10 @@ export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Ele
   return (
     <>
       <UsersCard
-        users={visibleUsers} loading={users === null} busy={busy} onSetRole={setRole}
+        users={visibleUsers} mounts={mounts} loading={users === null} busy={busy} onSetRole={setRole}
         onCreated={() => { void load() }}
         onDelete={deleteUser}
+        onSetDefaultMount={setDefaultMount}
       />
       <MountsCard
         mounts={visibleMounts} users={users} loading={mounts === null} busy={busy}
@@ -137,20 +174,24 @@ export function AdminPanel ({ search = '' }: { search?: string }): React.JSX.Ele
         onDelete={deleteMount}
         onGranted={() => { void load(); void refreshMounts() }}
         onRevoke={revokeAccess}
+        onDenied={() => { void load(); void refreshMounts() }}
+        onAllowed={allowAccess}
       />
     </>
   )
 }
 
 function UsersCard ({
-  users, loading, busy, onSetRole, onCreated, onDelete
+  users, mounts, loading, busy, onSetRole, onCreated, onDelete, onSetDefaultMount
 }: {
   users: AdminUser[] | undefined
+  mounts: AdminMount[] | null
   loading: boolean
   busy: boolean
   onSetRole: (username: string, role: 'user' | 'admin') => void
   onCreated: () => void
   onDelete: (user: AdminUser) => void
+  onSetDefaultMount: (username: string, mountId: number | null, mountName: string) => void
 }): React.JSX.Element {
   const { apiFetch } = useApi()
   const notify = useToast()
@@ -223,8 +264,30 @@ function UsersCard ({
             <span className="admin-row-main">
               <strong>{u.username}</strong>
               <span className={`badge${u.role === 'admin' ? ' accent' : ''}`}>{u.role}</span>
+              {u.defaultMountId !== null && (
+                <span className="hint-inline">
+                  default: {mounts?.find(m => m.id === u.defaultMountId)?.name ?? 'unknown mount'}
+                </span>
+              )}
             </span>
             <span className="admin-row-actions">
+              <span className="admin-default-mount-picker">
+                <StarIcon size={13} />
+                <select
+                  aria-label={`default mount for ${u.username}`}
+                  value={u.defaultMountId ?? ''}
+                  disabled={busy || !mounts || mounts.length === 0}
+                  onChange={e => {
+                    const value = e.target.value
+                    if (value === '') { onSetDefaultMount(u.username, null, ''); return }
+                    const mount = mounts?.find(m => m.id === Number(value))
+                    if (mount) onSetDefaultMount(u.username, mount.id, mount.name)
+                  }}
+                >
+                  <option value="">global default</option>
+                  {mounts?.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+              </span>
               <button
                 type="button" className="btn outline sm" disabled={busy}
                 onClick={() => onSetRole(u.username, u.role === 'admin' ? 'user' : 'admin')}
@@ -245,7 +308,7 @@ function UsersCard ({
 }
 
 function MountsCard ({
-  mounts, users, loading, busy, onCreated, onDelete, onGranted, onRevoke
+  mounts, users, loading, busy, onCreated, onDelete, onGranted, onRevoke, onDenied, onAllowed
 }: {
   mounts: AdminMount[] | undefined
   users: AdminUser[] | null
@@ -255,6 +318,8 @@ function MountsCard ({
   onDelete: (mount: AdminMount) => void
   onGranted: () => void
   onRevoke: (mount: AdminMount, userId: number, username: string) => void
+  onDenied: () => void
+  onAllowed: (mount: AdminMount, userId: number, username: string) => void
 }): React.JSX.Element {
   const { apiFetch } = useApi()
   const notify = useToast()
@@ -264,6 +329,8 @@ function MountsCard ({
   const [creating, setCreating] = useState(false)
   const [grantFor, setGrantFor] = useState<number | null>(null)
   const [grantUsername, setGrantUsername] = useState('')
+  const [denyFor, setDenyFor] = useState<number | null>(null)
+  const [denyUsername, setDenyUsername] = useState('')
 
   const createMount = (): void => {
     if (creating || !name.trim() || !path.trim()) return
@@ -301,6 +368,25 @@ function MountsCard ({
         setGrantUsername('')
         setGrantFor(null)
         onGranted()
+      } catch (err) {
+        notify(errMessage(err))
+      }
+    })()
+  }
+
+  const denyAccess = (mount: AdminMount): void => {
+    if (!denyUsername.trim()) return
+    void (async () => {
+      try {
+        await apiFetch(`/api/admin/mounts/${mount.id}/deny`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: denyUsername.trim() })
+        })
+        notify(`Removed "${denyUsername.trim()}" from the default mount "${mount.name}"`)
+        setDenyUsername('')
+        setDenyFor(null)
+        onDenied()
       } catch (err) {
         notify(errMessage(err))
       }
@@ -345,20 +431,52 @@ function MountsCard ({
               <span className="hint-inline">{m.path}</span>
             </div>
             <div className="admin-row-actions">
-              {!m.isDefault && (
-                <button type="button" className="btn outline sm" disabled={busy} onClick={() => setGrantFor(grantFor === m.id ? null : m.id)}>
-                  <KeyIcon size={13} />
-                  Access
+              {m.isDefault ? (
+                <button type="button" className="btn outline sm" disabled={busy} onClick={() => setDenyFor(denyFor === m.id ? null : m.id)}>
+                  <UserMinusIcon size={13} />
+                  Remove user
                 </button>
-              )}
-              {!m.isDefault && (
-                <button type="button" className="btn danger sm" disabled={busy} onClick={() => onDelete(m)}>
-                  <TrashIcon size={13} />
-                  Remove
-                </button>
+              ) : (
+                <>
+                  <button type="button" className="btn outline sm" disabled={busy} onClick={() => setGrantFor(grantFor === m.id ? null : m.id)}>
+                    <KeyIcon size={13} />
+                    Access
+                  </button>
+                  <button type="button" className="btn danger sm" disabled={busy} onClick={() => onDelete(m)}>
+                    <TrashIcon size={13} />
+                    Remove
+                  </button>
+                </>
               )}
             </div>
-            {!m.isDefault && (
+            {m.isDefault ? (
+              <div className="admin-mount-access">
+                {m.denials.length === 0 && <span className="hint-inline">every user has access</span>}
+                {m.denials.map(d => (
+                  <span key={d.user_id} className="badge admin-access-badge negative">
+                    {d.username}
+                    <button
+                      type="button" className="icon-btn xs" aria-label={`restore ${d.username}'s access`}
+                      disabled={busy} onClick={() => onAllowed(m, d.user_id, d.username)}
+                    >
+                      <TrashIcon size={11} />
+                    </button>
+                  </span>
+                ))}
+                {denyFor === m.id && (
+                  <span className="admin-grant-form">
+                    <input
+                      type="text" list="admin-usernames" placeholder="username" value={denyUsername} autoFocus
+                      onChange={e => setDenyUsername(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') denyAccess(m) }}
+                    />
+                    <button type="button" className="btn danger sm" disabled={!denyUsername.trim()} onClick={() => denyAccess(m)}>
+                      Remove
+                    </button>
+                  </span>
+                )}
+              </div>
+            ) : (
               <div className="admin-mount-access">
                 {m.access.length === 0 && <span className="hint-inline">nobody granted yet</span>}
                 {m.access.map(a => (

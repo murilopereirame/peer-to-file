@@ -19,6 +19,12 @@ export interface User {
   username: string
   role: Role
   created_at: number
+  /** The mount this user should land on by default, overriding the global
+   *  default mount — set by an admin, null to fall back to the global one.
+   *  Only populated by queries that select it explicitly (listUsers,
+   *  getUserByUsername, getUserById); omitted elsewhere (e.g. auth lookups
+   *  that don't need it). */
+  default_mount_id?: number | null
 }
 
 export interface Mount {
@@ -37,6 +43,12 @@ export interface MountAccessEntry {
   user_id: number
   username: string
   granted_at: number
+}
+
+export interface MountDenialEntry {
+  user_id: number
+  username: string
+  denied_at: number
 }
 
 export interface ApiTokenInfo {
@@ -174,6 +186,16 @@ export class AuthDb {
         granted_at INTEGER NOT NULL,
         PRIMARY KEY (mount_id, user_id)
       );
+      -- Explicit exclusions from the default mount, which every user can
+      -- otherwise browse implicitly (see the mounts section below). Only
+      -- meaningful for the default mount: every other mount is already
+      -- opt-in via mount_access, so "no grant" already means "no access".
+      CREATE TABLE IF NOT EXISTS mount_denials (
+        mount_id INTEGER NOT NULL REFERENCES mounts(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        denied_at INTEGER NOT NULL,
+        PRIMARY KEY (mount_id, user_id)
+      );
     `)
     // Added after the initial release — CREATE TABLE IF NOT EXISTS above
     // leaves an existing table's columns untouched, so a pre-existing
@@ -190,7 +212,11 @@ export class AuthDb {
       // Every user created before roles existed keeps working as a plain
       // 'user' — an operator upgrading in place must explicitly promote
       // themselves back to 'admin' via the CLI (see cli.ts's set-role).
-      "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"
+      "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+      // A per-user override of which mount they land on. NULL (the default
+      // for every existing user) means "use the global default mount",
+      // preserving current behavior.
+      'ALTER TABLE users ADD COLUMN default_mount_id INTEGER REFERENCES mounts(id)'
     ]) {
       try { this.db.exec(stmt) } catch { /* column already exists */ }
     }
@@ -237,27 +263,34 @@ export class AuthDb {
     const user = this.getUserByUsername(username)
     if (!user) return false
     this.db.prepare('DELETE FROM mount_access WHERE user_id = ?').run(user.id)
+    this.db.prepare('DELETE FROM mount_denials WHERE user_id = ?').run(user.id)
     return this.db.prepare('DELETE FROM users WHERE id = ?').run(user.id).changes > 0
   }
 
   listUsers (): User[] {
     return this.db.prepare(
-      'SELECT id, username, role, created_at FROM users ORDER BY username'
+      'SELECT id, username, role, created_at, default_mount_id FROM users ORDER BY username'
     ).all() as unknown as User[]
   }
 
   getUserByUsername (username: string): User | null {
     const row = this.db.prepare(
-      'SELECT id, username, role, created_at FROM users WHERE username = ?'
+      'SELECT id, username, role, created_at, default_mount_id FROM users WHERE username = ?'
     ).get(username) as (User | undefined)
     return row ?? null
   }
 
   getUserById (id: number): User | null {
     const row = this.db.prepare(
-      'SELECT id, username, role, created_at FROM users WHERE id = ?'
+      'SELECT id, username, role, created_at, default_mount_id FROM users WHERE id = ?'
     ).get(id) as (User | undefined)
     return row ?? null
+  }
+
+  /** Sets (or, with `mountId` null, clears) a user's personal default mount.
+   *  Returns false if the user doesn't exist. */
+  setUserDefaultMount (userId: number, mountId: number | null): boolean {
+    return this.db.prepare('UPDATE users SET default_mount_id = ? WHERE id = ?').run(mountId, userId).changes > 0
   }
 
   /** How many admins currently exist — used to refuse demoting the last one. */
@@ -583,28 +616,37 @@ export class AuthDb {
     return rows.map(r => this.rowToMount(r))
   }
 
-  /** Mounts a given user may browse: every mount for an admin, otherwise the default mount plus any explicitly granted. */
+  /** Mounts a given user may browse: every mount for an admin, otherwise the
+   *  default mount (unless this user was explicitly denied it) plus any
+   *  explicitly granted. */
   listMountsForUser (userId: number, isAdmin: boolean): Mount[] {
     if (isAdmin) return this.listMounts()
     const rows = this.db.prepare(`
       SELECT m.* FROM mounts m
-      WHERE m.is_default = 1 OR EXISTS (SELECT 1 FROM mount_access a WHERE a.mount_id = m.id AND a.user_id = ?)
+      WHERE (m.is_default = 1 AND NOT EXISTS (SELECT 1 FROM mount_denials d WHERE d.mount_id = m.id AND d.user_id = ?))
+         OR EXISTS (SELECT 1 FROM mount_access a WHERE a.mount_id = m.id AND a.user_id = ?)
       ORDER BY m.is_default DESC, m.name
-    `).all(userId) as Array<{ id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null }>
+    `).all(userId, userId) as Array<{ id: number, name: string, path: string, is_default: number, created_at: number, created_by: number | null }>
     return rows.map(r => this.rowToMount(r))
   }
 
   hasMountAccess (mount: Mount, userId: number, isAdmin: boolean): boolean {
-    if (isAdmin || mount.is_default) return true
+    if (isAdmin) return true
+    if (mount.is_default) {
+      return this.db.prepare('SELECT 1 FROM mount_denials WHERE mount_id = ? AND user_id = ?')
+        .get(mount.id, userId) === undefined
+    }
     return this.db.prepare('SELECT 1 FROM mount_access WHERE mount_id = ? AND user_id = ?')
       .get(mount.id, userId) !== undefined
   }
 
-  /** Deletes a mount and its access grants. Refuses to delete the default mount. */
+  /** Deletes a mount and its access grants/denials. Refuses to delete the default mount. */
   deleteMount (id: number): boolean {
     const mount = this.getMountById(id)
     if (!mount || mount.is_default) return false
     this.db.prepare('DELETE FROM mount_access WHERE mount_id = ?').run(id)
+    this.db.prepare('DELETE FROM mount_denials WHERE mount_id = ?').run(id)
+    this.db.prepare('UPDATE users SET default_mount_id = NULL WHERE default_mount_id = ?').run(id)
     return this.db.prepare('DELETE FROM mounts WHERE id = ?').run(id).changes > 0
   }
 
@@ -622,5 +664,23 @@ export class AuthDb {
       SELECT a.user_id, u.username, a.granted_at FROM mount_access a
       JOIN users u ON u.id = a.user_id WHERE a.mount_id = ? ORDER BY u.username
     `).all(mountId) as unknown as MountAccessEntry[]
+  }
+
+  /** Excludes a user from the default mount's implicit, everyone-has-it access. No-op for other mounts (see mount_denials). */
+  denyMountAccess (mountId: number, userId: number): void {
+    this.db.prepare('INSERT OR IGNORE INTO mount_denials (mount_id, user_id, denied_at) VALUES (?, ?, ?)')
+      .run(mountId, userId, Date.now())
+  }
+
+  /** Undoes a denyMountAccess. */
+  allowMountAccess (mountId: number, userId: number): void {
+    this.db.prepare('DELETE FROM mount_denials WHERE mount_id = ? AND user_id = ?').run(mountId, userId)
+  }
+
+  listMountDenials (mountId: number): MountDenialEntry[] {
+    return this.db.prepare(`
+      SELECT d.user_id, u.username, d.denied_at FROM mount_denials d
+      JOIN users u ON u.id = d.user_id WHERE d.mount_id = ? ORDER BY u.username
+    `).all(mountId) as unknown as MountDenialEntry[]
   }
 }

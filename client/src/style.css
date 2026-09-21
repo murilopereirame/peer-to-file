@@ -1057,6 +1057,9 @@ li[data-state="error"] .dl-bar > div { background: var(--negative); }
 .admin-grant-form { display: flex; gap: .4rem; align-items: center; }
 .admin-grant-form input { width: 11rem; height: 1.8rem; font-size: .8rem; }
 
+.admin-default-mount-picker { display: flex; align-items: center; gap: .3rem; color: var(--fg-subtle); }
+.admin-default-mount-picker select { height: 1.8rem; font-size: .8rem; }
+
 /* ---------------------------------------------------------- responsive --- */
 
 @media (max-width: 800px) {
