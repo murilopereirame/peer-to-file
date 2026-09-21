@@ -487,6 +487,7 @@ table.listing tr:last-child td { border-bottom: none; }
 table.listing tbody tr:hover { background: var(--hover-soft); }
 table.listing tr.up, table.listing tr.dir { cursor: pointer; }
 table.listing .entry-icon {
+  position: relative;
   display: grid;
   place-items: center;
   width: 1.8rem;
@@ -496,6 +497,19 @@ table.listing .entry-icon {
   color: var(--fg-muted);
 }
 table.listing tr.dir .entry-icon, table.listing tr.up .entry-icon { background: var(--accent-tint); color: var(--accent); }
+.symlink-badge {
+  position: absolute;
+  right: -.3rem;
+  bottom: -.3rem;
+  display: grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  color: var(--fg-muted);
+}
 table.listing .entry-name { font-weight: 500; }
 table.listing .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg-muted); }
 

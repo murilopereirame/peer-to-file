@@ -55,6 +55,17 @@ test('skips symlinks that escape the root, and broken symlinks', async () => {
   assert.ok(!hits.some(h => h.name === 'link-broken-report'))
 })
 
+test('flags symlinked hits with isSymlink', async () => {
+  const { hits } = await searchTree(root, root, { query: 'report' })
+  assert.equal(hits.find(h => h.name === 'link-inside-report.pdf')?.isSymlink, true)
+  assert.equal(hits.find(h => h.name === 'Report.pdf')?.isSymlink, false)
+})
+
+test('followSymlinks: false skips every symlink, not just escaping/broken ones', async () => {
+  const { hits } = await searchTree(root, root, { query: 'report', followSymlinks: false })
+  assert.ok(!hits.some(h => h.name === 'link-inside-report.pdf'))
+})
+
 test('filters by type', async () => {
   const dirsOnly = await searchTree(root, root, { query: 'report', type: 'dir' })
   assert.ok(dirsOnly.hits.every(h => h.type === 'dir'))

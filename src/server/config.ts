@@ -41,6 +41,15 @@ export interface Config {
    * must not trust spoofable headers.
    */
   trustProxy: boolean
+  /**
+   * Whether symlinks are followed when browsing, searching or serving files.
+   * Default true (P2F_DISABLE_SYMLINKS=false) — a symlinked file or folder
+   * that stays inside the shared root behaves like a regular one (browse.ts
+   * still refuses to follow one that escapes the root, regardless of this
+   * setting). When false, symlinks are treated as if they don't exist:
+   * omitted from listings and search, and any path through one 404s.
+   */
+  followSymlinks: boolean
 }
 
 function parseSecureCookies (value: string | undefined): 'auto' | 'on' | 'off' {
@@ -129,6 +138,9 @@ export function resolveDirectory (inputPath: string, label = 'directory'): strin
  *   P2F_SEED_SWEEP_INTERVAL_MS  how often the seed reaper runs (default 1h)
  *   P2F_SECURE_COOKIES   'auto' (default), 'on' or 'off' — mark auth cookies Secure
  *   P2F_TRUST_PROXY  'on'/'off' (default off) — trust X-Forwarded-* from a proxy
+ *   P2F_DISABLE_SYMLINKS  'on'/'off' (default off) — when on, symlinks are
+ *                    treated as if they don't exist: hidden from listings and
+ *                    search, and any path that goes through one 404s
  */
 export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
   const root = resolveDirectory(env.P2F_ROOT || './data', 'P2F_ROOT directory')
@@ -144,6 +156,7 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
     seedIdleMs: parseMs(env.P2F_SEED_IDLE_MS, 60 * 60 * 1000),
     seedSweepIntervalMs: parseMs(env.P2F_SEED_SWEEP_INTERVAL_MS, 60 * 60 * 1000),
     secureCookies: parseSecureCookies(env.P2F_SECURE_COOKIES),
-    trustProxy: parseBool(env.P2F_TRUST_PROXY, false)
+    trustProxy: parseBool(env.P2F_TRUST_PROXY, false),
+    followSymlinks: !parseBool(env.P2F_DISABLE_SYMLINKS, false)
   }
 }

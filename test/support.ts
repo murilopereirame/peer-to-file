@@ -17,6 +17,7 @@ export function testConfig (overrides: Partial<Config> & Pick<Config, 'root'>): 
     seedSweepIntervalMs: 60 * 60 * 1000,
     secureCookies: 'off',
     trustProxy: false,
+    followSymlinks: true,
     ...overrides
   }
 }

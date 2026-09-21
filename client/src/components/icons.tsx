@@ -297,6 +297,14 @@ export const KeyIcon = icon(
   </>
 )
 
+export const LinkIcon = icon(
+  <>
+    <path d="M9 17H7a5 5 0 0 1 0-10h2" />
+    <path d="M15 7h2a5 5 0 1 1 0 10h-2" />
+    <path d="M8 12h8" />
+  </>
+)
+
 export const HardDriveIcon = icon(
   <>
     <line x1="22" y1="12" x2="2" y2="12" />

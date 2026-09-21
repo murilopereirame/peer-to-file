@@ -9,7 +9,7 @@ import { useUploads } from '../context/UploadsContext'
 import { useToast } from '../context/ToastContext'
 import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
 import {
-  DownloadIcon, FileIcon, FolderIcon, FolderPlusIcon, LevelUpIcon, MoreIcon, MoveIcon, PencilIcon,
+  DownloadIcon, FileIcon, FolderIcon, FolderPlusIcon, LevelUpIcon, LinkIcon, MoreIcon, MoveIcon, PencilIcon,
   RefreshIcon, SearchIcon, TrashIcon, UploadIcon
 } from '../components/icons'
 
@@ -372,7 +372,12 @@ export function BrowserScreen (): React.JSX.Element {
                     className={hit.type}
                     onClick={() => openSearchHit(hit)}
                   >
-                    <td><span className="entry-icon">{hit.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span></td>
+                    <td>
+                      <span className="entry-icon">
+                        {hit.type === 'dir' ? <FolderIcon /> : <FileIcon />}
+                        {hit.isSymlink && <span className="symlink-badge" title="Symlink"><LinkIcon size={9} /></span>}
+                      </span>
+                    </td>
                     <td>
                       <span className="entry-name">{hit.name}</span>{' '}
                       <span className="muted">/{hit.path}</span>
@@ -419,7 +424,12 @@ export function BrowserScreen (): React.JSX.Element {
                     className={entry.type === 'dir' ? 'dir' : 'file'}
                     onClick={() => { if (entry.type === 'dir') void load(joinPath(path, entry.name)) }}
                   >
-                    <td><span className="entry-icon">{entry.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span></td>
+                    <td>
+                      <span className="entry-icon">
+                        {entry.type === 'dir' ? <FolderIcon /> : <FileIcon />}
+                        {entry.isSymlink && <span className="symlink-badge" title="Symlink"><LinkIcon size={9} /></span>}
+                      </span>
+                    </td>
                     <td><span className="entry-name">{entry.name}</span></td>
                     <td className="num">{entry.type === 'file' ? formatBytes(entry.size) : '—'}</td>
                     <td className="num" style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>{formatDateTime(entry.mtime)}</td>

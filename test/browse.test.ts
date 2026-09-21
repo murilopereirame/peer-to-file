@@ -77,6 +77,23 @@ test('404 for missing paths', async () => {
   await expectStatus(resolveInsideRoot(root, 'a.txt/child'), 404)
 })
 
+test('followSymlinks=false hides a symlink at the leaf and treats it as missing', async () => {
+  await expectStatus(resolveInsideRoot(root, 'link-inside', false), 404)
+  // the same path still resolves when following is left on (the default)
+  assert.equal(await resolveInsideRoot(root, 'link-inside'), path.join(root, 'a.txt'))
+})
+
+test('followSymlinks=false hides a path that goes through a symlinked intermediate directory', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await fs.symlink(path.join(mroot, 'sub'), path.join(mroot, 'sub-link'))
+    await expectStatus(resolveInsideRoot(mroot, 'sub-link/b.txt', false), 404)
+    assert.equal(await resolveInsideRoot(mroot, 'sub-link/b.txt'), path.join(mroot, 'sub', 'b.txt'))
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
 test('lists a directory with dirs first', async () => {
   const listing = await listDir(root, '')
   assert.equal(listing.path, '')
@@ -94,6 +111,19 @@ test('listing omits escaping and broken symlinks', async () => {
   const names = listing.entries.map(e => e.name)
   assert.ok(!names.includes('link-outside'))
   assert.ok(!names.includes('link-broken'))
+})
+
+test('listing flags symlinked entries with isSymlink', async () => {
+  const listing = await listDir(root, '')
+  assert.equal(listing.entries.find(e => e.name === 'a.txt')?.isSymlink, false)
+  assert.equal(listing.entries.find(e => e.name === 'sub')?.isSymlink, false)
+  assert.equal(listing.entries.find(e => e.name === 'link-inside')?.isSymlink, true)
+})
+
+test('followSymlinks=false omits every symlink from the listing, not just escaping/broken ones', async () => {
+  const listing = await listDir(root, '', false)
+  const names = listing.entries.map(e => e.name)
+  assert.deepEqual(names.sort(), ['a.txt', 'sub'])
 })
 
 test('lists subdirectories', async () => {
@@ -256,6 +286,19 @@ test('moveEntry refuses to move the shared root and rejects traversal', async ()
     await expectStatus(moveEntry(mroot, '', mroot, 'elsewhere'), 400)
     await expectStatus(moveEntry(mroot, 'a.txt', mroot, '../escape.txt'), 403)
     await expectStatus(moveEntry(mroot, '../escape.txt', mroot, 'a.txt'), 403)
+  } finally {
+    await fs.rm(mroot, { recursive: true, force: true })
+  }
+})
+
+test('followSymlinks=false makes deleteEntry treat a symlink as not found', async () => {
+  const mroot = await makeMutableRoot()
+  try {
+    await fs.symlink(path.join(mroot, 'a.txt'), path.join(mroot, 'link.txt'))
+    await expectStatus(deleteEntry(mroot, 'link.txt', false), 404)
+    // the symlink itself must survive since the delete was refused
+    const st = await fs.lstat(path.join(mroot, 'link.txt'))
+    assert.ok(st.isSymbolicLink())
   } finally {
     await fs.rm(mroot, { recursive: true, force: true })
   }

@@ -351,7 +351,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
         throw new BrowseError(403, 'no access to this mount')
       }
     }
-    const abs = await resolveInsideRoot(mount.path, relQuery)
+    const abs = await resolveInsideRoot(mount.path, relQuery, config.followSymlinks)
     const st = await fs.stat(abs)
     if (!st.isFile()) throw new BrowseError(400, 'not a file')
     if (webseedLogOnce(`${req.ip}:${relQuery}`)) {
@@ -547,13 +547,13 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
 
   app.get('/api/list', wrap(async (req, res) => {
     const mount = resolveMountForRequest(db, req, res)
-    res.json(await listDir(mount.path, req.query.path ?? ''))
+    res.json(await listDir(mount.path, req.query.path ?? '', config.followSymlinks))
   }))
 
   app.post('/api/delete', jsonBody, wrap(async (req, res) => {
     const mount = resolveMountForRequest(db, req, res)
     const { path: relPath } = (req.body ?? {}) as { path?: unknown }
-    const { rel, wasDir } = await deleteEntry(mount.path, relPath)
+    const { rel, wasDir } = await deleteEntry(mount.path, relPath, config.followSymlinks)
     const requester = (res.locals as { user?: { username: string } }).user
     activity.add('browse', `deleted ${wasDir ? 'folder' : 'file'} "${rel}" on mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
       path: rel, mount: mount.name, user: requester?.username, ip: req.ip
@@ -576,7 +576,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     if (toMount.id !== fromMount.id && !db.hasMountAccess(toMount, user.id, user.role === 'admin')) {
       throw new BrowseError(403, 'no access to the destination mount')
     }
-    const { fromRel, toRel } = await moveEntry(fromMount.path, from, toMount.path, to)
+    const { fromRel, toRel } = await moveEntry(fromMount.path, from, toMount.path, to, config.followSymlinks)
     const requester = (res.locals as { user?: { username: string } }).user
     const mountDesc = fromMount.id === toMount.id
       ? `on mount "${fromMount.name}"`
@@ -590,7 +590,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
   app.post('/api/mkdir', jsonBody, wrap(async (req, res) => {
     const mount = resolveMountForRequest(db, req, res)
     const { path: relPath } = (req.body ?? {}) as { path?: unknown }
-    const { rel } = await createFolder(mount.path, relPath)
+    const { rel } = await createFolder(mount.path, relPath, config.followSymlinks)
     const requester = (res.locals as { user?: { username: string } }).user
     activity.add('browse', `created folder "${rel}" on mount "${mount.name}"${requester ? ` by ${requester.username}` : ''}`, {
       path: rel, mount: mount.name, user: requester?.username, ip: req.ip
@@ -629,12 +629,12 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
       if (remaining <= 0) { truncated = true; break }
       let scopeAbs: string
       try {
-        scopeAbs = await resolveInsideRoot(mount.path, scopePath)
+        scopeAbs = await resolveInsideRoot(mount.path, scopePath, config.followSymlinks)
       } catch (err) {
         if (mountParam !== undefined) throw err // an explicitly requested mount's scope error should surface, not be swallowed
         continue // searching every mount: just skip ones without this subpath
       }
-      const outcome = await searchTree(mount.path, scopeAbs, { query: q, type, limit: remaining })
+      const outcome = await searchTree(mount.path, scopeAbs, { query: q, type, limit: remaining, followSymlinks: config.followSymlinks })
       for (const hit of outcome.hits) results.push({ ...hit, mount: { id: mount.id, name: mount.name } })
       remaining -= outcome.hits.length
       if (outcome.truncated) truncated = true
@@ -797,7 +797,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     const mount = resolveMountForRequest(db, req, res)
     const destDirRel = typeof req.query.path === 'string' ? req.query.path : ''
     const name = typeof req.query.name === 'string' ? req.query.name : ''
-    const destAbs = await resolveUploadTarget(mount.path, destDirRel, name)
+    const destAbs = await resolveUploadTarget(mount.path, destDirRel, name, config.followSymlinks)
 
     const clientKey = req.get('X-P2F-Enc-Client-Pubkey')
     const wrappedKey = req.get('X-P2F-Enc-Key-Wrapped')
@@ -867,7 +867,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     if (!clientKey) throw new BrowseError(400, 'missing ck (client ECDH public key)')
 
     const mount = resolveMountForRequest(db, req, res)
-    const abs = await resolveInsideRoot(mount.path, req.query.path ?? '')
+    const abs = await resolveInsideRoot(mount.path, req.query.path ?? '', config.followSymlinks)
     const { meta, plainSha256 } = await store.getMeta(abs)
     const rel = path.relative(mount.path, abs)
 

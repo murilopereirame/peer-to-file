@@ -3,6 +3,7 @@ export interface DirEntry {
   type: 'dir' | 'file'
   size: number | null
   mtime: number
+  isSymlink: boolean
 }
 
 export interface Listing {
@@ -50,6 +51,7 @@ export interface SearchHit {
   type: 'dir' | 'file'
   size: number | null
   mtime: number
+  isSymlink: boolean
   mount: { id: number, name: string }
 }
 

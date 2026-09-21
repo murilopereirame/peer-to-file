@@ -10,7 +10,7 @@ import { useToast } from '../context/ToastContext'
 import { MoveModal } from './MoveModal'
 import { NewFolderModal } from './NewFolderModal'
 import {
-  DownloadIcon, FileIcon, FolderIcon, FolderPlusIcon, LevelUpIcon, MoreIcon, MoveIcon, PencilIcon,
+  DownloadIcon, FileIcon, FolderIcon, FolderPlusIcon, LevelUpIcon, LinkIcon, MoreIcon, MoveIcon, PencilIcon,
   RefreshIcon, SearchIcon, TrashIcon, UploadIcon
 } from './icons'
 
@@ -19,6 +19,7 @@ interface DirEntry {
   type: 'dir' | 'file'
   size: number | null
   mtime: number
+  isSymlink: boolean
 }
 
 interface Listing {
@@ -435,7 +436,10 @@ function ListingRow ({
       onClick={!renaming && entry.type === 'dir' ? () => onOpenDir(entryPath) : undefined}
     >
       <div className="entry-main">
-        <span className="entry-icon">{entry.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span>
+        <span className="entry-icon">
+          {entry.type === 'dir' ? <FolderIcon /> : <FileIcon />}
+          {entry.isSymlink && <span className="symlink-badge" title="Symlink"><LinkIcon size={9} /></span>}
+        </span>
         {renaming
           ? (
             <input
@@ -511,7 +515,10 @@ function SearchResultRow ({
   return (
     <li className={hit.type} onClick={() => onOpen(hit)}>
       <div className="entry-main">
-        <span className="entry-icon">{hit.type === 'dir' ? <FolderIcon /> : <FileIcon />}</span>
+        <span className="entry-icon">
+          {hit.type === 'dir' ? <FolderIcon /> : <FileIcon />}
+          {hit.isSymlink && <span className="symlink-badge" title="Symlink"><LinkIcon size={9} /></span>}
+        </span>
         <span className="entry-text">
           <span className="entry-name">{hit.name}</span>
           <span className="hint-inline">/{hit.path}</span>
