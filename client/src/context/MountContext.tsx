@@ -53,15 +53,17 @@ export function MountProvider ({ children }: { children: React.ReactNode }): Rea
   const refresh = useCallback(async (): Promise<void> => {
     const [mountsRes, meRes] = await Promise.all([apiFetch('/api/mounts'), apiFetch('/api/me')])
     const mountsBody = await mountsRes.json() as { mounts: MountInfo[] }
-    const meBody = await meRes.json() as { role: Role | null }
+    const meBody = await meRes.json() as { role: Role | null, defaultMountId: number | null }
     setMounts(mountsBody.mounts)
     setRole(meBody.role)
     setActiveMountIdState(current => {
       // Keep the current pick if it's still reachable; otherwise fall back to
-      // a remembered choice, then the default mount, then whatever's first.
+      // a remembered choice on this browser, then this user's admin-assigned
+      // default mount, then the global default mount, then whatever's first.
       if (current !== null && mountsBody.mounts.some(m => m.id === current)) return current
       const stored = loadStoredMountId()
       if (stored !== null && mountsBody.mounts.some(m => m.id === stored)) return stored
+      if (meBody.defaultMountId !== null && mountsBody.mounts.some(m => m.id === meBody.defaultMountId)) return meBody.defaultMountId
       return mountsBody.mounts.find(m => m.isDefault)?.id ?? mountsBody.mounts[0]?.id ?? null
     })
   }, [apiFetch])

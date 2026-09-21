@@ -28,7 +28,15 @@ export interface MountAccessEntry {
   granted_at: number
 }
 
-/** Admin-only view of a mount, including who has access to it. */
+/** A user explicitly excluded from a mount's implicit access (default mount only). */
+export interface MountDenialEntry {
+  user_id: number
+  username: string
+  denied_at: number
+}
+
+/** Admin-only view of a mount, including who has access to it (and, for the
+ *  default mount, who's been explicitly denied it). */
 export interface AdminMount {
   id: number
   name: string
@@ -36,6 +44,7 @@ export interface AdminMount {
   isDefault: boolean
   createdAt: number
   access: MountAccessEntry[]
+  denials: MountDenialEntry[]
 }
 
 export interface AdminUser {
@@ -43,6 +52,8 @@ export interface AdminUser {
   username: string
   role: Role
   createdAt: number
+  /** The mount this user lands on by default, or null to use the global default mount. */
+  defaultMountId: number | null
 }
 
 export interface SearchHit {

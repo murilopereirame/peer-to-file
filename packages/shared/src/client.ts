@@ -105,7 +105,7 @@ export class P2FClient {
     await this.request('/api/logout-all', { method: 'POST' })
   }
 
-  async me (): Promise<{ username: string | null, role: Role | null }> {
+  async me (): Promise<{ username: string | null, role: Role | null, defaultMountId: number | null }> {
     return await this.requestJson('/api/me')
   }
 
@@ -170,6 +170,11 @@ export class P2FClient {
     await this.request(`/api/admin/users/${encodeURIComponent(username)}/role`, P2FClient.jsonInit('POST', { role }))
   }
 
+  /** `mountId: null` clears the override, falling back to the global default mount. */
+  async adminSetUserDefaultMount (username: string, mountId: number | null): Promise<void> {
+    await this.request(`/api/admin/users/${encodeURIComponent(username)}/default-mount`, P2FClient.jsonInit('POST', { mountId }))
+  }
+
   async adminCreateUser (username: string, password: string, role?: Role): Promise<AdminUser> {
     return await this.requestJson('/api/admin/users', P2FClient.jsonInit('POST', { username, password, role }))
   }
@@ -196,6 +201,16 @@ export class P2FClient {
 
   async adminRevokeMountAccess (mountId: number, userId: number): Promise<void> {
     await this.request(`/api/admin/mounts/${mountId}/access/${userId}`, { method: 'DELETE' })
+  }
+
+  /** Excludes a user from the default mount's implicit access. Only valid for the default mount. */
+  async adminDenyMountAccess (mountId: number, username: string): Promise<void> {
+    await this.request(`/api/admin/mounts/${mountId}/deny`, P2FClient.jsonInit('POST', { username }))
+  }
+
+  /** Undoes adminDenyMountAccess. */
+  async adminAllowMountAccess (mountId: number, userId: number): Promise<void> {
+    await this.request(`/api/admin/mounts/${mountId}/deny/${userId}`, { method: 'DELETE' })
   }
 
   async logs (opts: { limit?: number, sinceId?: number } = {}): Promise<{ entries: LogEntry[] }> {

@@ -129,6 +129,61 @@ test('deleteMount cascades its access grants', () => {
   db.close()
 })
 
+test('mounts: a user can be denied the default mount, and un-denied again', () => {
+  const db = new AuthDb(':memory:')
+  const owner = db.setupFirstUser('owner', 'correct horse battery')
+  const heidi = db.createUser('heidi', 'correct horse battery')
+  const def = db.ensureDefaultMount(root)
+
+  assert.equal(db.hasMountAccess(def, heidi.id, false), true)
+  db.denyMountAccess(def.id, heidi.id)
+  assert.equal(db.hasMountAccess(def, heidi.id, false), false)
+  assert.deepEqual(db.listMountsForUser(heidi.id, false), [])
+  assert.deepEqual(db.listMountDenials(def.id).map(d => d.username), ['heidi'])
+
+  // Admins are never blocked by a denial, even one recorded against their own id.
+  assert.equal(db.hasMountAccess(def, heidi.id, true), true)
+
+  db.allowMountAccess(def.id, heidi.id)
+  assert.equal(db.hasMountAccess(def, heidi.id, false), true)
+  assert.deepEqual(db.listMountsForUser(heidi.id, false).map(m => m.name), ['default'])
+  assert.deepEqual(db.listMountDenials(def.id), [])
+  db.close()
+})
+
+test('deleteUser also removes their default-mount denials', () => {
+  const db = new AuthDb(':memory:')
+  const owner = db.setupFirstUser('owner', 'correct horse battery')
+  const ivan = db.createUser('ivan', 'correct horse battery')
+  const def = db.ensureDefaultMount(root)
+  db.denyMountAccess(def.id, ivan.id)
+  assert.equal(db.listMountDenials(def.id).length, 1)
+
+  db.deleteUser('ivan')
+  assert.equal(db.listMountDenials(def.id).length, 0)
+  db.close()
+})
+
+test('users: an admin-assigned default mount overrides the global default, and clears when that mount is deleted', () => {
+  const db = new AuthDb(':memory:')
+  const owner = db.setupFirstUser('owner', 'correct horse battery')
+  const judy = db.createUser('judy', 'correct horse battery')
+  db.ensureDefaultMount(root)
+  const extra = db.createMount('extra', root, owner.id)
+
+  assert.equal(db.getUserByUsername('judy')?.default_mount_id, null)
+  assert.equal(db.setUserDefaultMount(judy.id, extra.id), true)
+  assert.equal(db.getUserById(judy.id)?.default_mount_id, extra.id)
+
+  // Deleting the mount a user defaults to clears the override rather than
+  // leaving a dangling reference.
+  db.deleteMount(extra.id)
+  assert.equal(db.getUserById(judy.id)?.default_mount_id, null)
+
+  assert.equal(db.setUserDefaultMount(99999, extra.id), false)
+  db.close()
+})
+
 test('mount and user names must be unique', () => {
   const db = new AuthDb(':memory:')
   const owner = db.setupFirstUser('owner', 'correct horse battery')

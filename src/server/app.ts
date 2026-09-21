@@ -457,7 +457,11 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
 
   app.get('/api/me', (req, res) => {
     const user = (res.locals as { user?: User }).user
-    res.json({ username: user?.username ?? null, role: user?.role ?? null })
+    // Re-fetched rather than read off res.locals.user: the session/token
+    // lookups that populate it don't select default_mount_id (they don't
+    // need it), so a fresh by-id lookup is the cheapest way to get it here.
+    const defaultMountId = user ? (db.getUserById(user.id)?.default_mount_id ?? null) : null
+    res.json({ username: user?.username ?? null, role: user?.role ?? null, defaultMountId })
   })
 
   // F4/item-14: activity log entries carry other users' IPs, usernames and
@@ -647,7 +651,10 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
 
   app.get('/api/admin/users', requireAdmin, (req, res) => {
     res.json({
-      users: db.listUsers().map(u => ({ id: u.id, username: u.username, role: u.role, createdAt: u.created_at }))
+      users: db.listUsers().map(u => ({
+        id: u.id, username: u.username, role: u.role, createdAt: u.created_at,
+        defaultMountId: u.default_mount_id ?? null
+      }))
     })
   })
 
@@ -664,6 +671,29 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     const requester = authedUser(res)
     activity.add('admin', `"${username}" role changed to ${role} by ${requester.username}`, {
       targetUser: username, role, user: requester.username, ip: req.ip
+    })
+    res.json({ ok: true })
+  }))
+
+  // Overrides which mount this user lands on, in place of the global default
+  // mount. `mountId: null` clears the override. Doesn't require the target
+  // to currently have access to that mount — the client already falls back
+  // to the global default when the chosen mount isn't in its reachable list.
+  app.post('/api/admin/users/:username/default-mount', jsonBody, requireAdmin, wrap(async (req, res) => {
+    const username = String(req.params.username)
+    const target = db.getUserByUsername(username)
+    if (!target) throw new BrowseError(404, 'no such user')
+    const { mountId } = (req.body ?? {}) as { mountId?: unknown }
+    let mount: Mount | null = null
+    if (mountId !== null && mountId !== undefined) {
+      if (typeof mountId !== 'number' || !Number.isInteger(mountId)) throw new BrowseError(400, 'mountId must be a number or null')
+      mount = db.getMountById(mountId)
+      if (!mount) throw new BrowseError(404, 'no such mount')
+    }
+    db.setUserDefaultMount(target.id, mount?.id ?? null)
+    const requester = authedUser(res)
+    activity.add('admin', `default mount for "${username}" set to ${mount ? `"${mount.name}"` : 'the global default'} by ${requester.username}`, {
+      targetUser: username, mount: mount?.name ?? null, user: requester.username, ip: req.ip
     })
     res.json({ ok: true })
   }))
@@ -706,7 +736,8 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     res.json({
       mounts: db.listMounts().map(m => ({
         id: m.id, name: m.name, path: m.path, isDefault: m.is_default, createdAt: m.created_at,
-        access: db.listMountAccess(m.id)
+        access: db.listMountAccess(m.id),
+        denials: db.listMountDenials(m.id)
       }))
     })
   })
@@ -754,6 +785,38 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
     db.revokeMountAccess(mount.id, Number(req.params.userId))
     const requester = authedUser(res)
     activity.add('admin', `revoked "${target?.username ?? req.params.userId}" access to mount "${mount.name}" by ${requester.username}`, {
+      mount: mount.name, targetUser: target?.username, user: requester.username, ip: req.ip
+    })
+    res.json({ ok: true })
+  }))
+
+  // Excludes one user from the default mount's implicit, everyone-has-it
+  // access — the equivalent of "revoke access" for the one mount that isn't
+  // normally opt-in. Refused for any other mount: there, simply not granting
+  // (or revoking) access already achieves the same thing.
+  app.post('/api/admin/mounts/:id/deny', jsonBody, requireAdmin, wrap(async (req, res) => {
+    const mount = db.getMountById(Number(req.params.id))
+    if (!mount) throw new BrowseError(404, 'no such mount')
+    if (!mount.is_default) throw new BrowseError(400, 'only the default mount supports denying a user — remove their access grant on this mount instead')
+    const { username } = (req.body ?? {}) as { username?: unknown }
+    if (typeof username !== 'string') throw new BrowseError(400, 'username is required')
+    const target = db.getUserByUsername(username)
+    if (!target) throw new BrowseError(404, 'no such user')
+    db.denyMountAccess(mount.id, target.id)
+    const requester = authedUser(res)
+    activity.add('admin', `denied "${username}" access to the default mount "${mount.name}" by ${requester.username}`, {
+      mount: mount.name, targetUser: username, user: requester.username, ip: req.ip
+    })
+    res.status(201).json({ ok: true })
+  }))
+
+  app.delete('/api/admin/mounts/:id/deny/:userId', requireAdmin, wrap(async (req, res) => {
+    const mount = db.getMountById(Number(req.params.id))
+    if (!mount) throw new BrowseError(404, 'no such mount')
+    const target = db.getUserById(Number(req.params.userId))
+    db.allowMountAccess(mount.id, Number(req.params.userId))
+    const requester = authedUser(res)
+    activity.add('admin', `restored "${target?.username ?? req.params.userId}"'s access to the default mount "${mount.name}" by ${requester.username}`, {
       mount: mount.name, targetUser: target?.username, user: requester.username, ip: req.ip
     })
     res.json({ ok: true })

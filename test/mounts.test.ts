@@ -347,6 +347,107 @@ test('POST /api/move across mounts is refused without access to the destination 
   assert.ok(body.entries.some(e => e.name === 'root-report.txt'))
 })
 
+test('POST/DELETE /api/admin/mounts/:id/deny excludes and restores a user on the default mount only', async () => {
+  const mountsRes = await fetch(`${base}/api/mounts`, { headers: authHeader(adminToken) })
+  const { mounts } = await mountsRes.json() as { mounts: Array<{ id: number, name: string }> }
+  const defaultId = mounts.find(m => m.name === 'default')!.id
+
+  // Denying on a non-default mount is refused — revoking (never granting) already does the job there.
+  const denyExtra = await fetch(`${base}/api/admin/mounts/${extraMountId}/deny`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ username: 'member' })
+  })
+  assert.equal(denyExtra.status, 400)
+
+  // A plain user can browse the default mount until explicitly denied.
+  const beforeDeny = await fetch(`${base}/api/list?path=`, { headers: authHeader(userToken) })
+  assert.equal(beforeDeny.status, 200)
+
+  const deny = await fetch(`${base}/api/admin/mounts/${defaultId}/deny`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ username: 'member' })
+  })
+  assert.equal(deny.status, 201)
+
+  const afterDeny = await fetch(`${base}/api/list?path=`, { headers: authHeader(userToken) })
+  assert.equal(afterDeny.status, 403)
+
+  // The default mount no longer shows up for a denied user, though mounts
+  // they were separately granted access to (member still has `extra`) do.
+  const mountsAfterDeny = await fetch(`${base}/api/mounts`, { headers: authHeader(userToken) })
+  const bodyAfterDeny = await mountsAfterDeny.json() as { mounts: Array<{ name: string }> }
+  assert.deepEqual(bodyAfterDeny.mounts.map(m => m.name), ['extra'])
+
+  // ...but it never blocks an admin, even for their own id.
+  const adminId = ((await (await fetch(`${base}/api/admin/users`, { headers: authHeader(adminToken) })).json()) as
+    { users: Array<{ id: number, username: string }> }).users.find(u => u.username === 'admin')!.id
+  await fetch(`${base}/api/admin/mounts/${defaultId}/deny`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ username: 'admin' })
+  })
+  const adminStillSees = await fetch(`${base}/api/list?path=`, { headers: authHeader(adminToken) })
+  assert.equal(adminStillSees.status, 200)
+  await fetch(`${base}/api/admin/mounts/${defaultId}/deny/${adminId}`, { method: 'DELETE', headers: authHeader(adminToken) })
+
+  // Restoring access takes it back.
+  const memberId = ((await (await fetch(`${base}/api/admin/users`, { headers: authHeader(adminToken) })).json()) as
+    { users: Array<{ id: number, username: string }> }).users.find(u => u.username === 'member')!.id
+  const allow = await fetch(`${base}/api/admin/mounts/${defaultId}/deny/${memberId}`, {
+    method: 'DELETE', headers: authHeader(adminToken)
+  })
+  assert.equal(allow.status, 200)
+  const afterAllow = await fetch(`${base}/api/list?path=`, { headers: authHeader(userToken) })
+  assert.equal(afterAllow.status, 200)
+})
+
+test('GET /api/admin/mounts reports denials for the default mount', async () => {
+  const mountsRes = await fetch(`${base}/api/mounts`, { headers: authHeader(adminToken) })
+  const { mounts } = await mountsRes.json() as { mounts: Array<{ id: number, name: string }> }
+  const defaultId = mounts.find(m => m.name === 'default')!.id
+
+  await fetch(`${base}/api/admin/mounts/${defaultId}/deny`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ username: 'member' })
+  })
+
+  const adminMounts = await fetch(`${base}/api/admin/mounts`, { headers: authHeader(adminToken) })
+  const body = await adminMounts.json() as { mounts: Array<{ name: string, denials: Array<{ username: string }> }> }
+  const def = body.mounts.find(m => m.name === 'default')!
+  assert.deepEqual(def.denials.map(d => d.username), ['member'])
+
+  // restore for later tests
+  const memberId = ((await (await fetch(`${base}/api/admin/users`, { headers: authHeader(adminToken) })).json()) as
+    { users: Array<{ id: number, username: string }> }).users.find(u => u.username === 'member')!.id
+  await fetch(`${base}/api/admin/mounts/${defaultId}/deny/${memberId}`, { method: 'DELETE', headers: authHeader(adminToken) })
+})
+
+test("POST /api/admin/users/:username/default-mount sets and clears a user's landing mount", async () => {
+  const mountsRes = await fetch(`${base}/api/admin/mounts`, { headers: authHeader(adminToken) })
+  const { mounts } = await mountsRes.json() as { mounts: Array<{ id: number, name: string }> }
+  const extra = mounts.find(m => m.id === extraMountId)!
+
+  const set = await fetch(`${base}/api/admin/users/member/default-mount`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ mountId: extra.id })
+  })
+  assert.equal(set.status, 200)
+
+  const listing = await fetch(`${base}/api/admin/users`, { headers: authHeader(adminToken) })
+  const body = await listing.json() as { users: Array<{ username: string, defaultMountId: number | null }> }
+  assert.equal(body.users.find(u => u.username === 'member')!.defaultMountId, extra.id)
+
+  const me = await fetch(`${base}/api/me`, { headers: authHeader(userToken) })
+  const meBody = await me.json() as { defaultMountId: number | null }
+  assert.equal(meBody.defaultMountId, extra.id)
+
+  const unknownMount = await fetch(`${base}/api/admin/users/member/default-mount`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ mountId: 999999 })
+  })
+  assert.equal(unknownMount.status, 404)
+
+  const clear = await fetch(`${base}/api/admin/users/member/default-mount`, {
+    method: 'POST', headers: authJson(adminToken), body: JSON.stringify({ mountId: null })
+  })
+  assert.equal(clear.status, 200)
+  const meAfterClear = await fetch(`${base}/api/me`, { headers: authHeader(userToken) })
+  assert.equal((await meAfterClear.json() as { defaultMountId: number | null }).defaultMountId, null)
+})
+
 test('POST /api/move without toMount stays a same-mount move (unchanged behavior)', async () => {
   const move = await fetch(`${base}/api/move`, {
     method: 'POST',
