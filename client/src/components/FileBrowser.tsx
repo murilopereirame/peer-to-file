@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { requestNotificationPermission } from '@p2f/shared'
 import type { SearchHit } from '@p2f/shared'
 import { useApi } from '../context/ApiContext'
@@ -318,8 +319,15 @@ function ListingRow ({
   const [renameValue, setRenameValue] = useState(entry.name)
   const [moveOpen, setMoveOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [menuPos, setMenuPos] = useState<{ top?: number, bottom?: number, right: number } | null>(null)
   const [busy, setBusy] = useState(false)
   const [rowError, setRowError] = useState<string | null>(null)
+  const kebabWrapRef = useRef<HTMLDivElement>(null)
+  // The dropdown itself is rendered through a portal (see below) so a row
+  // near the bottom (or right edge) of the scrollable list card isn't
+  // clipped by that card's `overflow: hidden` — it's positioned in fixed
+  // viewport coordinates instead of relying on the row's own stacking
+  // context, which a portal escapes.
   const menuRef = useRef<HTMLDivElement>(null)
   // Both Enter (submitRename disables the input via `busy`) and Escape
   // (cancelRename removes the still-focused input) can make the browser
@@ -331,10 +339,23 @@ function ListingRow ({
   useEffect(() => {
     if (!menuOpen) return
     const onDocClick = (e: MouseEvent): void => {
-      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false)
+      const target = e.target as Node
+      if (!kebabWrapRef.current?.contains(target) && !menuRef.current?.contains(target)) setMenuOpen(false)
     }
+    // The menu's position is computed once, from the toggle button, at the
+    // moment it opens — rather than track it live, just close on any scroll
+    // (capture: true, since scroll doesn't bubble) or resize, both of which
+    // would otherwise leave a fixed-position menu visually detached from
+    // the button that opened it.
+    const onScrollOrResize = (): void => { setMenuOpen(false) }
     document.addEventListener('click', onDocClick)
-    return () => { document.removeEventListener('click', onDocClick) }
+    window.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onScrollOrResize)
+    return () => {
+      document.removeEventListener('click', onDocClick)
+      window.removeEventListener('scroll', onScrollOrResize, true)
+      window.removeEventListener('resize', onScrollOrResize)
+    }
   }, [menuOpen])
 
   const startRename = (e: React.MouseEvent): void => {
@@ -473,19 +494,38 @@ function ListingRow ({
             Download
           </button>
         )}
-        <div className="kebab-wrap" ref={menuRef}>
+        <div className="kebab-wrap" ref={kebabWrapRef}>
           <button
             type="button" className="kebab-btn icon-btn" disabled={busy} aria-label="more actions" aria-haspopup="true"
-            onClick={e => { e.stopPropagation(); setMenuOpen(v => !v) }}
+            onClick={e => {
+              e.stopPropagation()
+              const rect = e.currentTarget.getBoundingClientRect()
+              const right = window.innerWidth - rect.right
+              // Enough room for the menu below the button (roughly its
+              // height, three rows) → drop down as usual; otherwise a row
+              // near the bottom of the viewport (very often the last row of
+              // a long list) would have it run off the bottom of the
+              // screen, so open it upward instead.
+              const menuOpensUp = window.innerHeight - rect.bottom < 140
+              setMenuPos(menuOpensUp
+                ? { bottom: window.innerHeight - rect.top + 4, right }
+                : { top: rect.bottom + 4, right })
+              setMenuOpen(v => !v)
+            }}
           >
             <MoreIcon />
           </button>
-          {menuOpen && (
-            <div className="kebab-menu" onClick={e => e.stopPropagation()}>
+          {menuOpen && menuPos && createPortal(
+            <div
+              className="kebab-menu" ref={menuRef}
+              style={{ position: 'fixed', top: menuPos.top, bottom: menuPos.bottom, right: menuPos.right }}
+              onClick={e => e.stopPropagation()}
+            >
               <button type="button" onClick={startRename}><PencilIcon size={14} />Rename</button>
               <button type="button" onClick={startMove}><MoveIcon size={14} />Move</button>
               <button type="button" className="danger" onClick={deleteEntry}><TrashIcon size={14} />Delete</button>
-            </div>
+            </div>,
+            document.body
           )}
         </div>
       </div>

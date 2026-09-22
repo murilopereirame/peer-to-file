@@ -24,8 +24,12 @@ export function DownloadsProvider ({ children }: { children: React.ReactNode }):
   const managerRef = useRef<TorrentDownloadManager>(new TorrentDownloadManager())
 
   useEffect(() => {
-    void managerRef.current.init((msg) => { console.error('WebTorrent error:', msg) })
-  }, [])
+    // DownloadsProvider only mounts once phase === 'main' (see MainShell),
+    // which requires app.client to already be set — this dependency is
+    // just a safety net, not the expected first-render path.
+    if (!app.client) return
+    void managerRef.current.init((msg) => { console.error('WebTorrent error:', msg) }, app.client)
+  }, [app.client])
 
   const downloads = useSyncExternalStore(
     (cb) => managerRef.current.subscribe(cb),

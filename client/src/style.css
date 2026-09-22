@@ -407,6 +407,13 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
+  /* Inside .app-main's flex column, overflow != visible makes a flex item's
+     automatic min-height resolve to 0, which let the browser shrink a card
+     to whatever room was left in the viewport instead of its natural
+     content height — clipping long lists to a few rows with no scrollbar
+     anywhere. Pin cards to their content size so .app-main scrolls them
+     like normal page content again. */
+  flex-shrink: 0;
 }
 :root[data-theme="dark"] .card { background: var(--surface); }
 
@@ -602,11 +609,12 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
 }
 
 .kebab-wrap { position: relative; flex: none; }
+/* Rendered through a portal into <body> (see ListingRow in FileBrowser.tsx)
+   so it can't be clipped by a scrollable ancestor's overflow — position,
+   top and right are computed from the toggle button and set inline; this
+   rule only supplies the box's own look. */
 .kebab-menu {
-  position: absolute;
-  top: calc(100% + .25rem);
-  right: 0;
-  z-index: 5;
+  z-index: 50;
   display: flex;
   flex-direction: column;
   min-width: 9rem;
