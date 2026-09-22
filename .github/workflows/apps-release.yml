@@ -1,0 +1,63 @@
+name: Apps - Release Build
+
+# Fires when a GitHub Release is published (e.g. after tagging with
+# apps-version-bump.yml and publishing the draft/release for that tag).
+# Builds the same unsigned Electron desktop bundles as apps-build.yml, then
+# attaches them to that release as downloadable assets.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apps-release-build-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    name: Desktop - Electron (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+          - platform: ubuntu-latest
+          - platform: windows-latest
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build (electron-builder)
+        working-directory: apps/desktop
+        run: npm run build
+        # electron-builder ad-hoc signs macOS builds automatically when no
+        # signing identity is configured (needed for arm64 to launch at
+        # all) — see "Opening the macOS build" in apps/README.md.
+
+      - name: Attach binaries to the release
+        working-directory: apps/desktop/release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          files=(*.dmg *.exe *.deb *.AppImage)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No installer files found to upload" >&2
+            exit 1
+          fi
+          gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" \
+            --repo "${{ github.repository }}" --clobber
