@@ -154,3 +154,27 @@ export const settings = {
     await window.p2f.deleteSetting('serverUrl')
   }
 }
+
+// --- In-progress downloads (survive quitting the app) -----------------------
+// Same idea as the browser web client's localStorage-backed list (see
+// client/src/lib/downloadManager.ts), just persisted through the main
+// process's settings store instead — the renderer's own origin is the fixed
+// `p2file://` scheme regardless of which server is configured, not something
+// scoped per-server the way a browser tab's origin is.
+
+export interface SavedDownload {
+  path: string
+  name: string
+  mountId?: number
+  paused?: boolean
+  infoHash?: string
+  lastActiveAt: number
+}
+
+export async function loadSavedDownloads (): Promise<SavedDownload[]> {
+  return (await window.p2f.getSetting<SavedDownload[]>('downloads')) ?? []
+}
+
+export async function saveSavedDownloads (list: SavedDownload[]): Promise<void> {
+  await window.p2f.setSetting('downloads', list)
+}

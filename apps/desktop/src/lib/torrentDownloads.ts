@@ -3,7 +3,10 @@ import {
   opfsAvailable, setOpfsWorkerFactory, transferKeys, unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
-import { awaitDownloadCompletion, currentDownloadDir, hashFile, registerPendingDownload, settings } from './electronApi'
+import {
+  awaitDownloadCompletion, currentDownloadDir, hashFile, loadSavedDownloads, registerPendingDownload,
+  saveSavedDownloads, settings, type SavedDownload
+} from './electronApi'
 
 // The store lives in @p2f/shared (the web client uses the same one), but the
 // worker it talks to has to be constructed from a URL inside this app's own
@@ -51,6 +54,7 @@ interface Tracked {
   tick: ReturnType<typeof setInterval>
   startedAt: number
   lastWebseedRetry: number
+  lastTouch: number
   /** Set as soon as 'done'/'error' fires, so the tick (below) stops
    * overwriting status/elapsedMs/speed after that — without this, a
    * still-running tick flips a finished download's status back to
@@ -62,6 +66,30 @@ interface Tracked {
 
 function isUserGestureError (err: unknown): boolean {
   return err instanceof Error && /user gesture/i.test(err.message)
+}
+
+// Old enough that resuming it silently on the next launch would be more
+// surprising than useful (the file may well have changed by then) — same
+// cutoff the web client uses.
+const STALE_DOWNLOAD_MS = 14 * 24 * 60 * 60 * 1000
+const TOUCH_INTERVAL_MS = 30_000
+
+async function persistDownload (entry: SavedDownload): Promise<void> {
+  const list = (await loadSavedDownloads()).filter(d => d.path !== entry.path)
+  list.push(entry)
+  await saveSavedDownloads(list)
+}
+
+async function touchDownload (path: string, patch: Partial<SavedDownload> = {}): Promise<void> {
+  const list = await loadSavedDownloads()
+  const existing = list.find(d => d.path === path)
+  if (!existing) return
+  await persistDownload({ ...existing, ...patch, lastActiveAt: Date.now() })
+}
+
+async function forgetDownload (path: string): Promise<void> {
+  const list = await loadSavedDownloads()
+  await saveSavedDownloads(list.filter(d => d.path !== path))
 }
 
 function blank (path: string, name: string): DownloadSnapshot {
@@ -85,17 +113,18 @@ function joinNativePath (dir: string, name: string): string {
 /**
  * Real P2P transfers, same engine and transport as the browser web client
  * (WebTorrent over WebRTC, HTTP webseed fallback) — this is what
- * distinguishes the desktop app from a plain HTTP client. Deliberately
- * trimmed relative to the browser client: an in-progress download isn't
- * resumed after quitting the app, so pause/resume/cancel work for the
- * lifetime of the app only — see apps/README.md.
+ * distinguishes the desktop app from a plain HTTP client.
  *
- * Pieces do go through the shared OPFS chunk store rather than WebTorrent's
- * own default browser store. Not for persistence (init() wipes whatever the
- * last session left behind) but for space: only a store we own can release
- * individual pieces, which is what lets save() free the downloaded ciphertext
- * as it writes the decrypted file instead of holding all of it until the save
- * finishes. See OpfsChunkStore.startDraining.
+ * Pieces go through the shared OPFS chunk store rather than WebTorrent's own
+ * default browser store, for two reasons: only a store we own can release
+ * individual pieces, which is what lets save() free the downloaded
+ * ciphertext as it writes the decrypted file instead of holding all of it
+ * until the save finishes (see OpfsChunkStore.startDraining) — and, same as
+ * the browser web client, it's what lets a download resume mid-file rather
+ * than restart from scratch across an app restart: the piece list persists
+ * to disk independently of the (freshly re-created, every launch) WebTorrent
+ * client object. The queue of what's in flight is persisted separately (see
+ * persistDownload/loadSavedDownloads) and replayed by init() below.
  */
 export class TorrentDownloadManager {
   private client: InstanceType<typeof window.WebTorrent> | null = null
@@ -112,15 +141,25 @@ export class TorrentDownloadManager {
   // changed) makes React see a "change" every time and re-render forever
   // (error #185, "too many re-renders").
   private listSnapshot: DownloadSnapshot[] = []
+  // init() is called from a mount effect keyed on `app.client` becoming
+  // available — guards against a double-run re-queuing every saved download
+  // twice if that effect ever re-fires.
+  private initialized = false
 
-  async init (onError: (msg: string) => void): Promise<void> {
+  /** `client` is only needed here to re-request torrent metadata for
+   * whatever was still in flight when the app last quit — see the restore
+   * loop at the end of this method. */
+  async init (onError: (msg: string) => void, client: P2FClient): Promise<void> {
+    if (this.initialized) return
+    this.initialized = true
     await loadWebTorrent()
-    // Downloads don't survive quitting the app, so anything still in OPFS at
-    // startup is dead weight from a previous session — a crash, a force-quit,
-    // or a save that never got to destroy its store. Reap it before adding
-    // anything new, so a machine that's already tight on space doesn't start
-    // the next download already carrying the last one's ciphertext.
-    if (opfsAvailable()) await OpfsChunkStore.reapAllExcept(new Set())
+    // Prunes anything stale (or already-finished, orphaned by a crash/force
+    // quit before its store was destroyed) and reaps whatever OPFS pieces
+    // aren't backing one of the downloads about to be resumed below — same
+    // cost/benefit as before (a machine tight on space doesn't start the
+    // next session still carrying dead weight), just no longer wiping pieces
+    // that are actually going to be resumed.
+    const toResume = await this.reconcile()
     this.client = new window.WebTorrent({ tracker: { rtcConfig: { iceServers: [] } } })
     this.client.on('error', (err) => { onError(errMessage(err)) })
     if (window.isSecureContext && 'serviceWorker' in navigator) {
@@ -138,6 +177,40 @@ export class TorrentDownloadManager {
         console.warn('streamed downloads unavailable, falling back to Blob saves:', err)
       }
     }
+    for (const saved of toResume) {
+      void this.start(client, saved.path, saved.name, saved.mountId, saved.paused ?? false)
+    }
+  }
+
+  /** Drops anything abandoned long enough that silently resuming it would be
+   * more surprising than useful, then reaps every OPFS piece set that isn't
+   * backing one of the downloads being kept — mirrors the browser web
+   * client's reconcile() in downloadManager.ts. Returns what's left to
+   * resume. */
+  private async reconcile (): Promise<SavedDownload[]> {
+    const list = await loadSavedDownloads()
+    const now = Date.now()
+    const keep: SavedDownload[] = []
+    const reap = new Set<string>()
+
+    for (const entry of list) {
+      const abandoned = now - entry.lastActiveAt > STALE_DOWNLOAD_MS
+      if (abandoned) {
+        if (entry.infoHash) reap.add(entry.infoHash)
+        continue
+      }
+      keep.push(entry)
+    }
+    if (keep.length !== list.length) await saveSavedDownloads(keep)
+
+    if (opfsAvailable()) {
+      const trackedHashes = new Set(keep.map(e => e.infoHash).filter((h): h is string => Boolean(h)))
+      for (const key of await OpfsChunkStore.listKeys()) {
+        if (!trackedHashes.has(key)) reap.add(key)
+      }
+      await Promise.all([...reap].map(key => OpfsChunkStore.remove(key)))
+    }
+    return keep
   }
 
   subscribe (listener: () => void): () => void {
@@ -160,8 +233,10 @@ export class TorrentDownloadManager {
     return this.listSnapshot
   }
 
-  /** `mountId` (omitted for the default mount) is only needed up front to fetch the right torrent metadata — this manager doesn't persist downloads across restarts, so there's nothing to remember it for afterward. */
-  async start (client: P2FClient, path: string, name: string, mountId?: number): Promise<void> {
+  /** `startPaused` is only ever true when this is a restore on app startup
+   * (see init()), replaying a download that was paused when the app last
+   * quit — a fresh download from the UI always starts running. */
+  async start (client: P2FClient, path: string, name: string, mountId?: number, startPaused = false): Promise<void> {
     if (!this.client) return
     const existing = this.snapshots.get(path)
     if (existing && existing.status !== 'done' && existing.status !== 'error') return
@@ -176,6 +251,9 @@ export class TorrentDownloadManager {
       const meta = await client.torrentMeta(path, keyWrap.clientPublicKeyBase64, mountId)
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length, infoHash: meta.infoHash })
+      // Recorded now (rather than only once fully done) so a quit mid-transfer
+      // has something to resume from — see init()/reconcile().
+      await persistDownload({ path, name, mountId, paused: startPaused, infoHash: meta.infoHash, lastActiveAt: Date.now() })
 
       // The wire carries AES-256-CTR ciphertext (encrypted on the fly
       // server-side, see torrents.ts) — register the key so the patched File
@@ -212,7 +290,7 @@ export class TorrentDownloadManager {
         ...(opfsAvailable() ? { store: OpfsChunkStore } : {})
       }, torrent => {
         if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
-        this.track(client, torrent, meta.webseed, path, meta.plainSha256)
+        this.track(client, torrent, meta.webseed, path, meta.plainSha256, startPaused)
       })
     } catch (err) {
       this.set(path, { status: 'error', message: errMessage(err) })
@@ -243,12 +321,21 @@ export class TorrentDownloadManager {
     this.storeTeardown.set(infoHash, done)
   }
 
-  private track (client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string | undefined): void {
+  private track (
+    client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string | undefined,
+    startPaused: boolean
+  ): void {
     const t: Tracked = {
-      torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, finished: false,
+      torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, lastTouch: 0, finished: false,
       tick: undefined as unknown as ReturnType<typeof setInterval>
     }
     this.tracked.set(path, t)
+
+    if (startPaused) {
+      torrent.pause()
+      for (const wire of [...torrent.wires]) { try { (wire as unknown as { destroy: () => void }).destroy() } catch { /* gone */ } }
+      this.set(path, { status: 'paused' })
+    }
 
     const onDone = (): void => {
       if (t.finished) return
@@ -301,6 +388,12 @@ export class TorrentDownloadManager {
       } else {
         this.set(path, { elapsedMs })
       }
+      // Keeps a long-running download's `lastActiveAt` fresh so reconcile()
+      // on the next launch doesn't mistake it for abandoned.
+      if (Date.now() - t.lastTouch > TOUCH_INTERVAL_MS) {
+        t.lastTouch = Date.now()
+        void touchDownload(path)
+      }
     }, 500)
 
     torrent.on('done', onDone)
@@ -333,6 +426,7 @@ export class TorrentDownloadManager {
     t.torrent.pause()
     for (const wire of [...t.torrent.wires]) { try { (wire as unknown as { destroy: () => void }).destroy() } catch { /* gone */ } }
     this.set(path, { status: 'paused' })
+    void touchDownload(path, { paused: true })
   }
 
   resume (path: string): void {
@@ -340,6 +434,7 @@ export class TorrentDownloadManager {
     if (!t) return
     t.torrent.resume()
     this.set(path, { status: 'downloading' })
+    void touchDownload(path, { paused: false })
   }
 
   cancel (path: string): void {
@@ -350,11 +445,17 @@ export class TorrentDownloadManager {
     }
     this.tracked.delete(path)
     this.snapshots.delete(path)
+    void forgetDownload(path)
     this.notify()
   }
 
+  /** Only ever called for a `done`/`error` entry (see DownloadsScreen's
+   * "Clear" button) — a `done` one is already gone from the saved list (see
+   * save()), so this only matters for dropping an `error` one that would
+   * otherwise be retried again on the next launch. */
   remove (path: string): void {
     this.snapshots.delete(path)
+    void forgetDownload(path)
     this.notify()
   }
 
@@ -417,6 +518,10 @@ export class TorrentDownloadManager {
       }
 
       this.set(path, { status: 'done', progress: 1, downloaded: file.length, length: file.length, savedTo, checksumStatus })
+      // Genuinely finished — nothing left to resume on a future launch. An
+      // error, below, deliberately leaves the saved entry in place so it's
+      // retried automatically next time instead of silently dropped.
+      void forgetDownload(path)
       await client.historyRecord(path, file.name, file.length, torrent.infoHash, durationMs).catch(() => {})
     } catch (err) {
       this.set(path, { status: 'error', message: `save failed: ${errMessage(err)}` })
