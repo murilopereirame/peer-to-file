@@ -90,22 +90,31 @@ client (`client/`) see the change.
 
 ## CI/CD
 
-Two ad-hoc (`workflow_dispatch`-only) GitHub Actions workflows, neither of
-which runs automatically on push/PR:
+Three GitHub Actions workflows cover building and releasing the desktop app:
 
-- **`.github/workflows/apps-build.yml`** — builds unsigned Electron desktop
-  bundles for macOS/Windows/Linux, uploaded as workflow artifacts. Trigger it
-  from the Actions tab: pick a **branch** (a text input — branch name, tag,
-  or commit SHA; defaults to `main`) to build from. These are dev/sideload
-  builds — real signing (Apple Developer ID + notarization, Windows
-  Authenticode) needs your own credentials wired in as repo secrets, which
-  isn't set up here; macOS bundles instead get a *deep* ad-hoc signature via
-  an `afterPack` hook (`electron/afterpack.mjs`) — see "Opening the macOS
-  build" below for exactly what that does and doesn't fix.
-- **`.github/workflows/apps-version-bump.yml`** — bumps `apps/desktop` and
-  `packages/shared` versions together (patch/minor/major, your choice at
-  trigger time), and pushes a commit + `apps-vX.Y.Z` tag. Doesn't touch the
-  root project's own version.
+- **`.github/workflows/apps-build.yml`** — ad-hoc (`workflow_dispatch`-only):
+  builds unsigned Electron desktop bundles for macOS/Windows/Linux, uploaded
+  as workflow artifacts. Trigger it from the Actions tab: pick a **branch**
+  (a text input — branch name, tag, or commit SHA; defaults to `main`) to
+  build from. These are dev/sideload builds — real signing (Apple Developer
+  ID + notarization, Windows Authenticode) needs your own credentials wired
+  in as repo secrets, which isn't set up here; macOS bundles instead get a
+  *deep* ad-hoc signature via an `afterPack` hook
+  (`electron/afterpack.mjs`) — see "Opening the macOS build" below for
+  exactly what that does and doesn't fix.
+- **`.github/workflows/apps-version-bump.yml`** — ad-hoc
+  (`workflow_dispatch`-only): bumps `apps/desktop` and `packages/shared`
+  versions together (patch/minor/major, your choice at trigger time), and
+  pushes a commit + `apps-vX.Y.Z` tag. Doesn't touch the root project's own
+  version.
+- **`.github/workflows/apps-release.yml`** — runs automatically whenever a
+  GitHub Release is published. Builds the same unsigned bundles as
+  `apps-build.yml` (checking out the release's tag) and attaches the
+  `.dmg`/`.exe`/`.deb`/`.AppImage` files to that release as downloadable
+  assets via `gh release upload`. Typical flow: run
+  `apps-version-bump.yml` to get an `apps-vX.Y.Z` tag, then create and
+  publish a GitHub Release for that tag (draft releases don't trigger a
+  build — only publishing one does).
 
 ### Opening the macOS build
 
