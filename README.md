@@ -214,9 +214,10 @@ the file but not for twice the file, the download completes and then the save fa
 All three save paths above avoid that by *draining*: the final file is assembled by a
 single sequential pass over the pieces, and each piece is deleted from the store the
 moment that pass moves past it. Disk use falls as the output grows, so the peak stays
-near 1x the file size instead of 2x. Both the web client and the desktop app use the
-same store (`packages/shared/src/opfsChunkStore.ts`) specifically because this needs a
-store that can release individual pieces — WebTorrent's built-in browser store can only
+near 1x the file size instead of 2x. The web client uses its own store
+(`packages/shared/src/opfsChunkStore.ts`), and the desktop app an equivalent disk-backed
+one in a user-chosen cache folder (`apps/desktop/src/lib/fsChunkStore.ts`), specifically
+because this needs a store that can release individual pieces — WebTorrent's built-in browser store can only
 be discarded whole, at the end.
 
 The trade-off is deliberate: once a save has started reading, its pieces are gone, so a

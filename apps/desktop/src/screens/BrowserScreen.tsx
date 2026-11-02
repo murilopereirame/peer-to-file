@@ -10,7 +10,7 @@ import { useToast } from '../context/ToastContext'
 import { Button, Card, ErrorText, Input, Muted, Title } from '../components/Primitives'
 import {
   DownloadIcon, FileIcon, FolderIcon, FolderPlusIcon, LevelUpIcon, LinkIcon, MoreIcon, MoveIcon, PencilIcon,
-  RefreshIcon, SearchIcon, TrashIcon, UploadIcon
+  RefreshIcon, SaveIcon, SearchIcon, TrashIcon, UploadIcon
 } from '../components/icons'
 
 function Breadcrumbs ({ path, onNavigate }: { path: string, onNavigate: (p: string) => void }): React.JSX.Element {
@@ -215,6 +215,15 @@ export function BrowserScreen (): React.JSX.Element {
   const [moving, setMoving] = useState<DirEntry | null>(null)
   const [deleting, setDeleting] = useState<DirEntry | null>(null)
   const [creatingFolder, setCreatingFolder] = useState(false)
+
+  // `saveAs` (or the "ask where to save each time" setting) shows the native
+  // Save dialog first; cancelling it queues nothing, so no toast either.
+  const startDownload = (filePath: string, name: string, mountId: number | undefined, saveAs = false): void => {
+    requestNotificationPermission()
+    void downloads.start(filePath, name, mountId, saveAs).then(started => {
+      if (started) notify(`Added "${name}" to the download queue`)
+    }, (err: unknown) => { notify(`Couldn't start "${name}": ${errMessage(err)}`) })
+  }
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Per-path listing cache so revisiting a folder (breadcrumb, "../") paints
   // instantly from the last-known listing while a background refetch keeps
@@ -386,17 +395,20 @@ export function BrowserScreen (): React.JSX.Element {
                     <td className="num" style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>{formatDateTime(hit.mtime)}</td>
                     <td style={{ textAlign: 'right' }}>
                       {hit.type === 'file' && (
-                        <button
-                          className="link-btn"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            requestNotificationPermission()
-                            downloads.start(hit.path, hit.name, hit.mount.id)
-                            notify(`Added "${hit.name}" to the download queue`)
-                          }}
-                        >
-                          <DownloadIcon size={13} />Download
-                        </button>
+                        <>
+                          <button
+                            className="link-btn"
+                            onClick={(e) => { e.stopPropagation(); startDownload(hit.path, hit.name, hit.mount.id) }}
+                          >
+                            <DownloadIcon size={13} />Download
+                          </button>{' '}
+                          <button
+                            className="link-btn" title="Choose where to save this file"
+                            onClick={(e) => { e.stopPropagation(); startDownload(hit.path, hit.name, hit.mount.id, true) }}
+                          >
+                            <SaveIcon size={13} />Save as…
+                          </button>
+                        </>
                       )}
                     </td>
                     <td />
@@ -439,9 +451,7 @@ export function BrowserScreen (): React.JSX.Element {
                           className="link-btn"
                           onClick={(e) => {
                             e.stopPropagation()
-                            requestNotificationPermission()
-                            downloads.start(joinPath(path, entry.name), entry.name, app.activeMountId ?? undefined)
-                            notify(`Added "${entry.name}" to the download queue`)
+                            startDownload(joinPath(path, entry.name), entry.name, app.activeMountId ?? undefined)
                           }}
                         >
                           <DownloadIcon size={13} />Download
@@ -457,6 +467,17 @@ export function BrowserScreen (): React.JSX.Element {
                       </button>
                       {menuFor === entry.name && (
                         <div className="row-menu" onClick={e => e.stopPropagation()}>
+                          {entry.type === 'file' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMenuFor(null)
+                                startDownload(joinPath(path, entry.name), entry.name, app.activeMountId ?? undefined, true)
+                              }}
+                            >
+                              <SaveIcon size={14} />Save as…
+                            </button>
+                          )}
                           <button type="button" onClick={() => { setMenuFor(null); setRenaming(entry) }}>
                             <PencilIcon size={14} />Rename
                           </button>

@@ -4,7 +4,9 @@ import { TorrentDownloadManager, type DownloadSnapshot } from '../lib/torrentDow
 
 interface Ctx {
   downloads: DownloadSnapshot[]
-  start: (path: string, name: string, mountId?: number) => void
+  /** Resolves false if the user cancelled the Save dialog ("Save as…", or
+   * the "ask where to save each time" setting) — nothing was queued. */
+  start: (path: string, name: string, mountId?: number, saveAs?: boolean) => Promise<boolean>
   pause: (path: string) => void
   resume: (path: string) => void
   cancel: (path: string) => void
@@ -38,7 +40,10 @@ export function DownloadsProvider ({ children }: { children: React.ReactNode }):
 
   const value = useMemo<Ctx>(() => ({
     downloads,
-    start: (path, name, mountId) => { if (app.client) void managerRef.current.start(app.client, path, name, mountId) },
+    start: async (path, name, mountId, saveAs = false) => {
+      if (!app.client) return false
+      return await managerRef.current.request(app.client, path, name, mountId, saveAs)
+    },
     pause: (path) => { managerRef.current.pause(path) },
     resume: (path) => { managerRef.current.resume(path) },
     cancel: (path) => { managerRef.current.cancel(path) },

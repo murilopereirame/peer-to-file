@@ -87,8 +87,27 @@ export async function hashFile (path: string): Promise<string | null> {
  * matching on that let an old, already-finished download's completion
  * satisfy a brand new wait — resolving to the wrong path and, via the
  * checksum feature, hashing the wrong file entirely. */
-export async function registerPendingDownload (): Promise<number> {
-  return await window.p2f.registerPendingDownload()
+export async function registerPendingDownload (savePath?: string): Promise<number> {
+  return await window.p2f.registerPendingDownload(savePath)
+}
+
+/** Native Save dialog, shown by the main process (so it works whenever it's
+ * called, unlike the renderer's gesture-bound showSaveFilePicker). Resolves
+ * to the chosen path, or null if the user cancelled. */
+export async function askSavePath (suggestedName: string): Promise<string | null> {
+  return await window.p2f.askSavePath(suggestedName)
+}
+
+// --- Download cache folder ----------------------------------------------------
+// Where in-progress download parts are kept (see fsChunkStore.ts and
+// electron/pieceCache.cts). Unset means the app's own data folder.
+
+export async function defaultCacheDir (): Promise<string> {
+  return await window.p2f.defaultCacheDir()
+}
+
+export async function pickCacheFolder (): Promise<string | null> {
+  return await window.p2f.pickCacheFolder()
 }
 
 /** Resolves with the finished download's actual save path once Electron's
@@ -130,9 +149,22 @@ export const settings = {
     if (mode) await window.p2f.setSetting('theme', mode); else await window.p2f.deleteSetting('theme')
   },
 
+  /** null when the user hasn't picked one — i.e. the default inside the
+   * app's data folder (see defaultCacheDir). */
+  async getCustomCacheDir (): Promise<string | null> {
+    return (await window.p2f.getSetting<string>('cacheDir')) ?? null
+  },
+  /** The folder new downloads should keep their parts in. */
+  async getCacheDir (): Promise<string> {
+    return (await this.getCustomCacheDir()) ?? (await defaultCacheDir())
+  },
+  async setCacheDir (dir: string | null): Promise<void> {
+    if (dir) await window.p2f.setSetting('cacheDir', dir); else await window.p2f.deleteSetting('cacheDir')
+  },
+
   /** false (default): save straight to the default download folder, no
-   * dialog. true: prompt for a location on every download via the native
-   * Save dialog. */
+   * dialog. true: ask where to save (native Save dialog) every time a
+   * download is started. */
   async getAskBeforeSave (): Promise<boolean> {
     return (await window.p2f.getSetting<boolean>('askBeforeSave')) ?? false
   },
@@ -168,6 +200,13 @@ export interface SavedDownload {
   mountId?: number
   paused?: boolean
   infoHash?: string
+  /** Exact destination picked via "Save as…" / "ask each time"; unset means
+   * the default download folder. */
+  savePath?: string
+  /** Cache folder this download's parts live in — kept per download so
+   * changing the setting doesn't strand a half-finished one. Unset on
+   * entries saved by older versions (their parts were in OPFS). */
+  cacheDir?: string
   lastActiveAt: number
 }
 

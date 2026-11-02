@@ -45,7 +45,21 @@ const api = {
   /** Call before triggering a download, then pass the returned ticket to
    * awaitDownloadCompletion — see the doc comment on pendingDownloadQueue in
    * main.cts for why this is ticket-based rather than matched by filename. */
-  registerPendingDownload: (): Promise<number> => ipcRenderer.invoke('downloads:registerPending'),
+  registerPendingDownload: (savePath?: string): Promise<number> => ipcRenderer.invoke('downloads:registerPending', savePath),
+  /** Native Save dialog; resolves to the chosen path, or null if cancelled. */
+  askSavePath: (suggestedName: string): Promise<string | null> => ipcRenderer.invoke('downloads:askSavePath', suggestedName),
+
+  // Piece cache for in-progress downloads (electron/pieceCache.cts).
+  defaultCacheDir: (): Promise<string> => ipcRenderer.invoke('cache:defaultDir'),
+  pickCacheFolder: (): Promise<string | null> => ipcRenderer.invoke('cache:pickFolder'),
+  cachePut: (dir: string, key: string, index: number, buf: Uint8Array): Promise<void> =>
+    ipcRenderer.invoke('cache:put', dir, key, index, buf),
+  cacheGet: (dir: string, key: string, index: number, offset: number, length: number | undefined, expectedLength: number): Promise<Uint8Array> =>
+    ipcRenderer.invoke('cache:get', dir, key, index, offset, length, expectedLength),
+  cacheRemovePieces: (dir: string, key: string, fromIndex: number, toIndex: number): Promise<void> =>
+    ipcRenderer.invoke('cache:removePieces', dir, key, fromIndex, toIndex),
+  cacheRemoveKey: (dir: string, key: string): Promise<void> => ipcRenderer.invoke('cache:removeKey', dir, key),
+  cacheListKeys: (dir: string): Promise<string[]> => ipcRenderer.invoke('cache:listKeys', dir),
   awaitDownloadCompletion: (ticketId: number): Promise<DownloadCompletedInfo> =>
     ipcRenderer.invoke('downloads:awaitCompletion', ticketId),
 
