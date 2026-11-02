@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import { errMessage, type ThemeMode } from '@p2f/shared'
 import { useApp } from '../context/AppContext'
-import { pickDownloadFolder, settings } from '../lib/electronApi'
+import { defaultCacheDir, pickCacheFolder, pickDownloadFolder, settings } from '../lib/electronApi'
 import { Button, ErrorText, Input, Muted } from '../components/Primitives'
 import { ConnectionBadge } from '../components/ConnectionBadge'
 import {
-  DownloadIcon, FolderIcon, LogOutIcon, MonitorIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon
+  DownloadIcon, FolderIcon, HardDriveIcon, LogOutIcon, MonitorIcon, MoonIcon, ServerIcon, SettingsIcon, SunIcon
 } from '../components/icons'
 
 /** Card with the same head/body split the rest of the app uses. */
@@ -51,9 +51,30 @@ export function SettingsScreen (): React.JSX.Element {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [askBeforeSave, setAskBeforeSave] = useState(false)
+  // null = the default folder inside the app's data directory.
+  const [customCacheDir, setCustomCacheDir] = useState<string | null>(null)
+  const [fallbackCacheDir, setFallbackCacheDir] = useState('')
 
   useEffect(() => { setServerInput(app.serverUrl) }, [app.serverUrl])
   useEffect(() => { void settings.getAskBeforeSave().then(setAskBeforeSave) }, [])
+  useEffect(() => {
+    void settings.getCustomCacheDir().then(setCustomCacheDir)
+    void defaultCacheDir().then(setFallbackCacheDir)
+  }, [])
+
+  const onSetCacheDir = async (dir: string | null): Promise<void> => {
+    await settings.setCacheDir(dir)
+    setCustomCacheDir(dir)
+  }
+
+  const onPickCacheFolder = async (): Promise<void> => {
+    try {
+      const dir = await pickCacheFolder()
+      if (dir) await onSetCacheDir(dir)
+    } catch (err) {
+      setError(errMessage(err))
+    }
+  }
 
   const onSetAskBeforeSave = async (value: boolean): Promise<void> => {
     setAskBeforeSave(value)
@@ -108,16 +129,35 @@ export function SettingsScreen (): React.JSX.Element {
       </Section>
 
       <Section title="Saving downloads" icon={<DownloadIcon size={15} />}>
-        <Muted>Where finished downloads go — automatically into the folder above, or ask each time.</Muted>
+        <Muted>
+          Save automatically into the folder above, or always ask where to save when you start a download.
+          You can also pick a location for a single file with “Save as…” in the file browser.
+        </Muted>
         <div style={{ marginTop: 10 }}>
           <Segmented
             value={askBeforeSave}
             onChange={value => { void onSetAskBeforeSave(value) }}
             options={[
               { value: false, label: 'Save automatically' },
-              { value: true, label: 'Ask each time' }
+              { value: true, label: 'Always ask where to save' }
             ]}
           />
+        </div>
+      </Section>
+
+      <Section title="Download cache folder" icon={<HardDriveIcon size={15} />}>
+        <Muted>
+          Where the parts of in-progress downloads are kept until the file is finished. Needs about as much
+          free space as the files you’re downloading. Changes apply to new downloads.
+        </Muted>
+        <div style={{ marginTop: 10 }}>
+          <Muted>{customCacheDir ?? `${fallbackCacheDir} (default)`}</Muted>
+        </div>
+        <div className="btn-row">
+          <Button variant="secondary" onClick={() => { void onPickCacheFolder() }}>Choose folder…</Button>
+          {customCacheDir && (
+            <Button variant="secondary" onClick={() => { void onSetCacheDir(null) }}>Use default</Button>
+          )}
         </div>
       </Section>
 

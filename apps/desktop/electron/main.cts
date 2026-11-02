@@ -1,11 +1,12 @@
 import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, protocol } from 'electron'
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync } from 'node:fs'
-import { extname, join } from 'node:path'
+import { extname, isAbsolute, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { pathToFileURL } from 'node:url'
 import { clearCredentials, loadCredentials, saveCredentials } from './credentials.cjs'
 import { clearCookiesForOrigin, getCookie, setCookie, performFetch, type FetchRequest } from './netFetch.cjs'
+import { getPiece, listKeys, putPiece, removeKey, removePieces } from './pieceCache.cjs'
 import { JsonStore } from './store.cjs'
 
 const APP_SCHEME = 'p2file'
@@ -43,7 +44,7 @@ interface DownloadCompletedInfo {
  * Lets the renderer await its *own* download finishing (the click that
  * starts one is a one-way navigation with no other completion signal) —
  * matched by arrival order (a ticket per `registerPendingDownload` call,
- * consumed FIFO by `will-download`'s `done` events below), not by filename.
+ * claimed FIFO by `will-download` below), not by filename.
  * Filename matching was tried first and is exactly what broke: retrying the
  * same file (a very normal thing to do) reuses the same name, and an old,
  * already-finished download's broadcast could satisfy a brand new listener
@@ -52,7 +53,14 @@ interface DownloadCompletedInfo {
  */
 let nextDownloadTicket = 0
 const pendingDownloadQueue: number[] = []
-const downloadTickets = new Map<number, { info?: DownloadCompletedInfo, resolve?: (info: DownloadCompletedInfo) => void }>()
+interface DownloadTicket {
+  /** Exact destination chosen by the user ("Save as…" / "ask each time").
+   * Unset means "the default download folder, renamed on collision". */
+  savePath?: string
+  info?: DownloadCompletedInfo
+  resolve?: (info: DownloadCompletedInfo) => void
+}
+const downloadTickets = new Map<number, DownloadTicket>()
 
 /** Appends "-1", "-2", ... before the extension until an unused name is
  * found, rather than silently overwriting an existing file — `setSavePath`
@@ -104,15 +112,24 @@ async function createWindow (): Promise<void> {
   // worker, or a File System Access / Blob fallback) — this redirects that
   // into the user's configured default download folder instead of Electron's
   // own default Downloads dir / a native Save As prompt.
+  //
+  // The ticket is claimed here (when the download *starts*), not when it
+  // finishes: downloads can finish in a different order than they started,
+  // and the ticket also carries where this particular download should go.
   mainWindow.webContents.session.on('will-download', (_event, item) => {
+    const ticketId = pendingDownloadQueue.shift()
+    const ticket = ticketId === undefined ? undefined : downloadTickets.get(ticketId)
     const dir = downloadDir.current
-    if (dir) item.setSavePath(uniqueSavePath(dir, item.getFilename()))
+    if (ticket?.savePath) {
+      // Already confirmed by the user in the native Save dialog (which asks
+      // about overwriting), so use it exactly as chosen.
+      item.setSavePath(ticket.savePath)
+    } else if (dir) {
+      item.setSavePath(uniqueSavePath(dir, item.getFilename()))
+    }
     item.once('done', (_evt, state) => {
+      if (ticketId === undefined || !ticket) return
       const info: DownloadCompletedInfo = { filename: item.getFilename(), path: item.getSavePath(), state }
-      const ticketId = pendingDownloadQueue.shift()
-      if (ticketId === undefined) return
-      const ticket = downloadTickets.get(ticketId)
-      if (!ticket) return
       if (ticket.resolve) { ticket.resolve(info); downloadTickets.delete(ticketId) } else { ticket.info = info }
     })
   })
@@ -169,6 +186,39 @@ ipcMain.handle('downloads:pickFolder', async () => {
 })
 ipcMain.handle('downloads:setDir', (_e, path: string | null) => { downloadDir.current = path })
 
+// "Save as…" and the "ask where to save each time" setting. Shown when the
+// download is *requested* (not when it finishes), so the user picks a place
+// once and a long transfer can then finish unattended. The main process has
+// no user-gesture requirement, unlike the renderer's showSaveFilePicker.
+ipcMain.handle('downloads:askSavePath', async (_e, suggestedName: string) => {
+  if (!mainWindow) return null
+  const base = downloadDir.current ?? app.getPath('downloads')
+  const res = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save as',
+    defaultPath: join(base, typeof suggestedName === 'string' ? suggestedName : ''),
+    properties: ['createDirectory', 'showOverwriteConfirmation']
+  })
+  return res.canceled || !res.filePath ? null : res.filePath
+})
+
+// --- Piece cache (see electron/pieceCache.cts) ---------------------------
+ipcMain.handle('cache:defaultDir', () => join(app.getPath('userData'), 'download-cache'))
+ipcMain.handle('cache:pickFolder', async () => {
+  if (!mainWindow) return null
+  const res = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Choose a folder for download parts'
+  })
+  return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0]
+})
+ipcMain.handle('cache:put', (_e, dir: string, key: string, index: number, buf: Uint8Array) => putPiece(dir, key, index, buf))
+ipcMain.handle('cache:get', (_e, dir: string, key: string, index: number, offset: number, length: number | undefined, expectedLength: number) =>
+  getPiece(dir, key, index, offset, length, expectedLength))
+ipcMain.handle('cache:removePieces', (_e, dir: string, key: string, fromIndex: number, toIndex: number) =>
+  removePieces(dir, key, fromIndex, toIndex))
+ipcMain.handle('cache:removeKey', (_e, dir: string, key: string) => removeKey(dir, key))
+ipcMain.handle('cache:listKeys', (_e, dir: string) => listKeys(dir))
+
 ipcMain.handle('settings:get', (_e, key: string) => settingsStore.get(key))
 ipcMain.handle('settings:set', (_e, key: string, value: unknown) => { settingsStore.set(key, value) })
 ipcMain.handle('settings:delete', (_e, key: string) => { settingsStore.delete(key) })
@@ -202,9 +252,9 @@ ipcMain.handle('power:setKeepAwake', (_e, enabled: boolean) => {
 // See the DownloadCompletedInfo/pendingDownloadQueue doc comment above —
 // call registerPendingDownload() and only *then* trigger the download, so
 // this ticket is queued before its `will-download` can possibly fire.
-ipcMain.handle('downloads:registerPending', () => {
+ipcMain.handle('downloads:registerPending', (_e, savePath?: string | null) => {
   const id = nextDownloadTicket++
-  downloadTickets.set(id, {})
+  downloadTickets.set(id, typeof savePath === 'string' && isAbsolute(savePath) ? { savePath } : {})
   pendingDownloadQueue.push(id)
   return id
 })

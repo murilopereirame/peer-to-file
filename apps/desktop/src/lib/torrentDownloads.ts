@@ -1,18 +1,13 @@
 import {
   establishKeyWrap, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
-  opfsAvailable, setOpfsWorkerFactory, transferKeys, unwrapKeyMaterial, type P2FClient
+  opfsAvailable, transferKeys, unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
+import { FsChunkStore } from './fsChunkStore'
 import {
-  awaitDownloadCompletion, currentDownloadDir, hashFile, loadSavedDownloads, registerPendingDownload,
+  askSavePath, awaitDownloadCompletion, currentDownloadDir, hashFile, loadSavedDownloads, registerPendingDownload,
   saveSavedDownloads, settings, type SavedDownload
 } from './electronApi'
-
-// The store lives in @p2f/shared (the web client uses the same one), but the
-// worker it talks to has to be constructed from a URL inside this app's own
-// source tree for Vite to emit a worker chunk — so the app supplies the
-// factory.
-setOpfsWorkerFactory(() => new Worker(new URL('./opfsWorker.ts', import.meta.url), { type: 'module' }))
 
 export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
 export type ChecksumStatus = 'verifying' | 'ok' | 'mismatch' | 'unavailable'
@@ -36,11 +31,11 @@ export interface DownloadSnapshot {
   infoHash?: string
   elapsedMs: number
   peers: PeerInfo[]
-  /** Where the finished file landed — only known when saved via the
-   * configured download folder (the `will-download` redirect); a manual
-   * Save As pick leaves this unset since the OS doesn't hand the resulting
-   * path back to the page. */
+  /** Where the finished file landed (as reported by Electron's download
+   * manager once it's written). */
   savedTo?: string
+  /** Destination picked up front via "Save as…" / "ask each time". */
+  savePath?: string
   /** Compares the server's plaintext SHA-256 (independent of BitTorrent's
    * own per-piece hashing, which only covers the ciphertext) against the
    * saved file — catches decrypt bugs or a truncated/corrupted save that
@@ -62,10 +57,6 @@ interface Tracked {
    * keeps advancing elapsedMs against a now-static byte count, making the
    * displayed average speed drift for no reason. */
   finished: boolean
-}
-
-function isUserGestureError (err: unknown): boolean {
-  return err instanceof Error && /user gesture/i.test(err.message)
 }
 
 // Old enough that resuming it silently on the next launch would be more
@@ -115,11 +106,12 @@ function joinNativePath (dir: string, name: string): string {
  * (WebTorrent over WebRTC, HTTP webseed fallback) — this is what
  * distinguishes the desktop app from a plain HTTP client.
  *
- * Pieces go through the shared OPFS chunk store rather than WebTorrent's own
- * default browser store, for two reasons: only a store we own can release
+ * Pieces go through our own on-disk chunk store (FsChunkStore, in the
+ * user-chosen cache folder) rather than WebTorrent's default browser store,
+ * for two reasons: only a store we own can release
  * individual pieces, which is what lets save() free the downloaded
  * ciphertext as it writes the decrypted file instead of holding all of it
- * until the save finishes (see OpfsChunkStore.startDraining) — and, same as
+ * until the save finishes (see FsChunkStore.startDraining) — and, same as
  * the browser web client, it's what lets a download resume mid-file rather
  * than restart from scratch across an app restart: the piece list persists
  * to disk independently of the (freshly re-created, every launch) WebTorrent
@@ -133,7 +125,7 @@ export class TorrentDownloadManager {
   private readonly tracked = new Map<string, Tracked>()
   private readonly listeners = new Set<() => void>()
   // infoHash -> in-flight chunk-store teardown, so re-downloading the same
-  // file doesn't race the previous attempt's OPFS directory removal.
+  // file doesn't race the previous attempt's piece-folder removal.
   private readonly storeTeardown = new Map<string, Promise<void>>()
   // Cached, only rebuilt in notify() — list() is used as useSyncExternalStore's
   // getSnapshot in DownloadsContext.tsx, which calls it on every render to
@@ -153,6 +145,7 @@ export class TorrentDownloadManager {
     if (this.initialized) return
     this.initialized = true
     await loadWebTorrent()
+    FsChunkStore.defaultDir = await settings.getCacheDir()
     // Prunes anything stale (or already-finished, orphaned by a crash/force
     // quit before its store was destroyed) and reaps whatever OPFS pieces
     // aren't backing one of the downloads about to be resumed below — same
@@ -178,37 +171,47 @@ export class TorrentDownloadManager {
       }
     }
     for (const saved of toResume) {
-      void this.start(client, saved.path, saved.name, saved.mountId, saved.paused ?? false)
+      void this.start(client, saved.path, saved.name, saved.mountId, {
+        startPaused: saved.paused ?? false, savePath: saved.savePath, cacheDir: saved.cacheDir
+      })
     }
   }
 
   /** Drops anything abandoned long enough that silently resuming it would be
-   * more surprising than useful, then reaps every OPFS piece set that isn't
+   * more surprising than useful, then reaps every piece set that isn't
    * backing one of the downloads being kept — mirrors the browser web
    * client's reconcile() in downloadManager.ts. Returns what's left to
-   * resume. */
+   * resume.
+   *
+   * Looks in the current cache folder *and* every folder a kept download
+   * started in (the setting may have changed since). Anything left in the
+   * old OPFS store is from before the cache folder existed and is always
+   * reaped — those downloads resume into the cache folder from scratch. */
   private async reconcile (): Promise<SavedDownload[]> {
     const list = await loadSavedDownloads()
     const now = Date.now()
     const keep: SavedDownload[] = []
-    const reap = new Set<string>()
 
     for (const entry of list) {
       const abandoned = now - entry.lastActiveAt > STALE_DOWNLOAD_MS
-      if (abandoned) {
-        if (entry.infoHash) reap.add(entry.infoHash)
-        continue
-      }
-      keep.push(entry)
+      if (!abandoned) keep.push(entry)
     }
     if (keep.length !== list.length) await saveSavedDownloads(keep)
 
+    const currentDir = await settings.getCacheDir()
+    const dirs = new Set([currentDir, ...keep.map(e => e.cacheDir).filter((d): d is string => Boolean(d))])
+    for (const dir of dirs) {
+      const tracked = new Set(keep.filter(e => (e.cacheDir ?? currentDir) === dir && e.infoHash).map(e => e.infoHash))
+      const keys = await FsChunkStore.listKeys(dir)
+      await Promise.all(keys.filter(k => !tracked.has(k)).map(k => FsChunkStore.remove(dir, k)))
+    }
+    // Abandoned downloads' parts, in whatever folder they started in.
+    for (const entry of list) {
+      if (!keep.includes(entry) && entry.infoHash && entry.cacheDir) await FsChunkStore.remove(entry.cacheDir, entry.infoHash)
+    }
+
     if (opfsAvailable()) {
-      const trackedHashes = new Set(keep.map(e => e.infoHash).filter((h): h is string => Boolean(h)))
-      for (const key of await OpfsChunkStore.listKeys()) {
-        if (!trackedHashes.has(key)) reap.add(key)
-      }
-      await Promise.all([...reap].map(key => OpfsChunkStore.remove(key)))
+      await Promise.all((await OpfsChunkStore.listKeys()).map(key => OpfsChunkStore.remove(key)))
     }
     return keep
   }
@@ -233,15 +236,47 @@ export class TorrentDownloadManager {
     return this.listSnapshot
   }
 
+  /** True while `path` is queued or transferring (a second request for it
+   * would be ignored). */
+  isActive (path: string): boolean {
+    const existing = this.snapshots.get(path)
+    return Boolean(existing && existing.status !== 'done' && existing.status !== 'error')
+  }
+
+  /**
+   * Entry point for a download the user just asked for. With `saveAs` (the
+   * "Save as…" action) or the "ask where to save each time" setting on, the
+   * native Save dialog is shown *now* — so the user picks a place once and
+   * the transfer can then finish unattended. Resolves false if the user
+   * cancelled that dialog (nothing is started).
+   */
+  async request (client: P2FClient, path: string, name: string, mountId: number | undefined, saveAs = false): Promise<boolean> {
+    if (this.isActive(path)) return true
+    let savePath: string | undefined
+    if (saveAs || await settings.getAskBeforeSave()) {
+      const picked = await askSavePath(name)
+      if (!picked) return false
+      savePath = picked
+    }
+    void this.start(client, path, name, mountId, { savePath })
+    return true
+  }
+
   /** `startPaused` is only ever true when this is a restore on app startup
    * (see init()), replaying a download that was paused when the app last
-   * quit — a fresh download from the UI always starts running. */
-  async start (client: P2FClient, path: string, name: string, mountId?: number, startPaused = false): Promise<void> {
+   * quit — a fresh download from the UI always starts running. `cacheDir`
+   * is likewise only passed on a restore, to keep using the folder the
+   * download's parts are already in. */
+  async start (
+    client: P2FClient, path: string, name: string, mountId?: number,
+    opts: { startPaused?: boolean, savePath?: string, cacheDir?: string } = {}
+  ): Promise<void> {
     if (!this.client) return
-    const existing = this.snapshots.get(path)
-    if (existing && existing.status !== 'done' && existing.status !== 'error') return
-    this.set(path, blank(path, name))
+    const { startPaused = false, savePath } = opts
+    if (this.isActive(path)) return
+    this.set(path, { ...blank(path, name), savePath })
     try {
+      const cacheDir = opts.cacheDir ?? await settings.getCacheDir()
       // ECDH key wrap (fresh ephemeral keypair per download) so the
       // transfer key below never crosses the wire in the clear — see
       // src/server/keyExchange.ts and packages/shared/src/browserCrypto.ts.
@@ -253,7 +288,7 @@ export class TorrentDownloadManager {
       this.set(path, { length: meta.length, infoHash: meta.infoHash })
       // Recorded now (rather than only once fully done) so a quit mid-transfer
       // has something to resume from — see init()/reconcile().
-      await persistDownload({ path, name, mountId, paused: startPaused, infoHash: meta.infoHash, lastActiveAt: Date.now() })
+      await persistDownload({ path, name, mountId, paused: startPaused, infoHash: meta.infoHash, savePath, cacheDir, lastActiveAt: Date.now() })
 
       // The wire carries AES-256-CTR ciphertext (encrypted on the fly
       // server-side, see torrents.ts) — register the key so the patched File
@@ -282,15 +317,15 @@ export class TorrentDownloadManager {
       // into the very same directory.
       await this.storeTeardown.get(meta.infoHash)
 
+      FsChunkStore.dirs.set(meta.infoHash, cacheDir)
       this.client.add(torrentFile, {
         maxWebConns: 8,
         // Our own store, so save() can drain it piece by piece (see the class
-        // comment); WebTorrent's default browser store can't release
-        // individual pieces.
-        ...(opfsAvailable() ? { store: OpfsChunkStore } : {})
+        // comment) and so parts land in the user's chosen cache folder.
+        store: FsChunkStore
       }, torrent => {
         if (torrent.files[0]) ensureFileDecryptionPatched(torrent.files[0])
-        this.track(client, torrent, meta.webseed, path, meta.plainSha256, startPaused)
+        this.track(client, torrent, meta.webseed, path, meta.plainSha256, startPaused, savePath)
       })
     } catch (err) {
       this.set(path, { status: 'error', message: errMessage(err) })
@@ -309,7 +344,7 @@ export class TorrentDownloadManager {
    * resolves once the store teardown has actually completed — see the wait in
    * start(). WebTorrent's own `remove()`/`destroy()` return as soon as the
    * teardown is *scheduled*, so without this there is no way to know when the
-   * OPFS directory for an infoHash is really gone.
+   * piece folder for an infoHash is really gone.
    */
   private destroyAndTrackTeardown (torrent: WTTorrent): void {
     const { infoHash } = torrent
@@ -323,7 +358,7 @@ export class TorrentDownloadManager {
 
   private track (
     client: P2FClient, torrent: WTTorrent, webseed: string, path: string, plainSha256: string | undefined,
-    startPaused: boolean
+    startPaused: boolean, savePath: string | undefined
   ): void {
     const t: Tracked = {
       torrent, webseed, startedAt: Date.now(), lastWebseedRetry: 0, lastTouch: 0, finished: false,
@@ -346,7 +381,7 @@ export class TorrentDownloadManager {
       // up until this point — set both explicitly rather than trusting
       // whatever the last tick happened to capture.
       this.set(path, { progress: 1, downloaded: torrent.length, length: torrent.length })
-      void this.save(client, torrent, path, Date.now() - t.startedAt, plainSha256)
+      void this.save(client, torrent, path, Date.now() - t.startedAt, plainSha256, savePath)
         .finally(() => { this.forgetTracked(path, torrent) })
     }
     const onError = (err: unknown): void => {
@@ -406,13 +441,13 @@ export class TorrentDownloadManager {
    * bug forgetExisting()/the progress>=1 guard above exist to work around.
    *
    * `destroyStore: true` is essential, not incidental: the chunk store keeps
-   * the downloaded *ciphertext* in OPFS (on disk). Destroying without it frees
+   * the downloaded *ciphertext* in the cache folder (on disk). Destroying without it frees
    * the torrent but leaves that full second copy of every finished file sitting
    * on disk for the rest of the session — so a few large downloads balloon to
    * ~2x their size on disk. This is now the *tail* of the cleanup rather than
    * all of it: save() drains the store as it reads, so by the time this runs
    * only the last piece or two is left. It still matters for the paths that
-   * never drain (a cancelled save-as dialog) and for whatever the drain's
+   * never drain (a failed save) and for whatever the drain's
    * strictly-behind-the-read rule leaves over. */
   private forgetTracked (path: string, torrent: WTTorrent): void {
     this.tracked.delete(path)
@@ -460,19 +495,10 @@ export class TorrentDownloadManager {
   }
 
   /**
-   * Two ways to land the finished file on disk:
-   *  - Automatic (default): stream into the configured default download
-   *    folder with no dialog, via the `will-download` main-process hook
-   *    (electron/main.cts) — same path whether or not a streamed service
-   *    worker is available (falls back to an in-memory Blob otherwise).
-   *  - Ask each time: the native Save dialog (`showSaveFilePicker`).
-   *
-   * `showSaveFilePicker` only works while still "handling a user gesture" —
-   * a window that expires a few seconds after the click that started the
-   * download, long before a slow key-exchange + torrent-metadata fetch +
-   * the transfer itself finishes and this method actually runs. When that
-   * window has closed, fall back to the automatic path instead of
-   * surfacing an error for something the user can't control the timing of.
+   * Lands the finished file on disk via Electron's download manager (see the
+   * `will-download` hook in electron/main.cts): either at the exact path the
+   * user picked when starting the download ("Save as…" / "ask each time"),
+   * or in the default download folder.
    *
    * Either way, once the file is on disk it's checksummed against the
    * server's plaintext SHA-256 (`plainSha256`, from /api/torrent) — this is
@@ -480,7 +506,10 @@ export class TorrentDownloadManager {
    * only proves the *ciphertext* arrived intact, not that this app's own
    * AES-CTR decrypt and save actually reproduced the original bytes.
    */
-  private async save (client: P2FClient, torrent: WTTorrent, path: string, durationMs: number, plainSha256: string | undefined): Promise<void> {
+  private async save (
+    client: P2FClient, torrent: WTTorrent, path: string, durationMs: number, plainSha256: string | undefined,
+    savePath: string | undefined
+  ): Promise<void> {
     this.set(path, { status: 'saving' })
     try {
       const file = torrent.files[0]
@@ -491,31 +520,7 @@ export class TorrentDownloadManager {
       // read as "can't verify", not as a mismatch against `undefined`.
       if (!plainSha256) console.warn('[p2f] server did not provide a plaintext checksum for this file — is it running the latest version?')
 
-      const askBeforeSave = await settings.getAskBeforeSave()
-      let savedTo: string | undefined
-      let checksumStatus: ChecksumStatus = 'unavailable'
-      let pickerFailed = false
-
-      if (askBeforeSave && window.showSaveFilePicker) {
-        try {
-          const handle = await window.showSaveFilePicker({ suggestedName: file.name })
-          const writable = await handle.createWritable()
-          // Only after the picker produced a writable: a dismissed dialog
-          // throws above, and the fallback below still needs the pieces.
-          OpfsChunkStore.startDrainingFor(torrent.infoHash)
-          await file.stream().pipeTo(writable)
-          checksumStatus = plainSha256 ? await verifyBrowserFile(handle, plainSha256) : 'unavailable'
-        } catch (err) {
-          if (!isUserGestureError(err)) throw err
-          pickerFailed = true
-        }
-      }
-
-      if (!askBeforeSave || pickerFailed) {
-        const result = await this.saveAutomatically(torrent, file, plainSha256)
-        savedTo = result.savedTo
-        checksumStatus = result.checksumStatus
-      }
+      const { savedTo, checksumStatus } = await this.saveToDisk(torrent, file, plainSha256, savePath)
 
       this.set(path, { status: 'done', progress: 1, downloaded: file.length, length: file.length, savedTo, checksumStatus })
       // Genuinely finished — nothing left to resume on a future launch. An
@@ -528,22 +533,24 @@ export class TorrentDownloadManager {
     }
   }
 
-  /** Streams into the configured default download folder — see the
-   * `will-download` session hook in electron/main.cts, which is what
-   * actually redirects the resulting native "download" there. Registers for
-   * that hook's completion signal *before* triggering the download, both to
-   * learn the real final save path (Electron may rename on a collision, so
-   * this can differ from the `dir + file.name` guess) and to know when it's
-   * safe to hash the result. */
-  private async saveAutomatically (torrent: WTTorrent, file: WTFile, plainSha256: string | undefined): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
-    const dir = await currentDownloadDir()
-    const guessedPath = dir ? joinNativePath(dir, file.name) : undefined
-    const ticketId = await registerPendingDownload()
+  /** Streams into `savePath`, or the configured default download folder —
+   * see the `will-download` session hook in electron/main.cts, which is
+   * what actually redirects the resulting native "download" there.
+   * Registers for that hook's completion signal *before* triggering the
+   * download, both to learn the real final save path (Electron may rename on
+   * a collision, so this can differ from the `dir + file.name` guess) and to
+   * know when it's safe to hash the result. */
+  private async saveToDisk (
+    torrent: WTTorrent, file: WTFile, plainSha256: string | undefined, savePath: string | undefined
+  ): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
+    const dir = savePath ? undefined : await currentDownloadDir()
+    const guessedPath = savePath ?? (dir ? joinNativePath(dir, file.name) : undefined)
+    const ticketId = await registerPendingDownload(savePath)
 
     // Free each stored ciphertext piece as the read below moves past it, so
-    // the OPFS store shrinks while the saved file grows instead of both
+    // the piece cache shrinks while the saved file grows instead of both
     // sitting on disk at full size at the same time.
-    OpfsChunkStore.startDrainingFor(torrent.infoHash)
+    FsChunkStore.startDrainingFor(torrent.infoHash)
 
     if (this.streamServer) {
       // No `download` attribute: the service worker's response already
@@ -581,22 +588,3 @@ export class TorrentDownloadManager {
   }
 }
 
-/** SHA-256 of a File System Access API handle's on-disk contents, computed
- * in the renderer (no main-process round trip needed — the handle already
- * gives direct read access to what was just written). Loads the whole file
- * into memory for the digest, same trade-off the Blob-fallback save tier
- * already accepts. */
-async function verifyBrowserFile (handle: { getFile: () => Promise<File> }, expectedSha256: string): Promise<ChecksumStatus> {
-  try {
-    const savedFile = await handle.getFile()
-    const buf = await savedFile.arrayBuffer()
-    const digest = await crypto.subtle.digest('SHA-256', buf)
-    const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
-    if (hex !== expectedSha256) {
-      console.warn('[p2f] checksum mismatch', { expected: expectedSha256, actual: hex, bytes: buf.byteLength })
-    }
-    return hex === expectedSha256 ? 'ok' : 'mismatch'
-  } catch {
-    return 'unavailable'
-  }
-}

@@ -32,8 +32,11 @@ real P2P transfer, same as the web app:
   (`showSaveFilePicker`), exactly like the browser app's own origin does.
 - The main process's `session.on('will-download', …)` hook
   (`electron/main.cts`) redirects a finished download into your configured
-  default download folder instead of Electron's own default Downloads dir
-  or a native Save As prompt.
+  default download folder, or to the exact path picked in the native Save
+  dialog ("Save as…" / "Always ask where to save").
+- Parts of in-progress downloads are written by the main process
+  (`electron/pieceCache.cts`) into the download cache folder, under
+  `p2f-parts/<infoHash>/`, via the renderer's `src/lib/fsChunkStore.ts`.
 
 ## Authentication
 
@@ -62,6 +65,13 @@ The Settings screen covers:
 - **Server URL** — re-enter/change it without losing your other settings.
 - **Default download folder** — a real, user-chosen folder, redirected into
   via the `will-download` hook described above.
+- **Saving downloads** — save automatically, or always ask where to save
+  (native Save dialog shown when the download starts). Any single file can
+  also be downloaded with **Save as…** from the file browser.
+- **Download cache folder** — where in-progress download parts are kept
+  (defaults to `download-cache` in the app's data folder). Each download
+  keeps using the folder it started in, so changing this mid-download is
+  safe.
 - **Theme** — System / Light / Dark, backed by the same color tokens in
   `packages/shared/src/theme.ts`.
 

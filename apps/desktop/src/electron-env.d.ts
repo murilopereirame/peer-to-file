@@ -52,7 +52,15 @@ export interface P2FBridge {
   pickDownloadFolder: () => Promise<string | null>
   setDownloadDir: (path: string | null) => Promise<void>
   hashFile: (path: string) => Promise<string | null>
-  registerPendingDownload: () => Promise<number>
+  registerPendingDownload: (savePath?: string) => Promise<number>
+  askSavePath: (suggestedName: string) => Promise<string | null>
+  defaultCacheDir: () => Promise<string>
+  pickCacheFolder: () => Promise<string | null>
+  cachePut: (dir: string, key: string, index: number, buf: Uint8Array) => Promise<void>
+  cacheGet: (dir: string, key: string, index: number, offset: number, length: number | undefined, expectedLength: number) => Promise<Uint8Array>
+  cacheRemovePieces: (dir: string, key: string, fromIndex: number, toIndex: number) => Promise<void>
+  cacheRemoveKey: (dir: string, key: string) => Promise<void>
+  cacheListKeys: (dir: string) => Promise<string[]>
   awaitDownloadCompletion: (ticketId: number) => Promise<DownloadCompletedInfo>
   getSetting: <T>(key: string) => Promise<T | undefined>
   setSetting: (key: string, value: unknown) => Promise<void>
