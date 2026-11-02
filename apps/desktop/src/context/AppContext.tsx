@@ -33,7 +33,20 @@ export interface AppContextValue {
   completeLogin: (username: string, password: string, remember: boolean) => Promise<void>
   logout: () => Promise<void>
   retry: () => Promise<void>
-  handleUnauthorized: () => Promise<void>
+  /** Tries to mint a fresh session from the saved login. Resolves true if
+   * that worked; false if the server is unreachable right now (the saved
+   * login is kept) or the login was rejected (goes to the login screen). */
+  handleUnauthorized: () => Promise<boolean>
+}
+
+/** Result of a silent re-login from the saved refresh token. 'offline' means
+ * the server couldn't be reached (network drop, 5xx, rate limit) — not that
+ * the saved login is bad, so it must be kept. */
+type RefreshResult = { user: string } | 'rejected' | 'offline'
+
+function isTransientError (err: unknown): boolean {
+  if (!(err instanceof ApiError)) return true // not even an HTTP response
+  return err.status === 0 || err.status === 429 || err.status >= 500
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -90,17 +103,36 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
 
   // F9: silently mint a fresh session from a persisted refresh token. Returns
   // the username on success, or null if there's nothing stored / it's expired.
-  const tryStoredRefresh = useCallback(async (c: P2FClient): Promise<string | null> => {
-    const creds = await loadCredentials(c.baseUrl)
-    if (!creds) return null
+  //
+  // Only a refusal from the server clears the saved login. A network blip
+  // used to clear it too, which bounced the user to the login screen and —
+  // since that unmounts the main shell — disrupted downloads in flight.
+  //
+  // Single-flight: every refresh rotates the token, so two overlapping ones
+  // (the connection poll and a download retrying at the same moment) would
+  // have the second presenting an already-rotated token and get refused.
+  const refreshInFlight = useRef<Promise<RefreshResult> | null>(null)
+  const tryStoredRefresh = useCallback(async (c: P2FClient): Promise<RefreshResult> => {
+    if (refreshInFlight.current) return await refreshInFlight.current
+    const run = (async (): Promise<RefreshResult> => {
+      const creds = await loadCredentials(c.baseUrl)
+      if (!creds) return 'rejected'
+      try {
+        await restoreRefreshToken(c.baseUrl, creds.refreshToken)
+        await c.refresh() // rotates: the jar now holds a new refresh token
+        await persistRefreshToken(c, creds.username)
+        return { user: creds.username }
+      } catch (err) {
+        if (isTransientError(err)) return 'offline'
+        await clearCredentials(c.baseUrl)
+        return 'rejected'
+      }
+    })()
+    refreshInFlight.current = run
     try {
-      await restoreRefreshToken(c.baseUrl, creds.refreshToken)
-      await c.refresh() // rotates: the jar now holds a new refresh token
-      await persistRefreshToken(c, creds.username)
-      return creds.username
-    } catch {
-      await clearCredentials(c.baseUrl)
-      return null
+      return await run
+    } finally {
+      refreshInFlight.current = null
     }
   }, [persistRefreshToken])
 
@@ -130,8 +162,9 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
       setConnected(true)
       if (info.auth.needsSetup) { setPhase('setup'); return }
       if (!info.auth.authenticated) {
-        const user = await tryStoredRefresh(c)
-        if (user) { setUsername(user); setPhase('main'); void refreshMounts(c); return }
+        const result = await tryStoredRefresh(c)
+        if (typeof result === 'object') { setUsername(result.user); setPhase('main'); void refreshMounts(c); return }
+        if (result === 'offline') { setConnected(false); setPhase('main'); return }
         setPhase('login')
         return
       }
@@ -228,11 +261,13 @@ export function AppProvider ({ children }: { children: React.ReactNode }): React
     if (client) await evaluateAuth(client)
   }, [client, evaluateAuth])
 
-  const handleUnauthorized = useCallback(async (): Promise<void> => {
-    if (!client) return
-    const user = await tryStoredRefresh(client)
-    if (user) { setUsername(user); return }
+  const handleUnauthorized = useCallback(async (): Promise<boolean> => {
+    if (!client) return false
+    const result = await tryStoredRefresh(client)
+    if (typeof result === 'object') { setUsername(result.user); setConnected(true); return true }
+    if (result === 'offline') { setConnected(false); return false }
     setPhase('login')
+    return false
   }, [client, tryStoredRefresh])
 
   const setDownloadDir = useCallback(async (dir: string | null): Promise<void> => {

@@ -1,5 +1,5 @@
 import {
-  establishKeyWrap, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
+  ApiError, establishKeyWrap, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
   opfsAvailable, transferKeys, unwrapKeyMaterial, type P2FClient
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
@@ -101,6 +101,26 @@ function joinNativePath (dir: string, name: string): string {
   return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`
 }
 
+// Retrying the "preparing" requests. For a huge file the server reads and
+// fingerprints the whole thing before answering /api/torrent, which can take
+// many minutes — long enough that a flaky connection (or an expiring
+// session) is likely to interrupt it. The server keeps working on it
+// regardless and caches the result, so retrying simply picks it back up.
+const RETRY_BASE_MS = 2_000
+const RETRY_MAX_MS = 30_000
+const MAX_CONSECUTIVE_AUTH_RETRIES = 3
+
+/** Thrown out of start() when the user cancelled the download while it was
+ * still preparing — not an error to show. */
+class DownloadAborted extends Error {}
+
+function isTransientError (err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false
+  return err.status === 0 || err.status === 408 || err.status === 429 || err.status >= 500
+}
+
+const sleep = async (ms: number): Promise<void> => { await new Promise(resolve => setTimeout(resolve, ms)) }
+
 /**
  * Real P2P transfers, same engine and transport as the browser web client
  * (WebTorrent over WebRTC, HTTP webseed fallback) — this is what
@@ -137,6 +157,49 @@ export class TorrentDownloadManager {
   // available — guards against a double-run re-queuing every saved download
   // twice if that effect ever re-fires.
   private initialized = false
+  // Per-path token for the current start() attempt — cancel() drops it, so a
+  // start() still preparing (possibly retrying for minutes) notices and stops
+  // instead of adding a torrent nobody wants any more.
+  private readonly attempts = new Map<string, symbol>()
+  private reauth: (() => Promise<boolean>) | null = null
+
+  /** How to refresh an expired session (see DownloadsContext). Resolves true
+   * if the session was refreshed. */
+  setReauth (fn: () => Promise<boolean>): void {
+    this.reauth = fn
+  }
+
+  /** Runs a request needed to prepare a download, retrying through
+   * connection drops / server hiccups (with backoff, for as long as it
+   * takes — the user can cancel) and expired sessions. Anything else (e.g.
+   * the file no longer exists) fails immediately. */
+  private async withRetry<T> (path: string, attempt: symbol, what: string, fn: () => Promise<T>): Promise<T> {
+    let delay = RETRY_BASE_MS
+    let authRetries = 0
+    for (;;) {
+      if (this.attempts.get(path) !== attempt) throw new DownloadAborted()
+      try {
+        const result = await fn()
+        if (this.attempts.get(path) !== attempt) throw new DownloadAborted()
+        if (this.snapshots.get(path)?.message) this.set(path, { message: undefined })
+        return result
+      } catch (err) {
+        if (err instanceof DownloadAborted) throw err
+        if (err instanceof ApiError && err.status === 401 && this.reauth && authRetries < MAX_CONSECUTIVE_AUTH_RETRIES) {
+          authRetries++
+          if (await this.reauth()) continue
+          // Couldn't refresh right now — most likely the server is
+          // unreachable too, so wait and try again like any other drop.
+        } else if (!isTransientError(err)) {
+          throw err
+        }
+        if (this.attempts.get(path) !== attempt) throw new DownloadAborted()
+        this.set(path, { message: `Connection to the server lost while ${what} — retrying in ${Math.round(delay / 1000)}s…` })
+        await sleep(delay)
+        delay = Math.min(delay * 2, RETRY_MAX_MS)
+      }
+    }
+  }
 
   /** `client` is only needed here to re-request torrent metadata for
    * whatever was still in flight when the app last quit — see the restore
@@ -274,16 +337,20 @@ export class TorrentDownloadManager {
     if (!this.client) return
     const { startPaused = false, savePath } = opts
     if (this.isActive(path)) return
+    const attempt = Symbol(path)
+    this.attempts.set(path, attempt)
     this.set(path, { ...blank(path, name), savePath })
     try {
       const cacheDir = opts.cacheDir ?? await settings.getCacheDir()
       // ECDH key wrap (fresh ephemeral keypair per download) so the
       // transfer key below never crosses the wire in the clear — see
       // src/server/keyExchange.ts and packages/shared/src/browserCrypto.ts.
-      const serverPublicKey = await getServerEcdhPublicKey(async () => client.info())
+      const serverPublicKey = await this.withRetry(path, attempt, 'connecting',
+        async () => await getServerEcdhPublicKey(async () => await client.info()))
       const keyWrap = await establishKeyWrap(serverPublicKey)
 
-      const meta = await client.torrentMeta(path, keyWrap.clientPublicKeyBase64, mountId)
+      const meta = await this.withRetry(path, attempt, 'preparing the file',
+        async () => await client.torrentMeta(path, keyWrap.clientPublicKeyBase64, mountId))
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length, infoHash: meta.infoHash })
       // Recorded now (rather than only once fully done) so a quit mid-transfer
@@ -328,6 +395,9 @@ export class TorrentDownloadManager {
         this.track(client, torrent, meta.webseed, path, meta.plainSha256, startPaused, savePath)
       })
     } catch (err) {
+      // Cancelled while preparing: the entry is already gone, and set()
+      // would bring it back as an error.
+      if (err instanceof DownloadAborted || this.attempts.get(path) !== attempt) return
       this.set(path, { status: 'error', message: errMessage(err) })
     }
   }
@@ -473,6 +543,7 @@ export class TorrentDownloadManager {
   }
 
   cancel (path: string): void {
+    this.attempts.delete(path)
     const t = this.tracked.get(path)
     if (t) {
       transferKeys.delete(t.torrent.infoHash)
