@@ -6,6 +6,15 @@ export interface DownloadCompletedInfo {
   filename: string
   path: string
   state: 'completed' | 'cancelled' | 'interrupted'
+  size: number | null
+}
+
+export interface DownloadTicketStatus {
+  started: boolean
+  finished: boolean
+  received: number
+  msSinceRegistered: number
+  msSinceProgress: number
 }
 
 // The only bridge between the sandboxed renderer and the main process — see
@@ -62,6 +71,9 @@ const api = {
   cacheListKeys: (dir: string): Promise<string[]> => ipcRenderer.invoke('cache:listKeys', dir),
   awaitDownloadCompletion: (ticketId: number): Promise<DownloadCompletedInfo> =>
     ipcRenderer.invoke('downloads:awaitCompletion', ticketId),
+  downloadTicketStatus: (ticketId: number): Promise<DownloadTicketStatus | null> =>
+    ipcRenderer.invoke('downloads:ticketStatus', ticketId),
+  abandonDownload: (ticketId: number): Promise<void> => ipcRenderer.invoke('downloads:abandon', ticketId),
 
   getSetting: <T, >(key: string): Promise<T | undefined> => ipcRenderer.invoke('settings:get', key),
   setSetting: (key: string, value: unknown): Promise<void> => ipcRenderer.invoke('settings:set', key, value),

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, protocol } from 'electron'
 import { createHash } from 'node:crypto'
-import { createReadStream, existsSync } from 'node:fs'
+import { createReadStream, existsSync, statSync } from 'node:fs'
 import { extname, isAbsolute, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { pathToFileURL } from 'node:url'
@@ -38,6 +38,10 @@ interface DownloadCompletedInfo {
   filename: string
   path: string
   state: 'completed' | 'cancelled' | 'interrupted'
+  /** Size of the file on disk once done (null if it couldn't be read) — lets
+   * the renderer catch a save that ended early but was still reported as
+   * "completed". */
+  size: number | null
 }
 
 /**
@@ -59,6 +63,14 @@ interface DownloadTicket {
   savePath?: string
   info?: DownloadCompletedInfo
   resolve?: (info: DownloadCompletedInfo) => void
+  // Progress, for the renderer's stall watchdog (see downloads:ticketStatus).
+  // There's deliberately no fixed time limit on a save: a 40 GB file can
+  // take far longer than any reasonable fixed limit, and giving up early
+  // tore the torrent down mid-save (later retries then hit a 404).
+  registeredAt: number
+  item?: Electron.DownloadItem
+  received: number
+  lastProgressAt: number
 }
 const downloadTickets = new Map<number, DownloadTicket>()
 
@@ -120,6 +132,14 @@ async function createWindow (): Promise<void> {
     const ticketId = pendingDownloadQueue.shift()
     const ticket = ticketId === undefined ? undefined : downloadTickets.get(ticketId)
     const dir = downloadDir.current
+    if (ticket) {
+      ticket.item = item
+      ticket.lastProgressAt = Date.now()
+      item.on('updated', () => {
+        const received = item.getReceivedBytes()
+        if (received !== ticket.received) { ticket.received = received; ticket.lastProgressAt = Date.now() }
+      })
+    }
     if (ticket?.savePath) {
       // Already confirmed by the user in the native Save dialog (which asks
       // about overwriting), so use it exactly as chosen.
@@ -129,7 +149,10 @@ async function createWindow (): Promise<void> {
     }
     item.once('done', (_evt, state) => {
       if (ticketId === undefined || !ticket) return
-      const info: DownloadCompletedInfo = { filename: item.getFilename(), path: item.getSavePath(), state }
+      ticket.item = undefined
+      let size: number | null = null
+      try { size = statSync(item.getSavePath()).size } catch { /* missing */ }
+      const info: DownloadCompletedInfo = { filename: item.getFilename(), path: item.getSavePath(), state, size }
       if (ticket.resolve) { ticket.resolve(info); downloadTickets.delete(ticketId) } else { ticket.info = info }
     })
   })
@@ -254,9 +277,33 @@ ipcMain.handle('power:setKeepAwake', (_e, enabled: boolean) => {
 // this ticket is queued before its `will-download` can possibly fire.
 ipcMain.handle('downloads:registerPending', (_e, savePath?: string | null) => {
   const id = nextDownloadTicket++
-  downloadTickets.set(id, typeof savePath === 'string' && isAbsolute(savePath) ? { savePath } : {})
+  downloadTickets.set(id, {
+    ...(typeof savePath === 'string' && isAbsolute(savePath) ? { savePath } : {}),
+    registeredAt: Date.now(), received: 0, lastProgressAt: Date.now()
+  })
   pendingDownloadQueue.push(id)
   return id
+})
+ipcMain.handle('downloads:ticketStatus', (_e, ticketId: number) => {
+  const ticket = downloadTickets.get(ticketId)
+  if (!ticket) return null
+  return {
+    started: ticket.item !== undefined || ticket.info !== undefined,
+    finished: ticket.info !== undefined,
+    received: ticket.received,
+    msSinceRegistered: Date.now() - ticket.registeredAt,
+    msSinceProgress: Date.now() - ticket.lastProgressAt
+  }
+})
+// Gives up on a stalled save: cancels the native download (so no partial
+// file is left behind) and drops the ticket.
+ipcMain.handle('downloads:abandon', (_e, ticketId: number) => {
+  const ticket = downloadTickets.get(ticketId)
+  if (!ticket) return
+  const queued = pendingDownloadQueue.indexOf(ticketId)
+  if (queued !== -1) pendingDownloadQueue.splice(queued, 1)
+  ticket.item?.cancel()
+  downloadTickets.delete(ticketId)
 })
 ipcMain.handle('downloads:awaitCompletion', async (_e, ticketId: number) => {
   const ticket = downloadTickets.get(ticketId)

@@ -36,6 +36,15 @@ export interface DownloadCompletedInfo {
   filename: string
   path: string
   state: 'completed' | 'cancelled' | 'interrupted'
+  size: number | null
+}
+
+export interface DownloadTicketStatus {
+  started: boolean
+  finished: boolean
+  received: number
+  msSinceRegistered: number
+  msSinceProgress: number
 }
 
 export interface P2FBridge {
@@ -62,6 +71,8 @@ export interface P2FBridge {
   cacheRemoveKey: (dir: string, key: string) => Promise<void>
   cacheListKeys: (dir: string) => Promise<string[]>
   awaitDownloadCompletion: (ticketId: number) => Promise<DownloadCompletedInfo>
+  downloadTicketStatus: (ticketId: number) => Promise<DownloadTicketStatus | null>
+  abandonDownload: (ticketId: number) => Promise<void>
   getSetting: <T>(key: string) => Promise<T | undefined>
   setSetting: (key: string, value: unknown) => Promise<void>
   deleteSetting: (key: string) => Promise<void>

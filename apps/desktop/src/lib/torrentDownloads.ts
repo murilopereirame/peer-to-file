@@ -5,7 +5,7 @@ import {
 import { loadWebTorrent } from './loadWebTorrent'
 import { FsChunkStore } from './fsChunkStore'
 import {
-  askSavePath, awaitDownloadCompletion, currentDownloadDir, hashFile, loadSavedDownloads, registerPendingDownload,
+  askSavePath, awaitDownloadCompletion, hashFile, loadSavedDownloads, registerPendingDownload,
   saveSavedDownloads, settings, type SavedDownload
 } from './electronApi'
 
@@ -96,10 +96,7 @@ function clickDownloadLink (href: string, filename?: string): void {
   a.remove()
 }
 
-function joinNativePath (dir: string, name: string): string {
-  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
-  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`
-}
+const MAX_IN_MEMORY_SAVE_BYTES = 2 * 1024 ** 3
 
 /**
  * Real P2P transfers, same engine and transport as the browser web client
@@ -538,27 +535,29 @@ export class TorrentDownloadManager {
    * what actually redirects the resulting native "download" there.
    * Registers for that hook's completion signal *before* triggering the
    * download, both to learn the real final save path (Electron may rename on
-   * a collision, so this can differ from the `dir + file.name` guess) and to
-   * know when it's safe to hash the result. */
+   * a collision) and to know when it's safe to hash the result. */
   private async saveToDisk (
     torrent: WTTorrent, file: WTFile, plainSha256: string | undefined, savePath: string | undefined
   ): Promise<{ savedTo?: string, checksumStatus: ChecksumStatus }> {
-    const dir = savePath ? undefined : await currentDownloadDir()
-    const guessedPath = savePath ?? (dir ? joinNativePath(dir, file.name) : undefined)
-    const ticketId = await registerPendingDownload(savePath)
-
     // Free each stored ciphertext piece as the read below moves past it, so
     // the piece cache shrinks while the saved file grows instead of both
     // sitting on disk at full size at the same time.
     FsChunkStore.startDrainingFor(torrent.infoHash)
 
+    let ticketId: number
     if (this.streamServer) {
       // No `download` attribute: the service worker's response already
       // sets Content-Disposition: attachment, and setting the HTML
       // attribute too makes Chromium cancel the download outright — two
       // competing "force download" signals on the same navigation.
+      ticketId = await registerPendingDownload(savePath)
       clickDownloadLink(file.streamURL)
     } else {
+      // Without the service worker the whole file has to be held in memory
+      // first — fine for small files, impossible for very large ones.
+      if (file.length > MAX_IN_MEMORY_SAVE_BYTES) {
+        throw new Error('streamed saving is unavailable (service worker failed to start), and this file is too large to save from memory — restart the app and try again')
+      }
       const chunks: Uint8Array[] = []
       const reader = file.stream().getReader()
       for (;;) {
@@ -567,24 +566,24 @@ export class TorrentDownloadManager {
         if (value) chunks.push(value)
       }
       const url = URL.createObjectURL(new Blob(chunks as BlobPart[], { type: file.type }))
+      // Registered only now, right before the click: the watchdog in
+      // awaitDownloadCompletion times how long the save takes to *start*.
+      ticketId = await registerPendingDownload(savePath)
       clickDownloadLink(url, file.name)
       setTimeout(() => URL.revokeObjectURL(url), 60_000)
     }
 
-    try {
-      const finalPath = await awaitDownloadCompletion(ticketId)
-      if (!plainSha256) return { savedTo: finalPath, checksumStatus: 'unavailable' }
-      const actualSha256 = await hashFile(finalPath)
-      if (actualSha256 !== null && actualSha256 !== plainSha256) {
-        console.warn('[p2f] checksum mismatch', { path: finalPath, expected: plainSha256, actual: actualSha256 })
-      }
-      return { savedTo: finalPath, checksumStatus: actualSha256 === null ? 'unavailable' : actualSha256 === plainSha256 ? 'ok' : 'mismatch' }
-    } catch {
-      // No completion signal within the timeout — still likely saved fine
-      // (this only means we couldn't confirm it), so keep the best-guess
-      // path rather than losing "where did this go" entirely.
-      return { savedTo: guessedPath, checksumStatus: 'unavailable' }
+    // Deliberately no catch here: if the save fails or stalls, that has to
+    // surface as an error — the torrent is only torn down after this
+    // returns, so reporting "done" early would yank the data out from under
+    // a save that's still running.
+    const finalPath = await awaitDownloadCompletion(ticketId, file.length)
+    if (!plainSha256) return { savedTo: finalPath, checksumStatus: 'unavailable' }
+    const actualSha256 = await hashFile(finalPath)
+    if (actualSha256 !== null && actualSha256 !== plainSha256) {
+      console.warn('[p2f] checksum mismatch', { path: finalPath, expected: plainSha256, actual: actualSha256 })
     }
+    return { savedTo: finalPath, checksumStatus: actualSha256 === null ? 'unavailable' : actualSha256 === plainSha256 ? 'ok' : 'mismatch' }
   }
 }
 

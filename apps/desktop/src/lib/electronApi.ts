@@ -43,14 +43,6 @@ export async function defaultDownloadsDir (): Promise<string | null> {
   return await window.p2f.defaultDownloadsDir()
 }
 
-/** Like `settings.getDownloadDir()` but without the main-process resync — for
- * callers (e.g. torrentDownloads.ts) that just want to display the current
- * value, not change what `will-download` redirects into. */
-export async function currentDownloadDir (): Promise<string | null> {
-  const stored = await window.p2f.getSetting<string>('downloadDir')
-  return stored ?? (await defaultDownloadsDir())
-}
-
 export async function pickDownloadFolder (): Promise<string | null> {
   return await window.p2f.pickDownloadFolder()
 }
@@ -110,15 +102,45 @@ export async function pickCacheFolder (): Promise<string | null> {
   return await window.p2f.pickCacheFolder()
 }
 
+// No fixed overall time limit: a very large file (tens of GB) can take far
+// longer to decrypt and write than any fixed limit — the old 10-minute one
+// gave up mid-save and tore the torrent down while Electron was still
+// writing it, so the rest of the file then failed with a 404. Instead this
+// only gives up when the save never starts, or stops making progress.
+const SAVE_START_TIMEOUT_MS = 2 * 60_000
+const SAVE_STALL_TIMEOUT_MS = 5 * 60_000
+const SAVE_WATCHDOG_INTERVAL_MS = 15_000
+
 /** Resolves with the finished download's actual save path once Electron's
- * download manager reports it done. */
-export async function awaitDownloadCompletion (ticketId: number, timeoutMs = 10 * 60_000): Promise<string> {
-  const timeout = new Promise<never>((_resolve, reject) => {
-    setTimeout(() => reject(new Error('timed out waiting for the download to finish')), timeoutMs)
+ * download manager reports it done, and the file on disk is the expected
+ * size. Rejects (and cancels the native download) if it never starts or
+ * stalls. */
+export async function awaitDownloadCompletion (ticketId: number, expectedSize: number): Promise<string> {
+  let watchdog: ReturnType<typeof setInterval> | undefined
+  const stalled = new Promise<never>((_resolve, reject) => {
+    watchdog = setInterval(() => {
+      void window.p2f.downloadTicketStatus(ticketId).then(status => {
+        if (!status || status.finished) return
+        const reason = !status.started
+          ? (status.msSinceRegistered > SAVE_START_TIMEOUT_MS ? 'the save never started' : null)
+          : (status.msSinceProgress > SAVE_STALL_TIMEOUT_MS ? `the save stalled after ${status.received} bytes` : null)
+        if (reason) {
+          void window.p2f.abandonDownload(ticketId)
+          reject(new Error(reason))
+        }
+      }, () => {})
+    }, SAVE_WATCHDOG_INTERVAL_MS)
   })
-  const info = await Promise.race([window.p2f.awaitDownloadCompletion(ticketId), timeout])
-  if (info.state !== 'completed') throw new Error(`download ${info.state}`)
-  return info.path
+  try {
+    const info = await Promise.race([window.p2f.awaitDownloadCompletion(ticketId), stalled])
+    if (info.state !== 'completed') throw new Error(`download ${info.state}`)
+    if (info.size !== null && info.size !== expectedSize) {
+      throw new Error(`saved file is incomplete (${info.size} of ${expectedSize} bytes)`)
+    }
+    return info.path
+  } finally {
+    clearInterval(watchdog)
+  }
 }
 
 // --- Plain settings (server URL, download folder, theme) -------------------
