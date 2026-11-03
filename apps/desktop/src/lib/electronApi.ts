@@ -1,6 +1,6 @@
-import type { StoredCredentials } from '../electron-env'
+import type { DownloadCompletedInfo, RepairPhase, RepairRequest, RepairResult, StoredCredentials } from '../electron-env'
 
-export type { StoredCredentials }
+export type { RepairPhase, StoredCredentials }
 
 // --- OS keychain (via `safeStorage` + IPC, see electron/credentials.cts) ---
 // This is the one thing that's genuinely a *secret* — everything else
@@ -110,15 +110,27 @@ export async function pickCacheFolder (): Promise<string | null> {
   return await window.p2f.pickCacheFolder()
 }
 
-/** Resolves with the finished download's actual save path once Electron's
- * download manager reports it done. */
-export async function awaitDownloadCompletion (ticketId: number, timeoutMs = 10 * 60_000): Promise<string> {
+/** Resolves with where Electron's download manager put the finished
+ * download, and whether it says the write completed. */
+export async function awaitDownloadCompletion (ticketId: number, timeoutMs = 10 * 60_000): Promise<DownloadCompletedInfo> {
   const timeout = new Promise<never>((_resolve, reject) => {
     setTimeout(() => reject(new Error('timed out waiting for the download to finish')), timeoutMs)
   })
-  const info = await Promise.race([window.p2f.awaitDownloadCompletion(ticketId), timeout])
-  if (info.state !== 'completed') throw new Error(`download ${info.state}`)
-  return info.path
+  return await Promise.race([window.p2f.awaitDownloadCompletion(ticketId), timeout])
+}
+
+// --- Piece-level repair ------------------------------------------------------
+// See electron/pieceRepair.cts: checks every piece of a saved file and
+// re-fetches only the ones that are missing or damaged.
+
+export async function repairSavedDownload (
+  repairId: string, req: RepairRequest, onProgress: (phase: RepairPhase, done: number, total: number) => void
+): Promise<RepairResult> {
+  return await window.p2f.repairDownload(repairId, req, onProgress)
+}
+
+export async function cancelRepair (repairId: string): Promise<void> {
+  await window.p2f.cancelRepair(repairId)
 }
 
 // --- Plain settings (server URL, download folder, theme) -------------------

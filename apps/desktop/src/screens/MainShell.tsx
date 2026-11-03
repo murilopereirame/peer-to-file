@@ -33,7 +33,7 @@ function Sidebar ({ active, onChange }: { active: Tab, onChange: (t: Tab) => voi
   const { uploads } = useUploads()
   const app = useApp()
   const busyCount =
-    downloads.filter(d => d.status === 'downloading' || d.status === 'paused' || d.status === 'preparing').length +
+    downloads.filter(d => d.status === 'downloading' || d.status === 'paused' || d.status === 'preparing' || d.status === 'repairing').length +
     uploads.filter(u => u.status === 'running').length
 
   return (
@@ -129,7 +129,7 @@ function useKeepAwake (): void {
 
   useEffect(() => {
     if (!keepAwakeDuringTransfers) { void setSystemKeepAwake(false); return }
-    const active = downloads.some(d => d.status === 'preparing' || d.status === 'downloading' || d.status === 'saving') ||
+    const active = downloads.some(d => d.status === 'preparing' || d.status === 'downloading' || d.status === 'saving' || d.status === 'repairing') ||
       uploads.some(u => u.status === 'running')
     void setSystemKeepAwake(active)
   }, [keepAwakeDuringTransfers, downloads, uploads])

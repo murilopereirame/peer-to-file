@@ -38,6 +38,21 @@ export interface DownloadCompletedInfo {
   state: 'completed' | 'cancelled' | 'interrupted'
 }
 
+export type RepairPhase = 'verifying' | 'downloading'
+
+export interface RepairRequest {
+  filePath: string
+  torrent: Uint8Array
+  key: Uint8Array
+  iv: Uint8Array
+  webseed: string
+}
+
+export interface RepairResult {
+  pieces: number
+  damaged: number[]
+}
+
 export interface P2FBridge {
   fetch: (req: FetchRequest) => Promise<FetchResult>
   /** Subscribe to upload progress for a request sent with a matching
@@ -62,6 +77,10 @@ export interface P2FBridge {
   cacheRemoveKey: (dir: string, key: string) => Promise<void>
   cacheListKeys: (dir: string) => Promise<string[]>
   awaitDownloadCompletion: (ticketId: number) => Promise<DownloadCompletedInfo>
+  repairDownload: (
+    repairId: string, req: RepairRequest, onProgress: (phase: RepairPhase, done: number, total: number) => void
+  ) => Promise<RepairResult>
+  cancelRepair: (repairId: string) => Promise<void>
   getSetting: <T>(key: string) => Promise<T | undefined>
   setSetting: (key: string, value: unknown) => Promise<void>
   deleteSetting: (key: string) => Promise<void>

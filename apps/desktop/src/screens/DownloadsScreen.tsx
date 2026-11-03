@@ -15,6 +15,7 @@ function statusLabel (status: string): string {
     case 'downloading': return 'Downloading'
     case 'paused': return 'Paused'
     case 'saving': return 'Saving…'
+    case 'repairing': return 'Repairing…'
     case 'done': return 'Done'
     case 'error': return 'Failed'
     default: return status
@@ -24,7 +25,8 @@ function statusLabel (status: string): string {
 function statusTone (status: string): string {
   switch (status) {
     case 'downloading':
-    case 'saving': return 'accent'
+    case 'saving':
+    case 'repairing': return 'accent'
     case 'paused': return 'warning'
     case 'done': return 'positive'
     case 'error': return 'negative'
@@ -54,10 +56,17 @@ function uploadEta (entry: UploadEntry): string | null {
 function checksumLabel (status: DownloadSnapshot['checksumStatus']): string {
   switch (status) {
     case 'ok': return '✓ verified against the server'
-    case 'mismatch': return '⚠ mismatch — the saved file may be corrupt, try again'
+    case 'mismatch': return '⚠ mismatch — the saved file is damaged or incomplete, use Repair to fix it'
     case 'verifying': return 'verifying…'
     default: return 'not verified'
   }
+}
+
+function repairLabel (entry: DownloadSnapshot): string {
+  const r = entry.repair
+  if (!r || r.total === 0) return 'checking the saved file…'
+  if (r.phase === 'verifying') return `checking pieces ${r.done}/${r.total}`
+  return `re-downloading damaged pieces ${r.done}/${r.total}`
 }
 
 function DownloadDetails ({ entry }: { entry: DownloadSnapshot }): React.JSX.Element {
@@ -260,6 +269,14 @@ export function DownloadsScreen ({ history, downSpeed, upSpeed }: {
                 {d.status === 'done' && d.checksumStatus === 'ok' && (
                   <span className="stat" style={{ color: 'var(--positive)' }}><CheckIcon size={13} />verified</span>
                 )}
+                {d.status === 'repairing' && (
+                  <span className="stat"><GaugeIcon size={13} />{repairLabel(d)}</span>
+                )}
+                {d.status === 'done' && d.checksumStatus === 'ok' && (d.repairedPieces ?? 0) > 0 && (
+                  <span className="stat">
+                    repaired {d.repairedPieces} piece{d.repairedPieces === 1 ? '' : 's'}
+                  </span>
+                )}
                 {d.status === 'done' && d.checksumStatus === 'mismatch' && (
                   <span className="stat" style={{ color: 'var(--negative)' }}>
                     <AlertIcon size={13} />checksum mismatch
@@ -279,6 +296,12 @@ export function DownloadsScreen ({ history, downSpeed, upSpeed }: {
                 )}
                 {(d.status === 'downloading' || d.status === 'paused') && (
                   <button className="link-btn danger" onClick={() => downloads.cancel(d.path)}>Cancel</button>
+                )}
+                {d.status === 'done' && d.checksumStatus === 'mismatch' && d.savedTo !== undefined && (
+                  <button className="link-btn" onClick={() => downloads.repair(d.path)}>Repair</button>
+                )}
+                {d.status === 'repairing' && (
+                  <button className="link-btn danger" onClick={() => downloads.stopRepair(d.path)}>Stop</button>
                 )}
                 {(d.status === 'done' || d.status === 'error') && (
                   <button className="link-btn muted" onClick={() => downloads.remove(d.path)}>Clear</button>

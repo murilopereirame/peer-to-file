@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import {
   OpfsChunkStore, resetOpfsWorkerForTests, setOpfsWorkerFactory
 } from '@p2f/shared/src/opfsChunkStore.ts'
+import { transferReadProgress } from '@p2f/shared/src/readProgress.ts'
 import type { OpfsWorkerRequest, OpfsWorkerResponse } from '@p2f/shared/src/opfsWorkerProtocol.ts'
 
 const CHUNK = 1024
@@ -45,21 +46,31 @@ function newStore (key = 'abc123'): OpfsChunkStore {
   return new OpfsChunkStore(CHUNK, { torrent: { infoHash: key }, length: LENGTH })
 }
 
-/** Reads pieces 0..count-1 in order, the way a save's sequential pass does. */
-async function readSequentially (store: OpfsChunkStore, count: number): Promise<void> {
-  for (let i = 0; i < count; i++) {
-    await new Promise<void>((resolve, reject) => {
-      store.get(i, {}, err => { err ? reject(err) : resolve() })
-    })
-  }
-  // Reaps are fired after the read is served, without being awaited — let the
-  // stub's microtask-based round trips settle before asserting.
+async function getPiece (store: OpfsChunkStore, index: number, opts: { offset?: number, length?: number } = {}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    store.get(index, opts, err => { err ? reject(err) : resolve() })
+  })
+}
+
+/** Let the stub's microtask-based round trips settle before asserting. */
+async function settle (): Promise<void> {
   await new Promise(resolve => setImmediate(resolve))
+}
+
+/** Reads pieces from..to-1 in order and reports each one as consumed, the way
+ * the save's file iterator does (see ensureFileDecryptionPatched). */
+async function readSequentially (store: OpfsChunkStore, to: number, from = 0, key = 'abc123'): Promise<void> {
+  for (let i = from; i < to; i++) {
+    await getPiece(store, i)
+    transferReadProgress.get(key)?.(i * CHUNK, Math.min((i + 1) * CHUNK, store.length))
+  }
+  await settle()
 }
 
 beforeEach(() => {
   resetOpfsWorkerForTests()
   OpfsChunkStore.instances.clear()
+  transferReadProgress.clear()
   stub = new StubWorker()
   setOpfsWorkerFactory(() => stub)
 })
@@ -73,22 +84,57 @@ test('nothing is deleted while the download is still running', async () => {
 test('draining frees every piece the sequential read has passed', async () => {
   const store = newStore()
   store.startDraining()
-  await readSequentially(store, PIECES)
-  // The piece currently being served is kept (a partial re-read of it is still
-  // legal); everything strictly behind the read is gone.
-  assert.deepEqual(stub.removed, [0, 1, 2, 3, 4, 5, 6])
+  await readSequentially(store, 4)
+  assert.deepEqual(stub.removed, [0, 1, 2, 3])
+  await readSequentially(store, PIECES, 4)
+  assert.deepEqual(stub.removed, [0, 1, 2, 3, 4, 5, 6, 7])
+})
+
+test('a piece is only freed once the save has consumed all of it', async () => {
+  const store = newStore()
+  store.startDraining()
+  await getPiece(store, 0)
+  // The iterator hands piece 0 on in two halves.
+  transferReadProgress.get('abc123')?.(0, CHUNK / 2)
+  await settle()
+  assert.deepEqual(stub.removed, [], 'half a piece consumed frees nothing')
+  transferReadProgress.get('abc123')?.(CHUNK / 2, CHUNK)
+  await settle()
+  assert.deepEqual(stub.removed, [0])
+})
+
+test('serving pieces to other peers never frees pieces the save has not read', async () => {
+  // Regression: WebTorrent calls get() to answer peers' requests too. A peer
+  // asking for a far-ahead piece used to look like "the save has read this
+  // far" and delete everything before it, so the save hit missing pieces and
+  // ended early — a "completed" but truncated file.
+  const store = newStore()
+  store.startDraining()
+  await readSequentially(store, 2)
+  await getPiece(store, 7)
+  await getPiece(store, 5, { offset: 16, length: 32 })
+  await settle()
+  assert.deepEqual(stub.removed, [0, 1])
+})
+
+test('reads that do not continue the save from where it is are ignored', async () => {
+  const store = newStore()
+  store.startDraining()
+  await readSequentially(store, 2)
+  // A ranged read further on (not the save's own sequential pass)...
+  transferReadProgress.get('abc123')?.(5 * CHUNK, 6 * CHUNK)
+  // ...and a re-read of something already freed.
+  transferReadProgress.get('abc123')?.(0, CHUNK)
+  await settle()
+  assert.deepEqual(stub.removed, [0, 1])
 })
 
 test('a piece is freed only once, however many times the read revisits it', async () => {
   const store = newStore()
   store.startDraining()
   await readSequentially(store, 4)
-  // A partial re-read of an already-served piece must not re-reap behind it.
-  await new Promise<void>((resolve, reject) => {
-    store.get(3, { offset: 16, length: 32 }, err => { err ? reject(err) : resolve() })
-  })
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(stub.removed, [0, 1, 2])
+  await readSequentially(store, 4, 2)
+  assert.deepEqual(stub.removed, [0, 1, 2, 3])
 })
 
 test('draining mid-save frees the pieces already behind the read, not just later ones', async () => {
@@ -98,8 +144,10 @@ test('draining mid-save frees the pieces already behind the read, not just later
   await readSequentially(store, 4)
   assert.deepEqual(stub.removed, [])
   store.startDraining()
-  await readSequentially(store, PIECES)
-  assert.deepEqual(stub.removed, [0, 1, 2, 3, 4, 5, 6])
+  await settle()
+  assert.deepEqual(stub.removed, [0, 1, 2, 3])
+  await readSequentially(store, PIECES, 4)
+  assert.deepEqual(stub.removed, [0, 1, 2, 3, 4, 5, 6, 7])
 })
 
 test('startDrainingFor targets the store registered for an infoHash', async () => {
@@ -107,11 +155,11 @@ test('startDrainingFor targets the store registered for an infoHash', async () =
   const theirs = newStore('theirs')
   OpfsChunkStore.startDrainingFor('mine')
 
-  await readSequentially(mine, 3)
-  assert.deepEqual(stub.removed, [0, 1], 'the drained store frees what the read passed')
+  await readSequentially(mine, 3, 0, 'mine')
+  assert.deepEqual(stub.removed, [0, 1, 2], 'the drained store frees what the read passed')
 
   stub.removed.length = 0
-  await readSequentially(theirs, 3)
+  await readSequentially(theirs, 3, 0, 'theirs')
   assert.deepEqual(stub.removed, [], 'an unrelated download keeps its pieces')
 })
 
@@ -138,5 +186,6 @@ test('destroy drops the instance from the registry so a re-add starts clean', as
     store.destroy(err => { err ? reject(err) : resolve() })
   })
   assert.equal(OpfsChunkStore.instances.has('gone'), false)
+  assert.equal(transferReadProgress.has('gone'), false)
   assert.equal(stub.requests.at(-1)?.op, 'destroy')
 })
