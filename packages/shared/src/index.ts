@@ -5,6 +5,7 @@ export * from './format.ts'
 export * from './browserCrypto.ts'
 export * from './notify.ts'
 export * from './opfsChunkStore.ts'
+export * from './readProgress.ts'
 export type * from './opfsWorkerProtocol.ts'
 // opfsWorkerCore.ts is deliberately NOT re-exported here: it only ever runs
 // inside a dedicated worker, and each app's worker entry deep-imports it so

@@ -5,11 +5,11 @@ import {
 import { loadWebTorrent } from './loadWebTorrent'
 import { FsChunkStore } from './fsChunkStore'
 import {
-  askSavePath, awaitDownloadCompletion, currentDownloadDir, hashFile, loadSavedDownloads, registerPendingDownload,
-  saveSavedDownloads, settings, type SavedDownload
+  askSavePath, awaitDownloadCompletion, cancelRepair, currentDownloadDir, hashFile, loadSavedDownloads,
+  registerPendingDownload, repairSavedDownload, saveSavedDownloads, settings, type RepairPhase, type SavedDownload
 } from './electronApi'
 
-export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'done' | 'error'
+export type DownloadStatus = 'preparing' | 'downloading' | 'paused' | 'saving' | 'repairing' | 'done' | 'error'
 export type ChecksumStatus = 'verifying' | 'ok' | 'mismatch' | 'unavailable'
 
 export interface PeerInfo {
@@ -41,6 +41,11 @@ export interface DownloadSnapshot {
    * saved file — catches decrypt bugs or a truncated/corrupted save that
    * piece verification alone wouldn't. */
   checksumStatus?: ChecksumStatus
+  mountId?: number
+  /** Progress of a running repair (status 'repairing'). */
+  repair?: { phase: RepairPhase, done: number, total: number }
+  /** How many damaged or missing pieces the last repair re-downloaded. */
+  repairedPieces?: number
 }
 
 interface Tracked {
@@ -162,6 +167,8 @@ export class TorrentDownloadManager {
   // instead of adding a torrent nobody wants any more.
   private readonly attempts = new Map<string, symbol>()
   private reauth: (() => Promise<boolean>) | null = null
+  // path -> id of the repair running for it, so it can be stopped.
+  private readonly repairIds = new Map<string, string>()
 
   /** How to refresh an expired session (see DownloadsContext). Resolves true
    * if the session was refreshed. */
@@ -339,7 +346,7 @@ export class TorrentDownloadManager {
     if (this.isActive(path)) return
     const attempt = Symbol(path)
     this.attempts.set(path, attempt)
-    this.set(path, { ...blank(path, name), savePath })
+    this.set(path, { ...blank(path, name), savePath, mountId })
     try {
       const cacheDir = opts.cacheDir ?? await settings.getCacheDir()
       // ECDH key wrap (fresh ephemeral keypair per download) so the
@@ -544,6 +551,7 @@ export class TorrentDownloadManager {
 
   cancel (path: string): void {
     this.attempts.delete(path)
+    this.stopRepair(path)
     const t = this.tracked.get(path)
     if (t) {
       transferKeys.delete(t.torrent.infoHash)
@@ -591,9 +599,27 @@ export class TorrentDownloadManager {
       // read as "can't verify", not as a mismatch against `undefined`.
       if (!plainSha256) console.warn('[p2f] server did not provide a plaintext checksum for this file — is it running the latest version?')
 
-      const { savedTo, checksumStatus } = await this.saveToDisk(torrent, file, plainSha256, savePath)
+      const saved = await this.saveToDisk(torrent, file, plainSha256, savePath)
+      const { savedTo } = saved
+      let { checksumStatus } = saved
+      let message: string | undefined
+      let repairedPieces: number | undefined
 
-      this.set(path, { status: 'done', progress: 1, downloaded: file.length, length: file.length, savedTo, checksumStatus })
+      // The saved file doesn't match the server's: find the pieces that are
+      // missing or damaged and fetch just those again.
+      if (checksumStatus === 'mismatch' && savedTo) {
+        const outcome = await this.runRepair(client, path, savedTo, torrent.infoHash)
+        // Cancelled (and cleared) while the repair ran.
+        if (!this.snapshots.has(path)) return
+        checksumStatus = outcome.checksumStatus
+        message = outcome.message
+        repairedPieces = outcome.repairedPieces
+      }
+
+      this.set(path, {
+        status: 'done', progress: 1, downloaded: file.length, length: file.length, savedTo, checksumStatus,
+        message, repairedPieces, repair: undefined
+      })
       // Genuinely finished — nothing left to resume on a future launch. An
       // error, below, deliberately leaves the saved entry in place so it's
       // retried automatically next time instead of silently dropped.
@@ -643,7 +669,12 @@ export class TorrentDownloadManager {
     }
 
     try {
-      const finalPath = await awaitDownloadCompletion(ticketId)
+      const info = await awaitDownloadCompletion(ticketId)
+      // Cut off partway: whatever is (or isn't) at the destination is
+      // incomplete, which a repair can fill in.
+      if (info.state === 'interrupted' && info.path) return { savedTo: info.path, checksumStatus: plainSha256 ? 'mismatch' : 'unavailable' }
+      if (info.state !== 'completed') return { savedTo: guessedPath, checksumStatus: 'unavailable' }
+      const finalPath = info.path
       if (!plainSha256) return { savedTo: finalPath, checksumStatus: 'unavailable' }
       const actualSha256 = await hashFile(finalPath)
       if (actualSha256 !== null && actualSha256 !== plainSha256) {
@@ -657,5 +688,80 @@ export class TorrentDownloadManager {
       return { savedTo: guessedPath, checksumStatus: 'unavailable' }
     }
   }
-}
 
+  /** "Repair" on a finished download whose checksum didn't match: checks the
+   * saved file piece by piece and re-downloads only the bad pieces. */
+  async repair (client: P2FClient, path: string): Promise<void> {
+    const snap = this.snapshots.get(path)
+    if (!snap || snap.status !== 'done' || !snap.savedTo || !snap.infoHash) return
+    const outcome = await this.runRepair(client, path, snap.savedTo, snap.infoHash)
+    if (!this.snapshots.has(path)) return
+    this.set(path, { status: 'done', repair: undefined, ...outcome })
+  }
+
+  /** Stops a running repair. The download is left as it was (a mismatch). */
+  stopRepair (path: string): void {
+    const id = this.repairIds.get(path)
+    if (!id) return
+    this.repairIds.delete(path)
+    this.attempts.delete(path)
+    void cancelRepair(id)
+  }
+
+  /**
+   * Fixes the saved file at `savedTo` in place (see electron/pieceRepair.cts):
+   * every piece is checked against the torrent's piece hashes, and only the
+   * missing or damaged ones are fetched again from the server's webseed, then
+   * the whole file is checksummed again.
+   *
+   * Asks the server for fresh metadata first: the webseed's transfer token
+   * from the original request may have expired during a long download, and
+   * it confirms the file hasn't changed on the server since.
+   */
+  private async runRepair (
+    client: P2FClient, path: string, savedTo: string, infoHash: string
+  ): Promise<{ checksumStatus: ChecksumStatus, message?: string, repairedPieces?: number }> {
+    const attempt = Symbol(path)
+    this.attempts.set(path, attempt)
+    const repairId = crypto.randomUUID()
+    this.repairIds.set(path, repairId)
+    this.set(path, { status: 'repairing', message: undefined, repair: { phase: 'verifying', done: 0, total: 0 } })
+    try {
+      const mountId = this.snapshots.get(path)?.mountId
+      const serverPublicKey = await this.withRetry(path, attempt, 'starting the repair',
+        async () => await getServerEcdhPublicKey(async () => await client.info()))
+      const keyWrap = await establishKeyWrap(serverPublicKey)
+      const meta = await this.withRetry(path, attempt, 'starting the repair',
+        async () => await client.torrentMeta(path, keyWrap.clientPublicKeyBase64, mountId))
+      if (meta.infoHash !== infoHash) {
+        return { checksumStatus: 'mismatch', message: 'the file changed on the server since it was downloaded — download it again' }
+      }
+      const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+      const result = await repairSavedDownload(repairId, {
+        filePath: savedTo,
+        torrent: Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0)),
+        key: keyMaterial.slice(0, 32),
+        iv: keyMaterial.slice(32, 48),
+        webseed: meta.webseed
+      }, (phase, done, total) => {
+        if (this.repairIds.get(path) === repairId) this.set(path, { repair: { phase, done, total } })
+      })
+      if (result.damaged.length > 0) {
+        console.warn(`[p2f] repaired ${result.damaged.length} of ${result.pieces} pieces`, { path: savedTo, pieces: result.damaged })
+      }
+      const actual = await hashFile(savedTo)
+      const checksumStatus: ChecksumStatus = actual === null ? 'unavailable' : actual === meta.plainSha256 ? 'ok' : 'mismatch'
+      return {
+        checksumStatus,
+        repairedPieces: result.damaged.length,
+        message: checksumStatus === 'mismatch' ? 'still does not match the server after the repair' : undefined
+      }
+    } catch (err) {
+      const stopped = err instanceof DownloadAborted || this.repairIds.get(path) !== repairId
+      return { checksumStatus: 'mismatch', message: stopped ? 'repair stopped' : `repair failed: ${errMessage(err)}` }
+    } finally {
+      if (this.repairIds.get(path) === repairId) this.repairIds.delete(path)
+      if (this.attempts.get(path) === attempt) this.attempts.delete(path)
+    }
+  }
+}

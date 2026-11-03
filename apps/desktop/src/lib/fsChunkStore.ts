@@ -5,6 +5,8 @@
 // reasoning); the actual file I/O happens in the main process
 // (electron/pieceCache.cts), since the sandboxed renderer can't touch disk.
 
+import { SequentialReadCursor, transferReadProgress } from '@p2f/shared'
+
 type StoreCb<T = void> = (err: Error | null, value?: T) => void
 
 export class FsChunkStore {
@@ -16,6 +18,10 @@ export class FsChunkStore {
   private readonly dir: string
   private draining = false
   private reapedUpTo = 0
+  // How far the save's sequential read has got — fed by the file iterator,
+  // never by get(), which WebTorrent also uses to serve other peers. See
+  // readProgress.ts in @p2f/shared.
+  private readonly cursor: SequentialReadCursor
 
   /** Live stores by infoHash — WebTorrent constructs these itself and only
    * ever gets the class from us, so this is how the download manager finds
@@ -40,7 +46,9 @@ export class FsChunkStore {
     const dir = FsChunkStore.dirs.get(this.key) ?? FsChunkStore.defaultDir
     if (!dir) throw new Error('download cache folder is not configured')
     this.dir = dir
+    this.cursor = new SequentialReadCursor(chunkLength, this.length)
     FsChunkStore.instances.set(this.key, this)
+    transferReadProgress.set(this.key, (start, end) => { this.onConsumed(start, end) })
   }
 
   static startDrainingFor (infoHash: string): void {
@@ -68,25 +76,40 @@ export class FsChunkStore {
     if (typeof opts === 'function') cb = opts
     else if (opts) options = opts
     const done = cb as StoreCb<Uint8Array>
-    window.p2f.cacheGet(this.dir, this.key, index, options.offset ?? 0, options.length, this.expectedLength(index)).then(data => {
-      done(null, data)
-      // Free everything strictly before this piece once a sequential save
-      // read has moved past it — see OpfsChunkStore.get for the details.
-      if (this.draining && index > this.reapedUpTo) {
-        const from = this.reapedUpTo
-        this.reapedUpTo = index
-        window.p2f.cacheRemovePieces(this.dir, this.key, from, index).catch(() => {})
-      }
-    }, (err: Error) => done(err))
+    window.p2f.cacheGet(this.dir, this.key, index, options.offset ?? 0, options.length, this.expectedLength(index))
+      .then(data => { done(null, data) }, (err: Error) => done(err))
+  }
+
+  /** The save has consumed file bytes [start, end). */
+  onConsumed (start: number, end: number): void {
+    this.cursor.advance(start, end)
+    this.reap()
+  }
+
+  // Frees every piece the save's sequential read has fully passed — same
+  // rule as OpfsChunkStore.
+  private reap (): void {
+    if (!this.draining) return
+    const upTo = this.cursor.piecesBehind()
+    if (upTo <= this.reapedUpTo) return
+    const from = this.reapedUpTo
+    this.reapedUpTo = upTo
+    window.p2f.cacheRemovePieces(this.dir, this.key, from, upTo).catch(() => {})
   }
 
   /** One-way: from here on, pieces are deleted as the save reads past them. */
-  startDraining (): void { this.draining = true }
+  startDraining (): void {
+    this.draining = true
+    this.reap()
+  }
 
   close (cb: StoreCb): void { cb(null) }
 
   destroy (cb: StoreCb): void {
-    if (FsChunkStore.instances.get(this.key) === this) FsChunkStore.instances.delete(this.key)
+    if (FsChunkStore.instances.get(this.key) === this) {
+      FsChunkStore.instances.delete(this.key)
+      transferReadProgress.delete(this.key)
+    }
     window.p2f.cacheRemoveKey(this.dir, this.key).then(() => cb(null), (err: Error) => cb(err))
   }
 }

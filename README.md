@@ -225,6 +225,13 @@ save that fails partway through can't be retried from what's on disk and the fil
 be fetched again. A save that fails *before* the read starts — the common case, a
 dismissed Save As dialog — leaves the pieces intact and can still be retried.
 
+"Moves past it" means the save itself has consumed that piece, as reported by the
+file reader that decrypts the stream. It is never inferred from reads of the store in
+general: a finished torrent keeps seeding, and WebTorrent reads the store to serve
+pieces to other peers too. When a peer's read of a far-ahead piece counted as save
+progress, every piece before it was deleted before the save got to it, and the save
+ended early with a truncated file and no error.
+
 All OPFS piece reads/writes run in a dedicated worker via `FileSystemSyncAccessHandle`
 rather than the main-thread `createWritable()` stream. A sync access handle holds an
 exclusive lock on its file for its whole open/write-or-read/flush/close lifetime, so two

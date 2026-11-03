@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { clearCredentials, loadCredentials, saveCredentials } from './credentials.cjs'
 import { clearCookiesForOrigin, getCookie, setCookie, performFetch, type FetchRequest } from './netFetch.cjs'
 import { getPiece, listKeys, putPiece, removeKey, removePieces } from './pieceCache.cjs'
+import { repairDownload, type RepairRequest } from './pieceRepair.cjs'
 import { JsonStore } from './store.cjs'
 
 const APP_SCHEME = 'p2file'
@@ -279,3 +280,22 @@ ipcMain.handle('downloads:hashFile', async (_e, filePath: string) => {
     return null
   }
 })
+
+// Fixes a saved download that failed its checksum by re-fetching only the
+// pieces that are missing or damaged (see electron/pieceRepair.cts). Progress
+// goes back to the renderer as downloads:repairProgress events.
+const repairs = new Map<string, AbortController>()
+ipcMain.handle('downloads:repair', async (e, repairId: string, req: RepairRequest) => {
+  if (typeof req?.filePath !== 'string' || !isAbsolute(req.filePath)) throw new Error('repair needs an absolute file path')
+  if (!/^https?:\/\//.test(req.webseed)) throw new Error('repair needs an http(s) webseed URL')
+  const controller = new AbortController()
+  repairs.set(repairId, controller)
+  try {
+    return await repairDownload(req, (phase, done, total) => {
+      if (!e.sender.isDestroyed()) e.sender.send('downloads:repairProgress', repairId, phase, done, total)
+    }, controller.signal)
+  } finally {
+    repairs.delete(repairId)
+  }
+})
+ipcMain.handle('downloads:cancelRepair', (_e, repairId: string) => { repairs.get(repairId)?.abort() })

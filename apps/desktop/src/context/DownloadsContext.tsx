@@ -11,6 +11,10 @@ interface Ctx {
   resume: (path: string) => void
   cancel: (path: string) => void
   remove: (path: string) => void
+  /** Re-downloads only the damaged/missing pieces of a finished download
+   * whose checksum didn't match. */
+  repair: (path: string) => void
+  stopRepair: (path: string) => void
 }
 
 const DownloadsContext = createContext<Ctx | null>(null)
@@ -68,7 +72,9 @@ export function DownloadsProvider ({ children }: { children: React.ReactNode }):
     pause: (path) => { managerRef.current.pause(path) },
     resume: (path) => { managerRef.current.resume(path) },
     cancel: (path) => { managerRef.current.cancel(path) },
-    remove: (path) => { managerRef.current.remove(path) }
+    remove: (path) => { managerRef.current.remove(path) },
+    repair: (path) => { if (app.client) void managerRef.current.repair(app.client, path) },
+    stopRepair: (path) => { managerRef.current.stopRepair(path) }
   }), [downloads, app.client])
 
   return <DownloadsContext.Provider value={value}>{children}</DownloadsContext.Provider>

@@ -16,6 +16,8 @@
 // function (ctrXor) serves both directions: the download side decrypts what
 // the server encrypted, the upload side encrypts what the server will decrypt.
 
+import { transferReadProgress } from './readProgress.ts'
+
 export function base64ToBytes (b64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(b64), c => c.charCodeAt(0)) as Uint8Array<ArrayBuffer>
 }
@@ -285,7 +287,11 @@ export function ensureFileDecryptionPatched (file: { constructor: unknown }): vo
           return result
         }
         const plain = await ctrXor(result.value, offset, key, iv)
+        const start = offset
         offset += result.value.length
+        // Lets the chunk store free pieces the save has finished with —
+        // see readProgress.ts.
+        transferReadProgress.get(hash)?.(start, offset)
         return { done: false, value: plain }
       },
       async return (value?: unknown): Promise<IteratorResult<Uint8Array>> {

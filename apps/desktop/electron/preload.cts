@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { StoredCredentials } from './credentials.cjs'
 import type { FetchRequest, FetchResult } from './netFetch.cjs'
+import type { RepairPhase, RepairRequest, RepairResult } from './pieceRepair.cjs'
 
 export interface DownloadCompletedInfo {
   filename: string
@@ -62,6 +63,23 @@ const api = {
   cacheListKeys: (dir: string): Promise<string[]> => ipcRenderer.invoke('cache:listKeys', dir),
   awaitDownloadCompletion: (ticketId: number): Promise<DownloadCompletedInfo> =>
     ipcRenderer.invoke('downloads:awaitCompletion', ticketId),
+
+  /** Re-fetches only the missing/damaged pieces of a saved download (see
+   * electron/pieceRepair.cts). `onProgress` gets called until it settles. */
+  repairDownload: async (
+    repairId: string, req: RepairRequest, onProgress: (phase: RepairPhase, done: number, total: number) => void
+  ): Promise<RepairResult> => {
+    const listener = (_e: unknown, id: string, phase: RepairPhase, done: number, total: number): void => {
+      if (id === repairId) onProgress(phase, done, total)
+    }
+    ipcRenderer.on('downloads:repairProgress', listener)
+    try {
+      return await ipcRenderer.invoke('downloads:repair', repairId, req)
+    } finally {
+      ipcRenderer.off('downloads:repairProgress', listener)
+    }
+  },
+  cancelRepair: (repairId: string): Promise<void> => ipcRenderer.invoke('downloads:cancelRepair', repairId),
 
   getSetting: <T, >(key: string): Promise<T | undefined> => ipcRenderer.invoke('settings:get', key),
   setSetting: (key: string, value: unknown): Promise<void> => ipcRenderer.invoke('settings:set', key, value),

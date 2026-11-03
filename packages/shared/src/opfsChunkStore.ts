@@ -23,6 +23,7 @@
 // this sidesteps that class of bug rather than working around one symptom.
 
 import type { OpfsWorkerRequest, OpfsWorkerResponse } from './opfsWorkerProtocol.ts'
+import { SequentialReadCursor, transferReadProgress } from './readProgress.ts'
 
 type StoreCb<T = void> = (err: Error | null, value?: T) => void
 
@@ -128,6 +129,10 @@ export class OpfsChunkStore {
   private draining = false
   // Pieces with index < reapedUpTo have already been deleted while draining.
   private reapedUpTo = 0
+  // How far the save's sequential read has got. Fed by the file iterator (see
+  // readProgress.ts), never by get(): WebTorrent also calls get() to serve
+  // pieces to other peers, and those reads say nothing about the save.
+  private readonly cursor: SequentialReadCursor
 
   // Instances keyed by infoHash, so code elsewhere (each app's download
   // manager) can find the store WebTorrent created internally for a given
@@ -144,7 +149,9 @@ export class OpfsChunkStore {
     this.lastChunkIndex = Math.max(0, Math.ceil(this.length / chunkLength) - 1)
     this.lastChunkLength = this.length - this.lastChunkIndex * chunkLength
     this.key = opts.torrent?.infoHash ?? opts.name ?? 'unknown'
+    this.cursor = new SequentialReadCursor(chunkLength, this.length)
     OpfsChunkStore.instances.set(this.key, this)
+    transferReadProgress.set(this.key, (start, end) => { this.onConsumed(start, end) })
   }
 
   /**
@@ -208,21 +215,25 @@ export class OpfsChunkStore {
       offset: options.offset,
       length: options.length,
       expectedLength: this.expectedLength(index)
-    }).then(data => {
-      done(null, data as Uint8Array)
-      // Serve first, then free everything strictly before this piece: reaching
-      // piece N in a sequential file read means N-1 and earlier are done with
-      // and will never be re-read, so their disk space can be reclaimed now
-      // instead of at the end. The current piece is only reaped once a later
-      // one is requested, which keeps partial (offset/length) reads of the
-      // same piece safe. The final piece is left to destroy() (which the
-      // wholesale store teardown after a completed save handles anyway).
-      if (this.draining && index > this.reapedUpTo) {
-        const from = this.reapedUpTo
-        this.reapedUpTo = index
-        callWorker({ op: 'removeChunks', key: this.key, fromIndex: from, toIndex: index }).catch(() => {})
-      }
-    }, (err: Error) => done(err))
+    }).then(data => { done(null, data as Uint8Array) }, (err: Error) => done(err))
+  }
+
+  /** The save has consumed file bytes [start, end) — see readProgress.ts. */
+  onConsumed (start: number, end: number): void {
+    this.cursor.advance(start, end)
+    this.reap()
+  }
+
+  // Frees every piece the save's sequential read has fully passed: those
+  // bytes have been handed on and will never be re-read, so their disk space
+  // can be reclaimed now instead of at the end.
+  private reap (): void {
+    if (!this.draining) return
+    const upTo = this.cursor.piecesBehind()
+    if (upTo <= this.reapedUpTo) return
+    const from = this.reapedUpTo
+    this.reapedUpTo = upTo
+    callWorker({ op: 'removeChunks', key: this.key, fromIndex: from, toIndex: upTo }).catch(() => {})
   }
 
   /**
@@ -238,12 +249,18 @@ export class OpfsChunkStore {
    * still on disk — that is the deliberate trade: the alternative is needing
    * room for two full copies of the file to finish a download at all.
    */
-  startDraining (): void { this.draining = true }
+  startDraining (): void {
+    this.draining = true
+    this.reap()
+  }
 
   close (cb: StoreCb): void { cb(null) }
 
   destroy (cb: StoreCb): void {
-    if (OpfsChunkStore.instances.get(this.key) === this) OpfsChunkStore.instances.delete(this.key)
+    if (OpfsChunkStore.instances.get(this.key) === this) {
+      OpfsChunkStore.instances.delete(this.key)
+      transferReadProgress.delete(this.key)
+    }
     callWorker({ op: 'destroy', key: this.key }).then(() => cb(null), (err: Error) => cb(err))
   }
 }

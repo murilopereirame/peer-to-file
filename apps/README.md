@@ -37,6 +37,15 @@ real P2P transfer, same as the web app:
 - Parts of in-progress downloads are written by the main process
   (`electron/pieceCache.cts`) into the download cache folder, under
   `p2f-parts/<infoHash>/`, via the renderer's `src/lib/fsChunkStore.ts`.
+- Every saved file is checked against the server's SHA-256. If it doesn't
+  match (a damaged or incomplete save), the app repairs it in place
+  (`electron/pieceRepair.cts`). It re-encrypts each piece of the saved file,
+  checks it against the torrent's piece hashes, then re-downloads only the
+  missing or damaged pieces from the server's webseed with HTTP Range
+  requests. Each one is hash-checked before it is decrypted and written back,
+  and the whole file is checksummed again at the end. A download that still
+  shows a mismatch (say the server was unreachable) gets a **Repair** button
+  to try again.
 
 ## Authentication
 
