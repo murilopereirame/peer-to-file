@@ -1,6 +1,6 @@
 import {
-  ApiError, establishKeyWrap, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
-  opfsAvailable, transferKeys, unwrapKeyMaterial, type P2FClient
+  ApiError, createDownloadKeys, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
+  opfsAvailable, rawKeyToBase64, transferKeys, type P2FClient, type PrepareProgress
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
 import { FsChunkStore } from './fsChunkStore'
@@ -125,6 +125,12 @@ function isTransientError (err: unknown): boolean {
 }
 
 const sleep = async (ms: number): Promise<void> => { await new Promise(resolve => setTimeout(resolve, ms)) }
+
+/** The status line while the server reads and hashes a file (p2f-lib waits it out). */
+function preparingMessage (p: PrepareProgress): string {
+  if (p.bytesTotal > 0) return `Server is preparing the file… ${Math.floor((100 * p.bytesDone) / p.bytesTotal)}%`
+  return 'Waiting for the server to prepare the file…'
+}
 
 /**
  * Real P2P transfers, same engine and transport as the browser web client
@@ -354,10 +360,17 @@ export class TorrentDownloadManager {
       // src/server/keyExchange.ts and packages/shared/src/browserCrypto.ts.
       const serverPublicKey = await this.withRetry(path, attempt, 'connecting',
         async () => await getServerEcdhPublicKey(async () => await client.info()))
-      const keyWrap = await establishKeyWrap(serverPublicKey)
+      const keys = await createDownloadKeys(rawKeyToBase64(serverPublicKey))
 
+      // p2f-lib waits while the server prepares a big file (and retries
+      // drops); withRetry still covers an expired session.
       const meta = await this.withRetry(path, attempt, 'preparing the file',
-        async () => await client.torrentMeta(path, keyWrap.clientPublicKeyBase64, mountId))
+        async () => await client.torrentMeta(path, keys.clientPublicKeyBase64, mountId, {
+          onPreparing: (p) => {
+            if (this.attempts.get(path) !== attempt) throw new DownloadAborted()
+            this.set(path, { message: preparingMessage(p) })
+          }
+        }))
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       this.set(path, { length: meta.length, infoHash: meta.infoHash })
       // Recorded now (rather than only once fully done) so a quit mid-transfer
@@ -367,11 +380,13 @@ export class TorrentDownloadManager {
       // The wire carries AES-256-CTR ciphertext (encrypted on the fly
       // server-side, see torrents.ts) — register the key so the patched File
       // iterator (below) decrypts transparently, same as the web client.
-      const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+      const transfer = keys.unwrap(meta.encKeyWrapped)
+      keys.dispose()
       transferKeys.set(meta.infoHash, {
-        key: await importCtrKey(keyMaterial.subarray(0, 32)),
-        iv: keyMaterial.subarray(32, 48)
+        key: await importCtrKey(transfer.key),
+        iv: transfer.iv
       })
+      transfer.key.fill(0)
 
       // A previous attempt at this exact file (completed or otherwise) may
       // still be registered under this infoHash. WebTorrent's own add()
@@ -730,18 +745,22 @@ export class TorrentDownloadManager {
       const mountId = this.snapshots.get(path)?.mountId
       const serverPublicKey = await this.withRetry(path, attempt, 'starting the repair',
         async () => await getServerEcdhPublicKey(async () => await client.info()))
-      const keyWrap = await establishKeyWrap(serverPublicKey)
+      const keys = await createDownloadKeys(rawKeyToBase64(serverPublicKey))
       const meta = await this.withRetry(path, attempt, 'starting the repair',
-        async () => await client.torrentMeta(path, keyWrap.clientPublicKeyBase64, mountId))
+        async () => await client.torrentMeta(path, keys.clientPublicKeyBase64, mountId, {
+          onPreparing: () => { if (this.attempts.get(path) !== attempt) throw new DownloadAborted() }
+        }))
       if (meta.infoHash !== infoHash) {
+        keys.dispose()
         return { checksumStatus: 'mismatch', message: 'the file changed on the server since it was downloaded — download it again' }
       }
-      const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+      const transfer = keys.unwrap(meta.encKeyWrapped)
+      keys.dispose()
       const result = await repairSavedDownload(repairId, {
         filePath: savedTo,
         torrent: Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0)),
-        key: keyMaterial.slice(0, 32),
-        iv: keyMaterial.slice(32, 48),
+        key: transfer.key,
+        iv: transfer.iv,
         webseed: meta.webseed
       }, (phase, done, total) => {
         if (this.repairIds.get(path) === repairId) this.set(path, { repair: { phase, done, total } })

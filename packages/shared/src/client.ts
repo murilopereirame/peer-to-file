@@ -1,4 +1,5 @@
 import { ApiError } from './types.ts'
+import { fetchTorrentMeta, type PrepareOptions } from './p2fLib.ts'
 import type {
   AdminMount, AdminUser, HistoryEntry, Listing, LogEntry, MountInfo, Role, SearchResponse, ServerInfo, TorrentMeta
 } from './types.ts'
@@ -143,11 +144,19 @@ export class P2FClient {
     return await this.requestJson('/api/mkdir', P2FClient.jsonInit('POST', { path, mount: mount === undefined ? undefined : String(mount) }))
   }
 
-  /** `clientPublicKeyBase64` is this session's ephemeral ECDH public key — see browserCrypto.ts's establishKeyWrap. */
-  async torrentMeta (path: string, clientPublicKeyBase64: string, mount?: number | string): Promise<TorrentMeta> {
-    const params = new URLSearchParams({ path, ck: clientPublicKeyBase64 })
-    if (mount !== undefined) params.set('mount', String(mount))
-    return await this.requestJson(`/api/torrent?${params.toString()}`)
+  /**
+   * `clientPublicKeyBase64` is this download's ephemeral ECDH public key (see
+   * p2fLib.ts createDownloadKeys). Waits while the server prepares the file
+   * (a big file takes minutes the first time) and retries transient failures
+   * — p2f-lib's policy, shared with the PS4 app. Server errors (401, 404)
+   * come back as ApiError.
+   */
+  async torrentMeta (path: string, clientPublicKeyBase64: string, mount?: number | string, opts: PrepareOptions = {}): Promise<TorrentMeta> {
+    return await fetchTorrentMeta(async (pathAndQuery, signal) => await this.fetchImpl(`${this.baseUrl}${pathAndQuery}`, {
+      credentials: 'include',
+      headers: { 'X-P2F-Csrf': '1' },
+      signal
+    }), { path, ck: clientPublicKeyBase64, mount }, opts)
   }
 
   /** Recursive name search. Omit `mount` to search every mount the caller can reach. */

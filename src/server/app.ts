@@ -10,7 +10,7 @@ import {
   throwIfPermissionError
 } from './browse.ts'
 import { clampSearchLimit, searchTree, type SearchHit } from './search.ts'
-import { renderTorrent, type TorrentStore } from './torrents.ts'
+import { renderTorrent, type TorrentMeta, type TorrentStore } from './torrents.ts'
 import {
   SESSION_COOKIE, REFRESH_COOKIE, REFRESH_PATH, ACCESS_TTL_MS, REFRESH_TTL_MS,
   parseCookies, type AuthService, type Session
@@ -920,9 +920,7 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
   // Announce points at the embedded tracker, urlList at /api/raw as an HTTP
   // webseed fallback. Requesting metadata also starts the WebRTC seeder.
   app.get('/api/torrent', wrap(async (req, res) => {
-    if (!heavyLimiter.take(req.ip ?? 'unknown')) {
-      throw new BrowseError(429, 'too many requests — slow down')
-    }
+    const asyncPrepare = req.query.async === '1'
     // The client's ephemeral ECDH public key for this request — required so
     // the transfer key below can be wrapped under a key an eavesdropper
     // can't derive just by watching the wire (see keyExchange.ts).
@@ -931,7 +929,38 @@ export function createApp ({ config, store, seeder, auth, activity, db, cipherKe
 
     const mount = resolveMountForRequest(db, req, res)
     const abs = await resolveInsideRoot(mount.path, req.query.path ?? '', config.followSymlinks)
-    const { meta, plainSha256 } = await store.getMeta(abs)
+    // The first request for a file reads and hashes all of it, which takes
+    // minutes for a big file. A client that sends async=1 (p2f-lib 0.2+) gets
+    // 202 + progress right away and asks again, instead of holding a request
+    // open long enough for a client, proxy or NAT to time it out. Others wait.
+    const sendPreparing = (bytesDone: number, bytesTotal: number): void => {
+      res.set('Retry-After', '2')
+      res.status(202).json({ preparing: true, bytesDone, bytesTotal })
+    }
+    // A poll for a build that is already running costs nothing, so it
+    // doesn't count against the heavy-request budget.
+    if (asyncPrepare) {
+      const running = await store.inProgress(abs)
+      if (running && !running.ready) {
+        sendPreparing(running.bytesDone, running.bytesTotal)
+        return
+      }
+    }
+    if (!heavyLimiter.take(req.ip ?? 'unknown')) {
+      throw new BrowseError(429, 'too many requests — slow down')
+    }
+    let prepared: TorrentMeta
+    if (asyncPrepare) {
+      const st = await store.status(abs)
+      if (!st.ready) {
+        sendPreparing(st.bytesDone, st.bytesTotal)
+        return
+      }
+      prepared = st.meta
+    } else {
+      prepared = await store.getMeta(abs)
+    }
+    const { meta, plainSha256 } = prepared
     const rel = path.relative(mount.path, abs)
 
     // The webseed carries a path-bound transfer token and the announce an

@@ -22,8 +22,22 @@ export interface TorrentMeta {
   plainSha256: string
 }
 
+/** Where building a file's metadata stands (see TorrentStore.status). */
+export type MetaStatus =
+  | { ready: true, meta: TorrentMeta }
+  | { ready: false, bytesDone: number, bytesTotal: number }
+
 export interface TorrentStore {
   getMeta (absPath: string): Promise<TorrentMeta>
+  /**
+   * Like getMeta, but never waits for the hashing: starts it if needed and
+   * returns the metadata if it is ready, else how far the hashing is. A
+   * failed build rejects (as getMeta would).
+   */
+  status (absPath: string): Promise<MetaStatus>
+  /** The status of a build already running for this file, else null.
+   * Starts nothing, so a poll for it is cheap. */
+  inProgress (absPath: string): Promise<MetaStatus | null>
 }
 
 /**
@@ -41,9 +55,18 @@ export interface TorrentStore {
  * ciphertext. The same pass hashes the plaintext for the end-to-end checksum.
  */
 export function createTorrentStore (cipherKeys: CipherKeys): TorrentStore {
-  const cache = new Map<string, { key: string, promise: Promise<TorrentMeta> }>()
+  interface Entry {
+    key: string
+    promise: Promise<TorrentMeta>
+    size: number
+    /** Plaintext bytes hashed so far. */
+    bytesDone: number
+    /** Set once the promise settles. */
+    result?: { meta: TorrentMeta } | { error: unknown }
+  }
+  const cache = new Map<string, Entry>()
 
-  async function getMeta (absPath: string): Promise<TorrentMeta> {
+  async function entryFor (absPath: string): Promise<Entry> {
     const st = await fs.stat(absPath)
     if (!st.isFile()) {
       throw new BrowseError(400, 'not a file')
@@ -51,28 +74,40 @@ export function createTorrentStore (cipherKeys: CipherKeys): TorrentStore {
     const key = `${st.size}:${st.mtimeMs}`
     let entry = cache.get(absPath)
     if (!entry || entry.key !== key) {
-      const fresh: { key: string, promise: Promise<TorrentMeta> } = {
-        key,
-        promise: buildMeta(absPath, st.size)
-      }
-      fresh.promise.catch(() => {
+      const fresh: Entry = { key, size: st.size, bytesDone: 0, promise: Promise.resolve(null as unknown as TorrentMeta) }
+      fresh.promise = buildMeta(absPath, st.size, n => { fresh.bytesDone += n })
+      fresh.promise.then(meta => { fresh.result = { meta } }, error => {
+        fresh.result = { error }
         // don't cache failures
         if (cache.get(absPath) === fresh) cache.delete(absPath)
       })
       cache.set(absPath, fresh)
       entry = fresh
     }
-    return entry.promise
+    return entry
   }
 
-  async function buildMeta (absPath: string, size: number): Promise<TorrentMeta> {
+  async function getMeta (absPath: string): Promise<TorrentMeta> {
+    return (await entryFor(absPath)).promise
+  }
+
+  async function status (absPath: string): Promise<MetaStatus> {
+    const entry = await entryFor(absPath)
+    if (entry.result) {
+      if ('meta' in entry.result) return { ready: true, meta: entry.result.meta }
+      throw entry.result.error
+    }
+    return { ready: false, bytesDone: entry.bytesDone, bytesTotal: entry.size }
+  }
+
+  async function buildMeta (absPath: string, size: number, onBytes: (n: number) => void): Promise<TorrentMeta> {
     const { key, iv } = await cipherKeys.getKeys(absPath)
     const plainHash = crypto.createHash('sha256')
 
     const read = fsSync.createReadStream(absPath)
     // Tap the plaintext for the end-to-end checksum as it flows past.
     const tap = new Transform({
-      transform (chunk, _enc, cb) { plainHash.update(chunk as Buffer); cb(null, chunk) }
+      transform (chunk, _enc, cb) { plainHash.update(chunk as Buffer); onBytes((chunk as Buffer).length); cb(null, chunk) }
     })
     const cipher = crypto.createCipheriv(CIPHER_ALGO, key, iv)
     read.on('error', err => cipher.destroy(err))
@@ -94,7 +129,15 @@ export function createTorrentStore (cipherKeys: CipherKeys): TorrentStore {
     return { meta, plainSha256: plainHash.digest('hex') }
   }
 
-  return { getMeta }
+  async function inProgress (absPath: string): Promise<MetaStatus | null> {
+    const entry = cache.get(absPath)
+    if (!entry || entry.result) return null
+    const st = await fs.stat(absPath)
+    if (entry.key !== `${st.size}:${st.mtimeMs}`) return null
+    return { ready: false, bytesDone: entry.bytesDone, bytesTotal: entry.size }
+  }
+
+  return { getMeta, status, inProgress }
 }
 
 // Aim for ~1024 pieces, clamped to [256 KiB, 8 MiB]. create-torrent's default

@@ -9,6 +9,11 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   base: './',
+  resolve: {
+    // @p2f/shared is linked from ../../packages/shared (outside this app),
+    // so its import of p2f-lib must resolve from this app's node_modules.
+    dedupe: ['p2f-lib']
+  },
   server: {
     port: 1420,
     strictPort: true

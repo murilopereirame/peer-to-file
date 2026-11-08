@@ -15,7 +15,8 @@
     "skipLibCheck": true,
     "paths": {
       "@p2f/shared": ["./node_modules/@p2f/shared/src/index.ts"],
-      "@p2f/shared/*": ["./node_modules/@p2f/shared/*"]
+      "@p2f/shared/*": ["./node_modules/@p2f/shared/*"],
+      "p2f-lib": ["./node_modules/p2f-lib/dist/index.d.ts"]
     }
   },
   "include": ["src", "src/vite-env.d.ts"]
