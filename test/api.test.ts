@@ -183,6 +183,53 @@ test('GET /api/torrent without ck (client ECDH public key) is a 400', async () =
   assert.equal(res.status, 400)
 })
 
+test('GET /api/torrent?async=1 answers 202 while the file is prepared, then the metadata', async () => {
+  // A fresh file: the first request starts hashing it and must not wait for it.
+  const content = crypto.randomBytes(3 * 1024 * 1024 + 7)
+  await fs.writeFile(path.join(root, 'prep.bin'), content)
+  const info = await (await fetch(`${base}/api/info`)).json() as any
+  const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
+  const url = `${base}/api/torrent?path=prep.bin&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}&async=1`
+
+  const first = await fetch(url, { headers: auth() })
+  assert.equal(first.status, 202)
+  assert.equal(first.headers.get('retry-after'), '2')
+  const progress = await first.json() as any
+  assert.equal(progress.preparing, true)
+  assert.equal(progress.bytesTotal, content.length)
+  assert.ok(progress.bytesDone >= 0 && progress.bytesDone <= content.length)
+
+  let meta: any
+  for (let i = 0; i < 200 && !meta; i++) {
+    const res = await fetch(url, { headers: auth() })
+    if (res.status === 200) meta = await res.json()
+    else {
+      assert.equal(res.status, 202)
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+  }
+  assert.ok(meta, 'the metadata arrives once the file is prepared')
+  assert.equal(meta.length, content.length)
+  assert.equal(meta.plainSha256, crypto.createHash('sha256').update(content).digest('hex'))
+  const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+  assert.equal(keyMaterial.length, 48)
+
+  // Same metadata as a plain (waiting) request.
+  const sync = await fetchTorrentMeta('prep.bin')
+  assert.equal(sync.meta.infoHash, meta.infoHash)
+})
+
+test('GET /api/torrent?async=1 on a missing file is a JSON 404 (final for clients)', async () => {
+  const info = await (await fetch(`${base}/api/info`)).json() as any
+  const keyWrap = await establishKeyWrap(info.ecdhPublicKey)
+  const res = await fetch(
+    `${base}/api/torrent?path=nope.bin&ck=${encodeURIComponent(keyWrap.clientPublicKeyBase64)}&async=1`,
+    { headers: auth() }
+  )
+  assert.equal(res.status, 404)
+  assert.equal(typeof (await res.json() as any).error, 'string')
+})
+
 test('GET /api/torrent on a directory is a 400', async () => {
   const info = await (await fetch(`${base}/api/info`)).json() as any
   const keyWrap = await establishKeyWrap(info.ecdhPublicKey)

@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@p2f/shared": "file:../../packages/shared",
+    "p2f-lib": "https://github.com/murilopereirame/p2f-lib/releases/download/v0.2.0/murilopereirame-p2f-lib-0.2.0.tgz",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

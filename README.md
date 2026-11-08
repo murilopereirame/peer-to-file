@@ -142,6 +142,11 @@ Clicking **Download**:
    (no pre-generated `.torrent` files), caches the metadata, and returns a full `.torrent`
    (plus a magnet URI) whose announce URL points at the **embedded tracker** and whose
    `url-list` points at `/api/raw` as a BEP-19 HTTP webseed.
+   Hashing a big file takes minutes the first time, so clients ask with `async=1`:
+   until the metadata is ready the server answers `202 {"preparing": true, "bytesDone",
+   "bytesTotal"}` with `Retry-After`, and the client polls instead of holding one long
+   request open (which a client, proxy or NAT timeout used to cut, failing the download).
+   Requests without `async=1` still wait for the answer, as before.
 2. The same request starts the server-side WebTorrent client seeding that file.
 3. The browser adds the torrent: it meets the seeder through the embedded WebSocket
    tracker and pulls pieces over **WebRTC data channels**, with the **HTTP webseed as a
@@ -149,6 +154,12 @@ Clicking **Download**:
    verification.
 4. On completion the file is streamed to disk without ever being held in memory as a
    single Blob — see "Saving without running out of memory" below.
+
+The client side of this — waiting while a file is prepared (with retries and backoff),
+the ECDH key exchange, and for headless clients the resumable HTTP download — comes from
+[p2f-lib](https://github.com/murilopereirame/p2f-lib), the C library the PS4 app
+([P2PS](https://github.com/murilopereirame/p2ps)) links natively and the web and desktop
+apps load as WebAssembly. The bulk AES-CTR of the torrent pieces stays on WebCrypto for speed.
 
 No DHT, no PEX, no public trackers: torrents are flagged `private` and both sides only
 announce to the embedded tracker. STUN/TURN are not used — on a VPN, host candidates are

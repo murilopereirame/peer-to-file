@@ -7,8 +7,8 @@
 import type { WTTorrent, WTServer } from './webtorrent-types'
 import { errMessage } from './format'
 import {
-  establishKeyWrap, ensureFileDecryptionPatched, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
-  opfsAvailable, setOpfsWorkerFactory, transferDrainCallbacks, transferKeys, unwrapKeyMaterial
+  createDownloadKeys, ensureFileDecryptionPatched, fetchTorrentMeta, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
+  opfsAvailable, rawKeyToBase64, responseFromError, setOpfsWorkerFactory, transferDrainCallbacks, transferKeys
 } from '@p2f/shared'
 
 // The store lives in @p2f/shared (both apps use it), but the worker it talks
@@ -331,23 +331,17 @@ export class DownloadManager {
         const res = await apiFetch('/api/info')
         return await res.json() as { ecdhPublicKey: string }
       })
-      const keyWrap = await establishKeyWrap(serverPublicKey)
+      const keys = await createDownloadKeys(rawKeyToBase64(serverPublicKey))
 
-      // The server hashes the file on first request — may take a while for
-      // large files, hence the "preparing" state. Re-fetched on every start
-      // so restored downloads get fresh transfer tokens (the infohash — and
-      // with it the OPFS piece store — stays the same for unchanged files).
-      const torrentParams = new URLSearchParams({ path: entryPath, ck: keyWrap.clientPublicKeyBase64 })
-      if (mountId !== undefined) torrentParams.set('mount', String(mountId))
-      const res = await apiFetch(`/api/torrent?${torrentParams.toString()}`)
-      const meta = await res.json() as {
-        infoHash: string
-        length: number
-        magnet: string
-        webseed: string
-        torrentBase64: string
-        encKeyWrapped: string
-      }
+      // The server hashes the file on first request — minutes for a large
+      // file, hence the "preparing" state. p2f-lib waits it out (the server
+      // answers 202 with progress) and retries drops. Re-fetched on every
+      // start so restored downloads get fresh transfer tokens (the infohash —
+      // and with it the OPFS piece store — stays the same for unchanged files).
+      const meta = await fetchTorrentMeta(
+        async (pathAndQuery, signal) => await apiFetch(pathAndQuery, { signal }).catch(responseFromError),
+        { path: entryPath, ck: keys.clientPublicKeyBase64, mount: mountId }
+      )
       const torrentFile = Uint8Array.from(atob(meta.torrentBase64), c => c.charCodeAt(0))
       persistDownload({
         path: entryPath, name, mountId, paused: startPaused,
@@ -358,11 +352,13 @@ export class DownloadManager {
       // The wire carries AES-256-CTR ciphertext (see cipherCache.ts /
       // torrents.ts server-side) — register the key so the patched File
       // iterator (below) can decrypt transparently once a torrent comes back.
-      const keyMaterial = await unwrapKeyMaterial(keyWrap.wrapKey, meta.encKeyWrapped)
+      const transfer = keys.unwrap(meta.encKeyWrapped)
+      keys.dispose()
       transferKeys.set(meta.infoHash, {
-        key: await importCtrKey(keyMaterial.subarray(0, 32)),
-        iv: keyMaterial.subarray(32, 48)
+        key: await importCtrKey(transfer.key),
+        iv: transfer.iv
       })
+      transfer.key.fill(0)
 
       this.client.add(torrentFile, {
         // more parallel webseed connections: smoother, higher throughput
