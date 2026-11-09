@@ -1,0 +1,78 @@
+name: Docker - Publish
+
+# Builds the server image and pushes it to GitHub Container Registry
+# (ghcr.io/<owner>/peer-to-file) so `docker compose up -d` can just pull it.
+#
+# - Release published (e.g. apps-v1.5.0, tagged by apps-version-bump.yml):
+#   pushes 1.5.0, 1.5, 1 and latest.
+# - Push to main: pushes `main` (bleeding edge, not `latest`).
+# - Manual run: pushes a tag named after the chosen branch.
+#
+# Pull requests are covered by the `docker build` job in ci.yml (build only,
+# never pushed).
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+jobs:
+  image:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # arm64 so the image also runs on a Raspberry Pi / ARM home server.
+      # Native deps (node-datachannel, utp-native) ship per-arch prebuilds, so
+      # the runtime stage installs them under emulation for each platform.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # GHCR needs a lowercase image name
+          images: ghcr.io/${{ github.repository_owner }}/peer-to-file
+          flavor: latest=false
+          tags: |
+            type=match,pattern=^(?:apps-)?v(\d+\.\d+\.\d+)$,group=1,enable=${{ github.event_name == 'release' }}
+            type=match,pattern=^(?:apps-)?v(\d+\.\d+)\.\d+$,group=1,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=match,pattern=^(?:apps-)?v(\d+)\.\d+\.\d+$,group=1,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=ref,event=branch
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "### Pushed image"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

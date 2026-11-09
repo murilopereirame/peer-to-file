@@ -1,6 +1,10 @@
 services:
   peer-to-file:
-    build: .
+    # Prebuilt image from GitHub Container Registry: `latest` is the newest
+    # release, `main` follows the main branch, or pin a version like `1.5.0`.
+    image: ghcr.io/murilopereirame/peer-to-file:latest
+    # To build from this checkout instead, swap the line above for:
+    # build: .
     # Host networking is the recommended mode on Linux: the server binds the
     # VPN interface directly and WebRTC traffic avoids Docker's NAT.
     network_mode: host

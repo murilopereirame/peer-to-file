@@ -396,11 +396,25 @@ image declares a `HEALTHCHECK` against it out of the box.
 
 ### Docker Compose (recommended)
 
-Edit `docker-compose.yml` (VPN IP + directory to share), then:
+A prebuilt image is published to GitHub Container Registry for `linux/amd64` and
+`linux/arm64`:
+
+| Tag | What it is |
+| --- | --- |
+| `ghcr.io/murilopereirame/peer-to-file:latest` | newest release |
+| `ghcr.io/murilopereirame/peer-to-file:1.5.0` (also `1.5`, `1`) | a specific release |
+| `ghcr.io/murilopereirame/peer-to-file:main` | latest commit on `main` |
+
+Grab `docker-compose.yml` (you don't need the rest of the repo), edit the VPN IP and the
+directory to share, then:
 
 ```sh
-docker compose up -d --build
+docker compose up -d
+docker compose pull && docker compose up -d   # update later
 ```
+
+To build the image yourself from a checkout instead, replace the `image:` line with
+`build: .` and run `docker compose up -d --build`.
 
 Open `http://<vpn-ip>:8000` from the client machine, and that's it — the page always talks
 to the origin it was loaded from, so there's nothing to type or configure client-side.
@@ -482,6 +496,8 @@ npm run e2e     # real-browser end-to-end: login, pause/resume, server-restart
 CI (GitHub Actions, `.github/workflows/ci.yml`) runs the same three layers on every pull
 request: typecheck + tests on Node 22 and 24, the browser end-to-end, and a Docker image
 build.
+`.github/workflows/docker-publish.yml` pushes the image to GHCR: on a published release
+(version tags + `latest`) and on every push to `main` (`main` tag).
 
 ## Design decisions (v1)
 
