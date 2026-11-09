@@ -1,5 +1,7 @@
-# Build stage: typecheck + build the React client
-FROM node:22-bookworm-slim AS build
+# Build stage: typecheck + build the React client. Its output (client/dist)
+# is plain JS/CSS, so it always runs on the build machine's own architecture,
+# even for a multi-arch build; only the runtime stage runs per platform.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 # packages/shared (@p2f/shared) is a `file:` dependency — npm needs the real
