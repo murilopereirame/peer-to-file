@@ -14,6 +14,9 @@ interface Ctx {
   /** Re-downloads only the damaged/missing pieces of a finished download
    * whose checksum didn't match. */
   repair: (path: string) => void
+  /** Checksums a finished download that couldn't be verified when it
+   * landed against the server's checksum. */
+  verify: (path: string) => void
   stopRepair: (path: string) => void
 }
 
@@ -74,7 +77,8 @@ export function DownloadsProvider ({ children }: { children: React.ReactNode }):
     cancel: (path) => { managerRef.current.cancel(path) },
     remove: (path) => { managerRef.current.remove(path) },
     repair: (path) => { if (app.client) void managerRef.current.repair(app.client, path) },
-    stopRepair: (path) => { managerRef.current.stopRepair(path) }
+    stopRepair: (path) => { managerRef.current.stopRepair(path) },
+    verify: (path) => { if (app.client) void managerRef.current.verify(app.client, path) }
   }), [downloads, app.client])
 
   return <DownloadsContext.Provider value={value}>{children}</DownloadsContext.Provider>

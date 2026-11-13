@@ -62,6 +62,13 @@ function checksumLabel (status: DownloadSnapshot['checksumStatus']): string {
   }
 }
 
+/** A finished download whose checksum couldn't be checked when it landed
+ * (see TorrentDownloadManager.verify). */
+function canVerify (d: DownloadSnapshot): boolean {
+  return d.status === 'done' && d.savedTo !== undefined && d.infoHash !== undefined &&
+    (d.checksumStatus === undefined || d.checksumStatus === 'unavailable')
+}
+
 function repairLabel (entry: DownloadSnapshot): string {
   const r = entry.repair
   if (!r || r.total === 0) return 'checking the saved file…'
@@ -269,6 +276,12 @@ export function DownloadsScreen ({ history, downSpeed, upSpeed }: {
                 {d.status === 'done' && d.checksumStatus === 'ok' && (
                   <span className="stat" style={{ color: 'var(--positive)' }}><CheckIcon size={13} />verified</span>
                 )}
+                {d.status === 'done' && d.checksumStatus === 'verifying' && (
+                  <span className="stat"><GaugeIcon size={13} />verifying…</span>
+                )}
+                {d.status === 'done' && d.checksumStatus === 'unavailable' && (
+                  <span className="stat">not verified</span>
+                )}
                 {d.status === 'repairing' && (
                   <span className="stat"><GaugeIcon size={13} />{repairLabel(d)}</span>
                 )}
@@ -299,6 +312,9 @@ export function DownloadsScreen ({ history, downSpeed, upSpeed }: {
                 )}
                 {d.status === 'done' && d.checksumStatus === 'mismatch' && d.savedTo !== undefined && (
                   <button className="link-btn" onClick={() => downloads.repair(d.path)}>Repair</button>
+                )}
+                {canVerify(d) && (
+                  <button className="link-btn" onClick={() => downloads.verify(d.path)}>Verify</button>
                 )}
                 {d.status === 'repairing' && (
                   <button className="link-btn danger" onClick={() => downloads.stopRepair(d.path)}>Stop</button>

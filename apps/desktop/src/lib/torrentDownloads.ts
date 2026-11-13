@@ -1,6 +1,6 @@
 import {
   ApiError, createDownloadKeys, ensureFileDecryptionPatched, errMessage, getServerEcdhPublicKey, importCtrKey, OpfsChunkStore,
-  opfsAvailable, rawKeyToBase64, transferKeys, type P2FClient, type PrepareProgress
+  opfsAvailable, rawKeyToBase64, transferKeys, type P2FClient, type PrepareProgress, type TorrentMeta
 } from '@p2f/shared'
 import { loadWebTorrent } from './loadWebTorrent'
 import { FsChunkStore } from './fsChunkStore'
@@ -583,6 +583,8 @@ export class TorrentDownloadManager {
    * save()), so this only matters for dropping an `error` one that would
    * otherwise be retried again on the next launch. */
   remove (path: string): void {
+    // Stops a Verify still waiting on the server.
+    this.attempts.delete(path)
     this.snapshots.delete(path)
     void forgetDownload(path)
     this.notify()
@@ -704,6 +706,75 @@ export class TorrentDownloadManager {
     }
   }
 
+  /**
+   * "Verify" on a finished download whose checksum couldn't be checked when
+   * it landed (no completion signal from the save, the file couldn't be
+   * read yet, or the server sent no checksum): asks the server for the
+   * file's current checksum and hashes the saved file against it. A
+   * mismatch is left for the user to Repair, like one found on save.
+   */
+  async verify (client: P2FClient, path: string): Promise<void> {
+    const snap = this.snapshots.get(path)
+    if (!snap || snap.status !== 'done' || !snap.savedTo || !snap.infoHash) return
+    if (snap.checksumStatus === 'ok' || snap.checksumStatus === 'verifying') return
+    const { savedTo, infoHash } = snap
+    const attempt = Symbol(path)
+    this.attempts.set(path, attempt)
+    this.set(path, { checksumStatus: 'verifying', message: undefined })
+    let outcome: { checksumStatus: ChecksumStatus, message?: string }
+    try {
+      const { meta, keys } = await this.freshMeta(client, path, attempt, 'verifying the file')
+      keys.dispose()
+      if (!meta.plainSha256) {
+        outcome = { checksumStatus: 'unavailable', message: 'the server does not provide a checksum for this file' }
+      } else if (meta.infoHash !== infoHash) {
+        outcome = { checksumStatus: 'mismatch', message: 'the file changed on the server since it was downloaded — download it again' }
+      } else {
+        const actual = await hashFile(savedTo)
+        if (actual === null) {
+          outcome = { checksumStatus: 'unavailable', message: `cannot read ${savedTo} — was it moved or deleted?` }
+        } else if (actual === meta.plainSha256) {
+          outcome = { checksumStatus: 'ok' }
+        } else {
+          console.warn('[p2f] checksum mismatch', { path: savedTo, expected: meta.plainSha256, actual })
+          outcome = { checksumStatus: 'mismatch' }
+        }
+      }
+    } catch (err) {
+      const stopped = err instanceof DownloadAborted || this.attempts.get(path) !== attempt
+      outcome = { checksumStatus: 'unavailable', message: stopped ? undefined : `verify failed: ${errMessage(err)}` }
+    } finally {
+      if (this.attempts.get(path) === attempt) this.attempts.delete(path)
+    }
+    // Cleared while it ran.
+    if (!this.snapshots.has(path)) return
+    this.set(path, { message: undefined, ...outcome })
+  }
+
+  /** Fresh metadata for a finished download (verify and repair): the
+   * transfer token from the original request may have expired during a
+   * long download, and the info hash shows whether the file changed on the
+   * server since. The caller disposes `keys`. */
+  private async freshMeta (client: P2FClient, path: string, attempt: symbol, what: string): Promise<{
+    meta: TorrentMeta
+    keys: Awaited<ReturnType<typeof createDownloadKeys>>
+  }> {
+    const mountId = this.snapshots.get(path)?.mountId
+    const serverPublicKey = await this.withRetry(path, attempt, what,
+      async () => await getServerEcdhPublicKey(async () => await client.info()))
+    const keys = await createDownloadKeys(rawKeyToBase64(serverPublicKey))
+    try {
+      const meta = await this.withRetry(path, attempt, what,
+        async () => await client.torrentMeta(path, keys.clientPublicKeyBase64, mountId, {
+          onPreparing: () => { if (this.attempts.get(path) !== attempt) throw new DownloadAborted() }
+        }))
+      return { meta, keys }
+    } catch (err) {
+      keys.dispose()
+      throw err
+    }
+  }
+
   /** "Repair" on a finished download whose checksum didn't match: checks the
    * saved file piece by piece and re-downloads only the bad pieces. */
   async repair (client: P2FClient, path: string): Promise<void> {
@@ -727,11 +798,8 @@ export class TorrentDownloadManager {
    * Fixes the saved file at `savedTo` in place (see electron/pieceRepair.cts):
    * every piece is checked against the torrent's piece hashes, and only the
    * missing or damaged ones are fetched again from the server's webseed, then
-   * the whole file is checksummed again.
-   *
-   * Asks the server for fresh metadata first: the webseed's transfer token
-   * from the original request may have expired during a long download, and
-   * it confirms the file hasn't changed on the server since.
+   * the whole file is checksummed again. Asks the server for fresh
+   * metadata first (see freshMeta).
    */
   private async runRepair (
     client: P2FClient, path: string, savedTo: string, infoHash: string
@@ -742,14 +810,7 @@ export class TorrentDownloadManager {
     this.repairIds.set(path, repairId)
     this.set(path, { status: 'repairing', message: undefined, repair: { phase: 'verifying', done: 0, total: 0 } })
     try {
-      const mountId = this.snapshots.get(path)?.mountId
-      const serverPublicKey = await this.withRetry(path, attempt, 'starting the repair',
-        async () => await getServerEcdhPublicKey(async () => await client.info()))
-      const keys = await createDownloadKeys(rawKeyToBase64(serverPublicKey))
-      const meta = await this.withRetry(path, attempt, 'starting the repair',
-        async () => await client.torrentMeta(path, keys.clientPublicKeyBase64, mountId, {
-          onPreparing: () => { if (this.attempts.get(path) !== attempt) throw new DownloadAborted() }
-        }))
+      const { meta, keys } = await this.freshMeta(client, path, attempt, 'starting the repair')
       if (meta.infoHash !== infoHash) {
         keys.dispose()
         return { checksumStatus: 'mismatch', message: 'the file changed on the server since it was downloaded — download it again' }
